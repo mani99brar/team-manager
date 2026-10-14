@@ -1,11 +1,12 @@
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState, type FocusEvent as ReactFocusEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react'
-import { layoutStage, NODE_HEIGHT, NODE_WIDTH, PHONE_STAGE_WIDTH, stepFrom, type Direction, type StageLayout } from './layout.ts'
+import { fitView, layoutStage, NODE_HEIGHT, NODE_WIDTH, PHONE_STAGE_WIDTH, stepFrom, type Direction, type StageLayout } from './layout.ts'
 import type { StageNode } from './model.ts'
 import { Glyph } from './Glyph.tsx'
 import { KIND_LABEL } from '../status.ts'
 import { stageExecutor } from './executor.ts'
 import { toneClass, type Tone } from '../tone.ts'
 import { formatSpan } from '../time.ts'
+import { shortStepLabel } from '../steps.ts'
 
 export type StageHandle = {
   /** Centres a step (zooming in from the overview) and opens it. */
@@ -25,13 +26,14 @@ type Props = {
   reservedLeft: number
   /** Whether the step sheet is open: the fit and the reveal leave it room. */
   sheetOpen: boolean
+  /** Whether the one-line cue sits under the stage: its arrival or removal is a size the first view is fitted to again. */
+  cued?: boolean
 }
 
 type View = { x: number; y: number; k: number }
 
 const MIN_SCALE = 0.15
 const MAX_SCALE = 2.6
-const FIT_MAX_SCALE = 1.4
 const SHEET_WIDTH = 440
 /** The share of a phone stage the bottom sheet leaves visible above it. */
 const PHONE_SHEET_FREE = 0.22
@@ -43,6 +45,16 @@ const LEGEND_TONES: { tone: Tone; word: string }[] = [
   { tone: 'ok', word: 'succeeded' }, { tone: 'run', word: 'running' }, { tone: 'warn', word: 'needs you' },
   { tone: 'fail', word: 'failed or blocked' }, { tone: 'pause', word: 'paused' }, { tone: 'idle', word: 'pending' },
 ]
+
+/** The longest label a chip keeps whole; a longer one reads as the step strip's short label (the accessible name keeps the full one). */
+const CHIP_LABEL_MAX = 18
+
+/** The label a chip carries: whole when short, else the step strip's short label, with a lane review's long label compacted. */
+function chipLabelOf(node: StageNode): string {
+  if (node.label.length <= CHIP_LABEL_MAX) return node.label
+  const short = shortStepLabel({ node_id: node.id, label: node.label })
+  return short.length <= CHIP_LABEL_MAX ? short : short.replace(/^Lane review · (.+) · round (\d+)$/, 'Review $1 r$2')
+}
 
 /** One step's card: the full card at the near levels, the chip at the overview; the accessible name carries it all. */
 function StepCard({ node, position, current, selected, now }: { node: StageNode; position: { x: number; y: number }; current: boolean; selected: boolean; now: boolean }) {
@@ -92,7 +104,7 @@ function StepCard({ node, position, current, selected, now }: { node: StageNode;
         </span>
       )}
       <span className="n-last">{last ? `${last.at.slice(11, 16)} · ${last.text}` : node.did ?? 'No event recorded yet.'}</span>
-      <span className="n-chip"><span className="c1"><Glyph tone={node.tone} /><span>{node.label}</span></span><span className="c2">{node.facts}</span></span>
+      <span className="n-chip"><span className="c1"><Glyph tone={node.tone} /><span data-chip-label>{chipLabelOf(node)}</span></span><span className="c2">{node.facts}</span></span>
     </button>
   )
 }
@@ -105,7 +117,10 @@ function StepCard({ node, position, current, selected, now }: { node: StageNode;
  * coloured by state only, with a glyph and a word repeating every colour; dashed edges lead to steps that have not started,
  * a dashed green return mark leads from a repair session back to the step it re-enters.
  */
-export const RunStage = forwardRef<StageHandle, Props>(function RunStage({ nodes, nowId, selectedId, onSelect, children, reservedLeft, sheetOpen }, ref) {
+/** A width change under this many pixels is a scrollbar, not a new window: a view the operator moved stays. */
+const SCROLLBAR_SLACK = 24
+
+export const RunStage = forwardRef<StageHandle, Props>(function RunStage({ nodes, nowId, selectedId, onSelect, children, reservedLeft, sheetOpen, cued = false }, ref) {
   const stageRef = useRef<HTMLDivElement>(null)
   const worldRef = useRef<HTMLDivElement>(null)
   const tagRef = useRef<HTMLSpanElement>(null)
@@ -124,10 +139,16 @@ export const RunStage = forwardRef<StageHandle, Props>(function RunStage({ nodes
   const layoutRef = useRef(layout)
   const sheetRef = useRef(sheetOpen)
   const reservedRef = useRef(reservedLeft)
+  const anchorRef = useRef<string | null>(null)
+  // The step the first view is placed on: the one the run is at, else the first step.
+  const anchorId = nowId !== null && nodes.some(node => node.id === nowId) ? nowId : nodes[0]?.id ?? null
+  // Set once the operator moved the picture (a drag, a zoom, "Fit the graph"): the view then stays where they put it.
+  const touched = useRef(false)
   useLayoutEffect(() => {
     layoutRef.current = layout
     sheetRef.current = sheetOpen
     reservedRef.current = reservedLeft
+    anchorRef.current = anchorId
   })
 
   /** Writes the view to the world and the stage: the transform, the detail level and the grid that moves with the picture. */
@@ -139,7 +160,7 @@ export const RunStage = forwardRef<StageHandle, Props>(function RunStage({ nodes
     world.style.transform = `translate(${x}px, ${y}px) scale(${k})`
     const detail = levelOf(k)
     world.dataset.level = String(detail)
-    world.style.setProperty('--inv', detail === 0 ? Math.min(1 / k, 3.4).toFixed(3) : '1')
+    world.style.setProperty('--inv', detail === 0 ? Math.min(1 / k, 2.4).toFixed(3) : '1')
     stage.style.setProperty('--gs', `${24 * k}px`)
     stage.style.setProperty('--gx', `${x}px`)
     stage.style.setProperty('--gy', `${y}px`)
@@ -153,31 +174,25 @@ export const RunStage = forwardRef<StageHandle, Props>(function RunStage({ nodes
   const zoomAt = useCallback((factor: number, cx: number, cy: number) => {
     const k = Math.max(MIN_SCALE, Math.min(MAX_SCALE, view.current.k * factor))
     const ratio = k / view.current.k
+    touched.current = true
     view.current = { x: cx - (cx - view.current.x) * ratio, y: cy - (cy - view.current.y) * ratio, k }
     apply()
   }, [apply])
 
-  const fit = useCallback(() => {
+  /** `first` is the view the page opens on (never under 60 %, on the step the run is at); false is "Fit the graph", the whole picture. */
+  const fit = useCallback((first: boolean) => {
     const stage = stageRef.current
     if (!stage) return
     const current = layoutRef.current
-    const W = stage.clientWidth
-    const H = stage.clientHeight
-    const phone = current.dir === 'TB'
-    const pad = phone ? 24 : 56
-    const top = phone ? 40 : 40
-    let k = Math.min((W - pad * 2) / current.width, (H - top - 90) / current.height)
-    if (phone) k = Math.min((W - pad * 2) / current.width, 1)
-    k = Math.max(MIN_SCALE, Math.min(FIT_MAX_SCALE, k))
-    const left = !phone ? reservedRef.current : 0
-    if (!phone) k = Math.max(MIN_SCALE, Math.min(k, (W - left - pad * 2) / current.width))
-    view.current = {
-      k,
-      x: left + (W - left - current.width * k) / 2,
-      y: phone ? top : top + Math.max(0, (H - top - 80 - current.height * k) / 2),
-    }
+    const anchor = anchorRef.current === null ? null : current.positions.get(anchorRef.current) ?? null
+    touched.current = !first
+    view.current = fitView({
+      width: stage.clientWidth, height: stage.clientHeight, graph: current, dir: current.dir,
+      reserved: reservedRef.current, first, anchor: anchor === null ? null : { x: anchor.x, y: anchor.y },
+    })
     apply()
   }, [apply])
+  const fitWhole = useCallback(() => fit(false), [fit])
 
   /** Pans just enough for a step to be inside the visible part of the stage (beside the sheet, above a phone's sheet). */
   const reveal = useCallback((id: string) => {
@@ -211,7 +226,7 @@ export const RunStage = forwardRef<StageHandle, Props>(function RunStage({ nodes
   }, [reveal])
 
   useImperativeHandle(ref, () => ({
-    fit,
+    fit: fitWhole,
     goTo(id) {
       const stage = stageRef.current
       const position = layoutRef.current.positions.get(id)
@@ -219,6 +234,7 @@ export const RunStage = forwardRef<StageHandle, Props>(function RunStage({ nodes
       const W = stage.clientWidth
       const H = stage.clientHeight
       const phone = W <= PHONE_STAGE_WIDTH
+      touched.current = true
       if (view.current.k < 0.6) view.current.k = Math.min(0.9, Math.max(view.current.k, 0.7))
       const vw = phone ? W : W - SHEET_WIDTH
       const vh = phone ? H * PHONE_SHEET_FREE : H
@@ -228,16 +244,31 @@ export const RunStage = forwardRef<StageHandle, Props>(function RunStage({ nodes
       setCurrent(id)
       onSelect(id)
     },
-  }), [apply, fit, onSelect])
+  }), [apply, fitWhole, onSelect])
 
-  // The flow direction follows the stage's width, and the picture is fitted again whenever the stage changes size (the
-  // frame takes its height after the first paint; a window resize or a phone's rotation changes it later).
+  // The flow direction follows the stage's width. The first view is fitted when the stage first has a size, when its width
+  // changes (a window resize, the dock's column appearing, a rotation) and when the cue under it appears or goes; a height
+  // change alone leaves the view where the operator put it. A phone's flow is fitted again on every size change. Once the
+  // operator has moved the view, a desk keeps it unless the flow turns or the width moves 24 px or more from the width it was
+  // last fitted at (a scrollbar appearing is smaller), and the cue arriving does not take it back.
+  const fitted = useRef<{ width: number; ready: boolean; phone: boolean }>({ width: -1, ready: false, phone: false })
+  useLayoutEffect(() => { if (!touched.current) fitted.current.ready = false }, [cued])
   useLayoutEffect(() => {
     const stage = stageRef.current
     if (!stage) return
     const measure = () => {
-      setDir(stage.clientWidth < PHONE_STAGE_WIDTH ? 'TB' : 'LR')
-      fit()
+      const width = stage.clientWidth
+      const phone = width < PHONE_STAGE_WIDTH
+      setDir(phone ? 'TB' : 'LR')
+      if (stage.clientHeight === 0) return
+      const last = fitted.current
+      const moved = touched.current
+        ? last.phone !== phone || Math.abs(last.width - width) >= SCROLLBAR_SLACK
+        : last.width !== width
+      if (phone || !last.ready || moved) {
+        fitted.current = { width, ready: true, phone }
+        fit(true)
+      }
     }
     measure()
     if (typeof ResizeObserver === 'undefined') return
@@ -246,7 +277,9 @@ export const RunStage = forwardRef<StageHandle, Props>(function RunStage({ nodes
     return () => observer.disconnect()
   }, [fit])
   const shape = `${dir}:${layout.columns.map(column => column.length).join(',')}`
-  useLayoutEffect(() => { fit() }, [fit, shape])
+  useLayoutEffect(() => { if ((stageRef.current?.clientHeight ?? 0) > 0) fit(true) }, [fit, shape])
+  // The step the run is at arrives with the page's later reads: an untouched first view moves onto it.
+  useLayoutEffect(() => { if (!touched.current && (stageRef.current?.clientHeight ?? 0) > 0) fit(true) }, [fit, anchorId])
 
   // The roving focus starts on the step the run is at, else the first step; a step that disappeared gives it back.
   const current = chosen !== null && nodes.some(node => node.id === chosen) ? chosen : nowId ?? nodes[0]?.id ?? null
@@ -296,6 +329,7 @@ export const RunStage = forwardRef<StageHandle, Props>(function RunStage({ nodes
         stage.setPointerCapture(event.pointerId)
         stage.classList.add('dragging')
       }
+      touched.current = true
       view.current.x = drag.current.vx + dx
       view.current.y = drag.current.vy + dy
       apply()
@@ -320,6 +354,7 @@ export const RunStage = forwardRef<StageHandle, Props>(function RunStage({ nodes
       const rect = stage.getBoundingClientRect()
       if (event.ctrlKey || (Math.abs(event.deltaY) >= Math.abs(event.deltaX) && !event.shiftKey)) zoomAt(Math.exp(-event.deltaY * 0.0018), event.clientX - rect.left, event.clientY - rect.top)
       else {
+        touched.current = true
         view.current.x -= event.deltaX
         view.current.y -= event.deltaY
         apply()
@@ -354,7 +389,7 @@ export const RunStage = forwardRef<StageHandle, Props>(function RunStage({ nodes
     if (target?.closest('.sb-dock') && !['+', '=', '-', '0'].includes(event.key)) return
     if (event.key === '+' || event.key === '=') { event.preventDefault(); const { cx, cy } = centre(); zoomAt(1.3, cx, cy); return }
     if (event.key === '-') { event.preventDefault(); const { cx, cy } = centre(); zoomAt(1 / 1.3, cx, cy); return }
-    if (event.key === '0') { event.preventDefault(); fit(); return }
+    if (event.key === '0') { event.preventDefault(); fitWhole(); return }
     if (event.key === 'ArrowRight' || event.key === 'ArrowLeft' || event.key === 'ArrowDown' || event.key === 'ArrowUp') {
       event.preventDefault()
       if (current === null) return
@@ -394,24 +429,26 @@ export const RunStage = forwardRef<StageHandle, Props>(function RunStage({ nodes
       onKeyDown={onKeyDown}
     >
       <p className="sb-hint" aria-hidden="true"><kbd>←↑→↓</kbd> walk · <kbd>Enter</kbd> open · <kbd>+</kbd><kbd>−</kbd> zoom · <kbd>0</kbd> fit · drag to pan</p>
-      <div ref={worldRef} className="sb-world" data-level={level} style={{ width: layout.width, height: layout.height }}>
-        <svg className="sb-edges" width={layout.width} height={layout.height} aria-hidden="true">
-          <defs>
-            <marker id="sb-arrow" viewBox="0 0 10 10" refX="2" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" /></marker>
-          </defs>
-          {layout.edges.map(edge => (
-            <path key={`${edge.from}>${edge.to}`} data-edge={`${edge.from}>${edge.to}`} className={`${edge.todo ? 'todo' : ''}${selectedId !== null && (edge.from === selectedId || edge.to === selectedId) ? ' hot' : ''}`} d={edge.path} markerEnd="url(#sb-arrow)" />
-          ))}
-          {layout.returns.map(mark => (
-            <path key={`${mark.from}>${mark.to}`} data-return={`${mark.from}>${mark.to}`} className={`ret${selectedId !== null && (mark.from === selectedId || mark.to === selectedId) ? ' hot' : ''}`} d={mark.path} />
-          ))}
-        </svg>
-        <div className="sb-nodes" role="group" aria-label="Steps" data-testid="workflow-graph" onClick={onClickNodes} onFocus={onFocusNodes}>
-          {nodes.map(node => {
-            const position = layout.positions.get(node.id)
-            if (!position) return null
-            return <StepCard key={node.id} node={node} position={position} current={current === node.id} selected={selectedId === node.id} now={nowId === node.id} />
-          })}
+      <div className="sb-viewport">
+        <div ref={worldRef} className="sb-world" data-level={level} style={{ width: layout.width, height: layout.height }}>
+          <svg className="sb-edges" width={layout.width} height={layout.height} aria-hidden="true">
+            <defs>
+              <marker id="sb-arrow" viewBox="0 0 10 10" refX="2" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" /></marker>
+            </defs>
+            {layout.edges.map(edge => (
+              <path key={`${edge.from}>${edge.to}`} data-edge={`${edge.from}>${edge.to}`} className={`${edge.todo ? 'todo' : ''}${selectedId !== null && (edge.from === selectedId || edge.to === selectedId) ? ' hot' : ''}`} d={edge.path} markerEnd="url(#sb-arrow)" />
+            ))}
+            {layout.returns.map(mark => (
+              <path key={`${mark.from}>${mark.to}`} data-return={`${mark.from}>${mark.to}`} className={`ret${selectedId !== null && (mark.from === selectedId || mark.to === selectedId) ? ' hot' : ''}`} d={mark.path} />
+            ))}
+          </svg>
+          <div className="sb-nodes" role="group" aria-label="Steps" data-testid="workflow-graph" onClick={onClickNodes} onFocus={onFocusNodes}>
+            {nodes.map(node => {
+              const position = layout.positions.get(node.id)
+              if (!position) return null
+              return <StepCard key={node.id} node={node} position={position} current={current === node.id} selected={selectedId === node.id} now={nowId === node.id} />
+            })}
+          </div>
         </div>
       </div>
       <div className="sb-legend" id="sb-legend" hidden={!legendOpen}>
@@ -429,7 +466,7 @@ export const RunStage = forwardRef<StageHandle, Props>(function RunStage({ nodes
         <span className="sb-level" data-testid="stage-level" data-level={level}><span ref={tagRef}>100%</span><b>{LEVELS[level]}</b></span>
         <div className="sb-zoom">
           <button type="button" aria-label="Zoom out" onClick={() => { const { cx, cy } = centre(); zoomAt(1 / 1.3, cx, cy) }}><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 10h12" stroke="currentColor" strokeWidth="2" strokeLinecap="round" /></svg></button>
-          <button type="button" aria-label="Fit the graph" onClick={fit}><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" aria-hidden="true"><path d="M3 7V3h4M13 3h4v4M17 13v4h-4M7 17H3v-4" /></svg></button>
+          <button type="button" aria-label="Fit the graph" onClick={fitWhole}><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" aria-hidden="true"><path d="M3 7V3h4M13 3h4v4M17 13v4h-4M7 17H3v-4" /></svg></button>
           <button type="button" aria-label="Zoom in" onClick={() => { const { cx, cy } = centre(); zoomAt(1.3, cx, cy) }}><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 10h12M10 4v12" stroke="currentColor" strokeWidth="2" strokeLinecap="round" /></svg></button>
         </div>
       </div>

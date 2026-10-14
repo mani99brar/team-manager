@@ -7,6 +7,7 @@
  */
 import { test, expect, type Locator, type Page } from '@playwright/test'
 import { UI_CHANGED_FILES } from './fixtures.ts'
+import { RUN_SESSIONS, UX_SESSIONS_WORKFLOW_ID } from './fixtures/sessions.ts'
 import { RUN_REPAIRED, UX_RUN_WORKFLOW_ID } from './fixtures/ux-run.ts'
 import { RUN_REJECTED_CHECKS, UX_VERIFY_WORKFLOW_ID } from './fixtures/ux-verify.ts'
 import {
@@ -92,8 +93,12 @@ test(`[scenario:revamp-run] The run page shows the run's tone on the identity li
   await expect(stage).toHaveAttribute('data-direction', 'LR')
   const fit = await stage.evaluate(element => ({ scroll: (element as unknown as { scrollWidth: number }).scrollWidth, client: (element as unknown as { clientWidth: number }).clientWidth }))
   expect(fit.scroll, 'the stage does not scroll sideways').toBeLessThanOrEqual(fit.client)
-  await expect(graphNode(page, 'integrate')).toBeInViewport()
   expect(await pageWidth(page)).toBeLessThanOrEqual(1440)
+  // The first view opens readable (60 % or more) and pans; "Fit the graph" puts the last step in the viewport.
+  expect(Number.parseInt((await page.getByTestId('stage-level').locator('span').first().innerText()).replace('%', ''), 10)).toBeGreaterThanOrEqual(60)
+  await page.getByRole('button', { name: 'Fit the graph' }).click()
+  await expect(graphNode(page, 'integrate')).toBeInViewport()
+  await expect(graphNode(page, 'challenge')).toBeInViewport()
 
   // Cards toned by status: the band in the tone, the status word on the tone's soft colour, the glyph repeats it; the legend.
   for (const id of ['challenge', 'verify_ui', 'integrate', 'review']) {
@@ -123,9 +128,13 @@ test(`[scenario:revamp-run] The run page shows the run's tone on the identity li
   await stepSheet(page).getByRole('button', { name: 'Close step details' }).click()
   await attach(page, testInfo, 'revamp-run')
 
-  // Narrower, the graph is fitted again: still left to right, the last step in view, the page never wider than the window.
+  // Narrower, the graph is placed again: still left to right, the page never wider than the window, and after "Fit the graph"
+  // the last step and the first are both in the viewport.
   await page.setViewportSize({ width: 1024, height: 900 })
   await expect(stage).toHaveAttribute('data-direction', 'LR')
+  const narrowFit = await stage.evaluate(element => ({ scroll: (element as unknown as { scrollWidth: number }).scrollWidth, client: (element as unknown as { clientWidth: number }).clientWidth }))
+  expect(narrowFit.scroll, 'the stage does not scroll sideways at 1024 px').toBeLessThanOrEqual(narrowFit.client)
+  await page.getByRole('button', { name: 'Fit the graph' }).click()
   await expect(graphNode(page, 'integrate')).toBeInViewport()
   await expect(graphNode(page, 'challenge')).toBeInViewport()
   expect(await pageWidth(page)).toBeLessThanOrEqual(1024)
@@ -735,7 +744,7 @@ test(`Every button on the run and node pages is on the read-only allow-list and 
   await page.clock.install({ time: new Date(REVAMP_NOW) })
   await page.setViewportSize({ width: 1440, height: 900 })
   const ids = ['general', 'coverage', 'ui', 'adapter']
-  const allowed = new RegExp(`^(Copy|Show contents|Hide contents|Show lines|More|Less|Run|Assignment|Local|UTC|Rendered|Source|Close|All \\d+|Show all \\d+|#\\d+|message|Open only \\d+|Open P0\\/P1 \\d+|P[012] \\d+|Legend|Zoom out|Zoom in|Fit the graph|Close step details|(?:${ids.join('|')}) \\d+)$`)
+  const allowed = new RegExp(`^(Copy|Show contents|Hide contents|Show lines|More|Less|Run|Assignment|Local|UTC|Rendered|Source|Close|All \\d+|Show all \\d+|#\\d+|message|Open only \\d+|Open P0\\/P1 \\d+|P[012] \\d+|Legend|Zoom out|Zoom in|Fit the graph|Show in graph|Show command|Hide command|Close step details|(?:${ids.join('|')}) \\d+)$`)
   const command = /[/\\$`]|\b(npm|npx|git|workflow|node|python|bash)\b/
   const seen = new Set<string>()
   const check = async (where: string) => {
@@ -784,6 +793,18 @@ test(`Every button on the run and node pages is on the read-only allow-list and 
     await openStepSheet(page, nodeId!)
     expect(page.url()).toBe(runPage)
   }
+  // "Show in graph" only centres the step and opens its sheet; "Open <step> ›" is the link that leaves the page.
+  await stepSheet(page).getByRole('button', { name: 'Close step details' }).click()
+  await liveDock(page).getByRole('button', { name: 'Show in graph' }).click()
+  await expect(stepSheet(page)).toBeVisible()
+  expect(page.url()).toBe(runPage)
+  await check(`${RUN_REVAMP_BLOCKED} (Show in graph, the sheet open)`)
+  // The Sessions table's toggle on the run page of a run with sessions: "Show command" then "Hide command", both on the list.
+  await page.goto(runUrl(RUN_SESSIONS, undefined, UX_SESSIONS_WORKFLOW_ID))
+  await expect(page.getByTestId('sessions-section')).toBeVisible()
+  await check(`${RUN_SESSIONS} (Sessions table)`)
+  await page.getByTestId('session-resume-toggle').first().click()
+  await check(`${RUN_SESSIONS} (a command shown)`)
   // Every step of the finished run, the blocked review and the waiting worker.
   await openRun(page, revampUrl(RUN_REVAMP_DONE), 'succeeded')
   const steps = await attributes(page.getByTestId('workflow-graph').locator('[data-graph-node]'), 'data-graph-node')
@@ -805,5 +826,5 @@ test(`Every button on the run and node pages is on the read-only allow-list and 
   await expect(page.getByTestId('worker-figures')).toBeVisible()
   await check(`${RUN_REVAMP_RUNNING}/launch_adapter`)
   // The new run-page tools and the filter row were among the buttons read.
-  for (const text of ['Legend', 'Zoom in', 'Fit the graph', 'Zoom out', 'Close step details', 'All 4', 'Open P0/P1 1', 'P0 0', 'P1 1', 'P2 3', 'Open only 3', 'general 2', 'coverage 2', 'ui 2', 'adapter 2', 'More']) expect(seen.has(text), text).toBe(true)
+  for (const text of ['Legend', 'Zoom in', 'Fit the graph', 'Zoom out', 'Close step details', 'Show in graph', 'Show command', 'Hide command', 'All 4', 'Open P0/P1 1', 'P0 0', 'P1 1', 'P2 3', 'Open only 3', 'general 2', 'coverage 2', 'ui 2', 'adapter 2', 'More']) expect(seen.has(text), text).toBe(true)
 })

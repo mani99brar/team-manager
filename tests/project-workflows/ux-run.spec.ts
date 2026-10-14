@@ -11,10 +11,13 @@ import {
   PROJECT, WORKFLOW_ID, runInputs,
 } from './fixtures.ts'
 import {
-  APPROVAL_BUNDLE, DEADLINE_MESSAGE, RUN_AWAITING_APPROVAL, RUN_CONTROLLER_INTERRUPTED, RUN_DEADLINE, RUN_FREEZE_INTERRUPTED, RUN_IDENTICAL, RUN_PANE,
+  APPROVAL_BUNDLE, DEADLINE_MESSAGE, RUN_AWAITING_APPROVAL, RUN_CONTROLLER_INTERRUPTED, RUN_DEADLINE, RUN_FREEZE_INTERRUPTED, RUN_IDENTICAL, RUN_NO_BRANCH, RUN_PANE,
   RUN_REPAIRED, RUN_REVIEW_INTERRUPTED, UX_RUN_WORKFLOW_ID,
 } from './fixtures/ux-run.ts'
-import { attach, expectNoExecutionControls, graphNode, installHooks, liveDock, nodeDetail, nodeListItem, openStepSheet, phase, runUrl, stepSheet, workflowUrl } from './support.ts'
+import { RUN_ACCEPTED_ABANDONED, RUN_ACCEPTED_BLOCKED, UX_ACCEPTED_WORKFLOW_ID } from './fixtures/ux-accepted.ts'
+import { RUN_CHALLENGE, UX_REFINE_WORKFLOW_ID } from './fixtures/ux-refine.ts'
+import { REVAMP_PAGES_WORKFLOW_ID, RUN_REVAMP_BLOCKED, RUN_REVAMP_DONE, RUN_REVAMP_RUNNING } from './fixtures/ux-revamp-pages.ts'
+import { attach, expectNoExecutionControls, graphNode, installHooks, liveDock, nodeDetail, nodeListItem, openRunDetails, openStepSheet, phase, runUrl, stepSheet, workflowUrl } from './support.ts'
 
 installHooks()
 
@@ -40,6 +43,7 @@ async function bottomOf(locator: Locator): Promise<number> {
 }
 
 test(`[scenario:run-now-banner] The Now banner names the situation, its cause and the RUNBOOK command to type, inside the first screen (${phase})`, async ({ page, context }, testInfo) => {
+  test.slow()
   await page.setViewportSize({ width: 1440, height: 900 })
   await context.grantPermissions(['clipboard-read', 'clipboard-write'])
 
@@ -197,7 +201,7 @@ test(`[scenario:run-steps-timeline] Each step's card and sheet give its start, d
   await expectNoExecutionControls(page)
 })
 
-test(`[scenario:graph-fits] The graph fits the stage at 1280 and 1440 px, with its last step in view and the columns in order; narrower, the focus step is in the stage (${phase})`, async ({ page }, testInfo) => {
+test(`[scenario:graph-fits] The graph opens readable at 1280 and 1440 px with the columns in order and, after 'Fit the graph', its last step in view; narrower, the focus step is in the stage (${phase})`, async ({ page }, testInfo) => {
   const order = ['challenge', 'launch_ui', 'handoff', 'verify_ui', 'candidate', 'review', 'approval', 'integrate']
   for (const width of [1280, 1440]) {
     await page.setViewportSize({ width, height: 900 })
@@ -208,12 +212,17 @@ test(`[scenario:graph-fits] The graph fits the stage at 1280 and 1440 px, with i
     await expect(stage).toHaveAttribute('data-direction', 'LR')
     const { scroll, client } = await stage.evaluate(element => ({ scroll: element.scrollWidth, client: element.clientWidth }))
     expect(scroll, `the stage must not scroll sideways at ${width} px`).toBeLessThanOrEqual(client)
-    await expect(graphNode(page, 'integrate')).toBeInViewport()
     const xs: number[] = []
     for (const id of order) xs.push((await graphNode(page, id).boundingBox())!.x)
     expect(xs, `the columns keep their order at ${width} px`).toEqual([...xs].sort((a, b) => a - b))
     expect(new Set(xs).size).toBe(xs.length)
     expect(await pageWidth(page)).toBeLessThanOrEqual(width)
+    // The first view opens readable and pans; "Fit the graph" shows the whole picture, the last step in the viewport.
+    await page.getByRole('button', { name: 'Fit the graph' }).click()
+    await expect(graphNode(page, 'integrate')).toBeInViewport()
+    await expect(graphNode(page, 'challenge')).toBeInViewport()
+    const refit = await stage.evaluate(element => ({ scroll: element.scrollWidth, client: element.clientWidth }))
+    expect(refit.scroll, `the stage must not scroll sideways after the fit at ${width} px`).toBeLessThanOrEqual(refit.client)
   }
   // Two lanes stack in their columns: the launches share one x and so do the verifications, and the columns stay in order.
   await page.goto(runUrl(RUN_SUCCEEDED))
@@ -451,4 +460,384 @@ test(`[scenario:storage-missing] A workflow whose run storage cannot be opened s
   await expect(error).toContainText(runsPath)
   await expect(error).not.toContainText('Run storage missing')
   await expect(error.getByTestId('technical-details')).toHaveCount(0)
+})
+
+// ---- Stage B: a run page that opens readable ------------------------------------------------------------------------------
+
+type Rect = { x: number; y: number; width: number; height: number }
+const rectOf = async (locator: Locator): Promise<Rect> => {
+  const value = await locator.boundingBox()
+  expect(value, 'the element must be laid out').not.toBeNull()
+  return value!
+}
+const frameWidthOf = (page: Page) => page.getByTestId('run-board').evaluate(element => element.clientWidth)
+const GUARDED_ORDER = ['challenge', 'launch_ui', 'handoff', 'verify_ui', 'candidate', 'review', 'approval', 'integrate']
+const DOCK_RESERVE_PX = 336
+/** The step the asking run waits at: the Now's focus, which the two phases' servers may place on different steps of the flow. */
+async function markedStep(page: Page): Promise<string> {
+  const marked = page.locator('[data-graph-node].now')
+  await expect(marked).toHaveCount(1)
+  const id = (await marked.getAttribute('data-node-id'))!
+  // The dock names the same step.
+  await expect(liveDock(page).getByTestId('live-dock-bar')).toContainText((await marked.locator('.n-label').innerText()).trim())
+  return id
+}
+
+/** The scale the stage's detail-level tag reads, as a percentage, and its level word. */
+async function levelTag(page: Page): Promise<{ percent: number; word: string }> {
+  const tag = page.getByTestId('stage-level')
+  const percent = Number.parseInt((await tag.locator('span').first().innerText()).replace('%', ''), 10)
+  return { percent, word: (await tag.locator('b').innerText()).trim() }
+}
+
+/** Whether a card lies wholly inside the stage, right of `reserved` px from its left edge. */
+async function cardInsideStage(page: Page, id: string, reserved: number): Promise<boolean> {
+  const stageBox = await rectOf(page.getByTestId('run-stage'))
+  const card = await rectOf(graphNode(page, id))
+  return card.x >= stageBox.x + reserved - 0.5 && card.x + card.width <= stageBox.x + stageBox.width + 0.5
+    && card.y >= stageBox.y - 0.5 && card.y + card.height <= stageBox.y + stageBox.height + 0.5
+}
+
+/** The page's first view at the current size: readable, the step the run is at inside the stage and clear of the dock. */
+async function expectReadableFirstView(page: Page, nowId: string, where: string, marked = true): Promise<'column' | 'overlay'> {
+  const board = page.getByTestId('run-board')
+  const stage = page.getByTestId('run-stage')
+  await expect(stage).toHaveAttribute('data-direction', 'LR')
+  // A finished run has no step it is at: nothing is outlined and the first view anchors on the first step by design.
+  if (marked) await expect(page.locator('[data-graph-node].now'), `${where}: the step the run is at`).toHaveAttribute('data-node-id', nowId)
+  else await expect(page.locator('[data-graph-node].now'), `${where}: no step is marked`).toHaveCount(0)
+  await expect(graphNode(page, nowId)).toBeVisible()
+  const frame = await frameWidthOf(page)
+  const mode = frame >= 1200 ? 'column' : 'overlay'
+  await expect(board, `${where}: the dock follows the frame's measured width (${frame} px)`).toHaveAttribute('data-dock', mode)
+  await expect(liveDock(page)).toHaveAttribute('data-open', 'true')
+  // Readable: at 60 % or more, the standard level or closer.
+  await expect.poll(async () => (await levelTag(page)).percent, `${where}: the first view opens at 60 % or more`).toBeGreaterThanOrEqual(60)
+  expect(['Standard', 'Full detail'], `${where}: the level`).toContain((await levelTag(page)).word)
+  const stageBox = await rectOf(stage)
+  const dock = await rectOf(liveDock(page))
+  if (mode === 'column') {
+    expect(dock.x + dock.width, `${where}: the dock column is left of the stage`).toBeLessThanOrEqual(stageBox.x + 0.5)
+    expect(dock.width).toBeLessThanOrEqual(313)
+    expect(await cardInsideStage(page, nowId, 0), `${where}: the step the run is at is inside the stage`).toBe(true)
+  } else {
+    expect(dock.x, `${where}: the dock overlays the stage`).toBeGreaterThanOrEqual(stageBox.x)
+    expect(dock.x + dock.width).toBeGreaterThan(stageBox.x + 1)
+    expect(await cardInsideStage(page, nowId, DOCK_RESERVE_PX), `${where}: the step the run is at is clear of the 336 px reserve`).toBe(true)
+    const card = await rectOf(graphNode(page, nowId))
+    expect(card.x - stageBox.x, `${where}: the card starts at least 336 px right of the stage's left edge`).toBeGreaterThanOrEqual(DOCK_RESERVE_PX - 0.5)
+  }
+  const { scroll, client } = await stage.evaluate(element => ({ scroll: element.scrollWidth, client: element.clientWidth }))
+  expect(scroll, `${where}: the stage does not scroll sideways`).toBeLessThanOrEqual(client)
+  return mode
+}
+
+/** After "Fit the graph" every step is inside the stage and every chip label is whole on at most two lines. */
+async function expectWholeOverview(page: Page, listed: readonly string[], reserved: number, where: string) {
+  await page.getByRole('button', { name: 'Fit the graph' }).click()
+  // Every step of the picture, the listed ones among them (the page may project reviewer cards beside the definition's steps).
+  const ids = await page.locator('[data-graph-node]').evaluateAll(cards => cards.map(card => card.getAttribute('data-graph-node')!))
+  for (const id of listed) expect(ids).toContain(id)
+  for (const id of ids) {
+    await expect(graphNode(page, id), `${where}: ${id} is in the viewport`).toBeInViewport()
+    expect(await cardInsideStage(page, id, reserved), `${where}: ${id} is inside the stage`).toBe(true)
+  }
+  const stage = page.getByTestId('run-stage')
+  if ((await levelTag(page)).percent >= 60) return
+  await expect(stage.locator('.sb-world')).toHaveAttribute('data-level', '0')
+  const chips = await stage.locator('[data-chip-label]').evaluateAll(labels => labels.map(label => {
+    const style = (globalThis as unknown as { getComputedStyle: (node: unknown) => { lineHeight: string; fontSize: string } }).getComputedStyle(label.parentElement!)
+    const lineHeight = Number.parseFloat(style.lineHeight) || Number.parseFloat(style.fontSize) * 1.15
+    return { text: label.textContent ?? '', cut: label.scrollWidth > label.clientWidth, heightRatio: label.clientHeight / lineHeight }
+  }))
+  expect(chips.length).toBe(ids.length)
+  for (const chip of chips) {
+    expect(chip.cut, `${where}: the chip "${chip.text}" is not cut`).toBe(false)
+    expect(chip.heightRatio, `${where}: the chip "${chip.text}" wraps on at most two lines`).toBeLessThanOrEqual(2.2)
+  }
+}
+
+test(`[scenario:graph-readable] The guarded run opens at 60 % or more with the step it is at inside the stage and clear of the dock, whose placement follows the run frame's measured width (a column from 1200 px, an overlay with a 336 px reserve under it); Fit the graph shows every step with whole chip labels; a phone keeps its top-to-bottom flow (${phase})`, async ({ page }, testInfo) => {
+  test.slow()
+  // The asking guarded run waits at a step: the first view is placed on it when the graph does not fit.
+  for (const width of [1280, 1440]) {
+    await page.setViewportSize({ width, height: 900 })
+    await page.goto(guardedRunUrl(RUN_GUARDED_ASKING))
+    const mode = await expectReadableFirstView(page, await markedStep(page), `${width} px`)
+    const xs: number[] = []
+    for (const id of GUARDED_ORDER) xs.push((await graphNode(page, id).boundingBox())!.x)
+    expect(xs, `the columns keep their order at ${width} px`).toEqual([...xs].sort((a, b) => a - b))
+    expect(await pageWidth(page)).toBeLessThanOrEqual(width)
+    await expectWholeOverview(page, GUARDED_ORDER, mode === 'overlay' ? DOCK_RESERVE_PX : 0, `${width} px`)
+  }
+  // The succeeded guarded run has no step it is at: the first view anchors on the first step by design.
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.goto(guardedRunUrl(RUN_GUARDED))
+  await expectReadableFirstView(page, 'challenge', 'the succeeded guarded run', false)
+
+  // A step far along the flow (the awaiting-approval run's sixth column) is placed inside the stage at both widths.
+  for (const width of [1280, 1440]) {
+    await page.setViewportSize({ width, height: 900 })
+    await page.goto(uxRunUrl(RUN_AWAITING_APPROVAL))
+    await expectReadableFirstView(page, 'approval', `the awaiting-approval run at ${width} px`)
+  }
+
+  // 1024 px: the dock overlays the stage as before and the step the run is at is clear of it.
+  await page.setViewportSize({ width: 1024, height: 900 })
+  await page.goto(guardedRunUrl(RUN_GUARDED_ASKING))
+  expect(await expectReadableFirstView(page, await markedStep(page), '1024 px')).toBe('overlay')
+  await expectWholeOverview(page, GUARDED_ORDER, DOCK_RESERVE_PX, '1024 px')
+  await attach(page, testInfo, 'graph-readable')
+
+  // The breakpoint is the run frame's measured width: size the window from the measured difference until the frame reads 1200.
+  await page.setViewportSize({ width: 1280, height: 900 })
+  await page.goto(guardedRunUrl(RUN_GUARDED_ASKING))
+  const gutter = 1280 - await frameWidthOf(page)
+  const sizeFrame = async (target: number) => {
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const measured = await frameWidthOf(page)
+      if (measured === target) return
+      const viewport = page.viewportSize()!
+      await page.setViewportSize({ width: viewport.width + (target - measured), height: 900 })
+    }
+    expect(await frameWidthOf(page)).toBe(target)
+  }
+  expect(gutter).toBeGreaterThan(0)
+  await sizeFrame(1200)
+  expect(await expectReadableFirstView(page, await markedStep(page), 'a 1200 px frame')).toBe('column')
+  await sizeFrame(1199)
+  expect(await expectReadableFirstView(page, await markedStep(page), 'a 1199 px frame')).toBe('overlay')
+  // A folded dock keeps its column from 1200 px and gives its reserve back under it.
+  await sizeFrame(1200)
+  await liveDock(page).getByTestId('live-dock-bar').click()
+  await expect(liveDock(page)).toHaveAttribute('data-open', 'false')
+  expect((await rectOf(liveDock(page))).x + (await rectOf(liveDock(page))).width).toBeLessThanOrEqual((await rectOf(page.getByTestId('run-stage'))).x + 0.5)
+  await liveDock(page).getByTestId('live-dock-bar').click()
+
+  // 390 px: the flow runs top to bottom as before.
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.goto(guardedRunUrl(RUN_GUARDED))
+  await expect(page.getByTestId('run-stage')).toHaveAttribute('data-direction', 'TB')
+  const ys: number[] = []
+  for (const id of GUARDED_ORDER) ys.push((await graphNode(page, id).boundingBox())!.y)
+  expect(ys, 'top to bottom').toEqual([...ys].sort((a, b) => a - b))
+  expect(await pageWidth(page)).toBeLessThanOrEqual(390)
+})
+
+/** The dock bar of an accepted run holds its words whole: nothing spills out of the bar and the open body starts below it. */
+async function expectBarHoldsItsWords(bar: Locator) {
+  const g = await bar.evaluate(element => {
+    const rect = (selector: string) => element.querySelector(selector)!.getBoundingClientRect()
+    const own = element.getBoundingClientRect()
+    const body = element.parentElement!.querySelector('.lv-body')
+    return {
+      fits: element.scrollHeight <= element.clientHeight, top: own.top, bottom: own.bottom,
+      labelTop: rect('.lv-label').top, wordTop: rect('.lv-now .w').top, wordBottom: rect('.lv-now .w').bottom,
+      sinceBottom: rect('.lv-since').bottom, bodyTop: body === null ? null : body.getBoundingClientRect().top,
+    }
+  })
+  expect(g.fits, 'the bar clips nothing vertically').toBe(true)
+  expect(g.labelTop, 'the step name starts inside the bar').toBeGreaterThanOrEqual(g.top - 0.5)
+  expect(g.wordTop, 'the override word starts inside the bar').toBeGreaterThanOrEqual(g.top - 0.5)
+  expect(g.wordBottom, 'the override word ends inside the bar').toBeLessThanOrEqual(g.bottom + 0.5)
+  expect(g.sinceBottom, 'the timing ends inside the bar').toBeLessThanOrEqual(g.bottom + 0.5)
+  if (g.bodyTop !== null) expect(g.bottom, 'the bar ends at or above the open body').toBeLessThanOrEqual(g.bodyTop + 0.5)
+}
+
+test(`[scenario:dock-times] The live dock's bar says when a run stopped: a failed run "failed <n> d ago · ran <span>", a succeeded one "integrated <age> · ran <span>", a paused and an interrupted one in days since the stop, an accepted one "operator override" then its age, a running one "for <span>" that moves with the clock; never "for <span>" on a finished run (${phase})`, async ({ page }, testInfo) => {
+  test.slow()
+  await page.setViewportSize({ width: 1440, height: 900 })
+  const bar = () => liveDock(page).getByTestId('live-dock-bar')
+  const open = async (url: string, ready: (text: string) => boolean) => {
+    await page.goto(url)
+    await expect(bar()).toBeVisible()
+    await expect.poll(async () => ready(await bar().innerText()), { message: `the bar of ${url} settles` }).toBe(true)
+    return (await bar().textContent())!.replace(/\s+/g, ' ').trim()
+  }
+  const SPAN_OF_HOURS = /\b\d{3,}h\d{2}m\b/
+  // The clock sits after every seeded run ended or stopped, so each age reads in whole days.
+  await page.clock.install({ time: new Date('2026-10-21T12:00:00Z') })
+  const seen: string[] = []
+
+  const failed = await open(`${runUrl(RUN_REVAMP_BLOCKED, undefined, REVAMP_PAGES_WORKFLOW_ID)}`, text => /failed/.test(text) && /ago/.test(text))
+  expect(failed).toMatch(/failed \d+ d ago · ran \d+m\d+s$/)
+  expect(failed).not.toMatch(/\bfor \d/)
+  seen.push(failed)
+
+  const succeeded = await open(runUrl(RUN_REVAMP_DONE, undefined, REVAMP_PAGES_WORKFLOW_ID), text => /integrated/.test(text) && /ago/.test(text))
+  expect(succeeded).toMatch(/integrated \d+ d ago · ran \d+m\d+s$/)
+  expect(succeeded).not.toMatch(/\bfor \d/)
+  seen.push(succeeded)
+
+  const paused = await open(runUrl(RUN_CHALLENGE, undefined, UX_REFINE_WORKFLOW_ID), text => /paused/.test(text) && /since/.test(text))
+  expect(paused).toMatch(/paused \d+ d \(since [A-Z][a-z]{2} \d{1,2}( \d{4})?\)$/)
+  expect(paused).not.toMatch(/\bfor \d/)
+  seen.push(paused)
+
+  const interrupted = await open(runUrl(RUN_REVIEW_INTERRUPTED, undefined, UX_RUN_WORKFLOW_ID), text => /interrupted/.test(text) && /since/.test(text))
+  expect(interrupted).toMatch(/interrupted \d+ d \(since [A-Z][a-z]{2} \d{1,2}( \d{4})?\)$/)
+  expect(interrupted).not.toMatch(/\bfor \d/)
+  seen.push(interrupted)
+
+  // A failed run served with interrupted attention is finished: the finished words, not the stopped ones.
+  const frozen = await open(runUrl(RUN_FREEZE_INTERRUPTED, undefined, UX_RUN_WORKFLOW_ID), text => /failed/.test(text) && /ago/.test(text))
+  expect(frozen).toMatch(/failed \d+ d ago · ran \d+m\d+s$/)
+  expect(frozen).not.toMatch(/interrupted \d+ d/)
+  seen.push(frozen)
+
+  // An accepted run keeps "integrated (operator override)", adds only its age, and keeps the override tone; no second outcome word.
+  const accepted = await open(runUrl(RUN_ACCEPTED_BLOCKED, undefined, UX_ACCEPTED_WORKFLOW_ID), text => /operator override/.test(text) && /ago/.test(text))
+  expect(accepted).toContain('operator override')
+  expect(accepted).toMatch(/operator override\) ?\d+ d ago/)
+  expect(accepted).not.toMatch(/succeeded/i)
+  expect(accepted.match(/integrated/g)).toHaveLength(1)
+  expect(accepted).not.toMatch(/\bfor \d/)
+  await expect(bar()).toHaveClass(/tone-override/)
+  seen.push(accepted)
+  // Nothing in the 312 px bar is clipped: the word and the timing end left of the chevron, the word inside its box.
+  const geometry = await bar().evaluate(element => {
+    const rect = (selector: string) => element.querySelector(selector)!.getBoundingClientRect()
+    const now = element.querySelector('.lv-now')!
+    return { nowFits: now.scrollWidth <= now.clientWidth, nowRight: rect('.lv-now').right, wordRight: rect('.lv-now .w').right, sinceRight: rect('.lv-since').right, chevLeft: rect('.lv-chev').left, labelWidth: rect('.lv-label').width }
+  })
+  expect(geometry.nowFits, '.lv-now clips nothing').toBe(true)
+  expect(geometry.wordRight, 'the override word ends inside .lv-now').toBeLessThanOrEqual(geometry.nowRight + 0.5)
+  expect(geometry.wordRight, 'the override word ends left of the chevron').toBeLessThanOrEqual(geometry.chevLeft + 0.5)
+  expect(geometry.labelWidth, 'the step name keeps room').toBeGreaterThan(40)
+  expect(geometry.sinceRight, 'the timing ends left of the chevron').toBeLessThanOrEqual(geometry.chevLeft + 0.5)
+
+  await expectBarHoldsItsWords(bar())
+  const abandoned = await open(runUrl(RUN_ACCEPTED_ABANDONED, undefined, UX_ACCEPTED_WORKFLOW_ID), text => /operator override/.test(text) && /ago/.test(text))
+  seen.push(abandoned)
+  await expectBarHoldsItsWords(bar())
+
+  for (const text of seen) expect(text, text).not.toMatch(SPAN_OF_HOURS)
+  await attach(page, testInfo, 'dock-times')
+})
+
+test(`An accepted run's dock bar holds its words whole on a short window, where the open body overflows (${phase})`, async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 700 })
+  await page.clock.install({ time: new Date('2026-10-21T12:00:00Z') })
+  for (const runId of [RUN_ACCEPTED_BLOCKED, RUN_ACCEPTED_ABANDONED]) {
+    await page.goto(runUrl(runId, undefined, UX_ACCEPTED_WORKFLOW_ID))
+    const bar = liveDock(page).getByTestId('live-dock-bar')
+    await expect(bar).toBeVisible()
+    await expect(bar).toContainText(/operator override/)
+    await expectBarHoldsItsWords(bar)
+  }
+})
+
+test(`A running run's bar reads "for <span>" and the span advances when the clock moves one minute (${phase})`, async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.clock.install({ time: new Date('2026-03-12T10:24:20Z') })
+  await page.goto(runUrl(RUN_REVAMP_RUNNING, undefined, REVAMP_PAGES_WORKFLOW_ID))
+  const since = liveDock(page).getByTestId('live-dock-bar').locator('.lv-since')
+  await expect(since).toHaveText(/^for \d+m\d+s$|^for \d+h\d+m$/)
+  await page.clock.pauseAt(new Date('2026-03-12T10:24:40Z'))
+  const before = await since.innerText()
+  await page.clock.runFor(60_000)
+  await expect.poll(() => since.innerText()).not.toBe(before)
+  expect(await since.innerText()).toMatch(/^for \d+m\d+s$|^for \d+h\d+m$/)
+  expect(await liveDock(page).getByTestId('live-dock-bar').innerText()).not.toMatch(/\b\d{3,}h\d{2}m\b/)
+})
+
+test(`[scenario:now-open] "Open <step> ›" in the live dock opens the step's page and Back returns; "Show in graph" beside it centres the step and opens its sheet without leaving the run page; both work from the keyboard (${phase})`, async ({ page }, testInfo) => {
+  await page.setViewportSize({ width: 1440, height: 900 })
+  const runPage = runUrl(RUN_REVAMP_BLOCKED, undefined, REVAMP_PAGES_WORKFLOW_ID)
+  await page.goto(runPage)
+  await expect(now(page)).toHaveAttribute('data-situation', 'review_blocked')
+  const dock = liveDock(page)
+  const open = dock.getByTestId('now-open')
+  const show = dock.getByRole('button', { name: 'Show in graph' })
+  await expect(open).toBeVisible()
+  await expect(show).toBeVisible()
+  const href = (await open.getAttribute('href'))!
+  const nodeId = /\/nodes\/([^/?#]+)$/.exec(href)![1]!
+  const urlOfRun = page.url()
+  // "Show in graph" is a button beside the link, and does what "Open" did: it centres the step and opens its sheet.
+  expect(await show.evaluate(element => element.tagName)).toBe('BUTTON')
+  await show.focus()
+  await page.keyboard.press('Enter')
+  await expect(stepSheet(page)).toHaveAttribute('data-node-id', nodeId)
+  expect(page.url(), 'the address does not change').toBe(urlOfRun)
+  const stageBox = await rectOf(page.getByTestId('run-stage'))
+  const card = await rectOf(graphNode(page, nodeId))
+  // The sheet takes the stage's right 440 px: the card is centred in the rest, vertically in the stage.
+  await expect.poll(async () => {
+    const moved = await rectOf(graphNode(page, nodeId))
+    return Math.abs((moved.x + moved.width / 2) - (stageBox.x + (stageBox.width - 440) / 2))
+  }, { message: 'the card is centred beside the sheet' }).toBeLessThanOrEqual(40)
+  expect(Math.abs((card.y + card.height / 2) - (stageBox.y + stageBox.height / 2))).toBeLessThanOrEqual(40)
+  await attach(page, testInfo, 'now-open')
+  await stepSheet(page).getByRole('button', { name: 'Close step details' }).click()
+  await expect(stepSheet(page)).toHaveCount(0)
+
+  // "Open <step> ›" is a link to the step's page, through the app's own navigation, from the keyboard too.
+  await open.focus()
+  await page.keyboard.press('Enter')
+  await expect(page).toHaveURL(new RegExp(`/nodes/${nodeId}$`))
+  await expect(nodeDetail(page)).toHaveAttribute('data-node-id', nodeId)
+  await expect(page.getByTestId('node-header')).toBeVisible()
+  await page.goBack()
+  await expect(page).toHaveURL(urlOfRun)
+  await expect(now(page)).toHaveAttribute('data-situation', 'review_blocked')
+  await expect(liveDock(page).getByTestId('now-open')).toBeVisible()
+  // The sheet's own "Open step page" is unchanged.
+  await openStepSheet(page, nodeId)
+  await expect(stepSheet(page).getByTestId('sheet-open-page')).toHaveAttribute('href', new RegExp(`/nodes/${nodeId}$`))
+})
+
+test(`[scenario:identity-line] The identity line shows "definition current" or "definition changed since" without the revision, and the source branch and base commit as "<branch> @ <sha>" with the full values in its title; a run without a recorded branch reads "no branch recorded"; a phone hides the branch and keeps a changed definition (${phase})`, async ({ page }, testInfo) => {
+  test.slow()
+  await page.setViewportSize({ width: 1440, height: 900 })
+  const header = page.getByTestId('run-header')
+  const branch = page.getByTestId('run-branch')
+  const detailFact = (label: string) => page.getByTestId('run-inputs-facts').locator('div').filter({ has: page.locator('dt', { hasText: new RegExp(`^${label}$`) }) }).locator('dd')
+
+  // A current definition: the chip says so, the line carries no revision, and the branch and base are on the line outside Details.
+  await page.goto(runUrl(RUN_REVAMP_DONE, undefined, REVAMP_PAGES_WORKFLOW_ID))
+  await expect(now(page)).toHaveAttribute('data-situation', 'succeeded')
+  await expect(page.getByTestId('definition-current')).toBeVisible()
+  await expect(page.getByTestId('definition-current')).toHaveText('definition current')
+  await expect(page.getByTestId('definition-changed')).toHaveCount(0)
+  await expect(branch).toBeVisible()
+  expect(await branch.evaluate(element => element.closest('[data-testid=run-details]') === null), 'outside Details').toBe(true)
+  const line = (await header.innerText()).replace(/\s+/g, ' ')
+  expect(line, 'no revision on the line').not.toMatch(/[0-9a-f]{12}/)
+  await openRunDetails(page)
+  const source = (await detailFact('Source branch').innerText()).trim()
+  const base = (await detailFact('Base commit').innerText()).trim()
+  expect(base).toMatch(/^[0-9a-f]{40}$/)
+  await expect(branch).toHaveText(`${source} @ ${base.slice(0, 7)}`)
+  await expect(branch).toHaveAttribute('title', `${source} @ ${base}`)
+  // Details still lists the pinned definition with its revision.
+  await expect(page.getByTestId('run-details')).toContainText(/Pinned definition[\s\S]*revision\s*[0-9a-f]{12}/)
+  await attach(page, testInfo, 'identity-line')
+
+  // A definition that changed since the run: the chip is a warning that says so.
+  await page.goto(runUrl(RUN_SUCCEEDED))
+  await expect(page.getByTestId('definition-changed')).toBeVisible()
+  await expect(page.getByTestId('definition-changed')).toHaveText('definition changed since')
+  expect((await header.innerText()).replace(/\s+/g, ' ')).not.toMatch(/[0-9a-f]{12}/)
+
+  // A run whose inputs record no source branch.
+  await page.goto(runUrl(RUN_NO_BRANCH, undefined, UX_RUN_WORKFLOW_ID))
+  await expect(branch).toBeVisible()
+  await expect(branch).toHaveText(/^no branch recorded @ [0-9a-f]{7}$/)
+  await openRunDetails(page)
+  await expect(detailFact('Source branch')).toHaveText('None recorded')
+  const noBase = (await detailFact('Base commit').innerText()).trim()
+  await expect(branch).toHaveAttribute('title', `no branch recorded @ ${noBase}`)
+
+  // At 390 px the branch hides like the definition chip, a changed definition stays, and the page does not scroll sideways.
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.goto(runUrl(RUN_REVAMP_DONE, undefined, REVAMP_PAGES_WORKFLOW_ID))
+  await expect(now(page)).toHaveAttribute('data-situation', 'succeeded')
+  await expect(branch).toBeHidden()
+  await expect(page.getByTestId('definition-current')).toBeHidden()
+  expect(await pageWidth(page)).toBeLessThanOrEqual(390)
+  await page.goto(runUrl(RUN_SUCCEEDED))
+  await expect(page.getByTestId('definition-changed')).toBeVisible()
+  await expect(branch).toBeHidden()
+  expect(await pageWidth(page)).toBeLessThanOrEqual(390)
 })

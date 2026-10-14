@@ -9,14 +9,23 @@
 .ss-group h4 .ss-dim { margin-left: 4px; font-variant-numeric: tabular-nums; }
 
 .ss-rows, .ss-lines, .ss-findings, .ss-earlier { list-style: none; margin: 0; padding: 0; }
-.ss-row { display: grid; gap: 2px; padding: 6px 0 10px; border-bottom: 1px solid var(--border); }
-.ss-row-label { font-weight: 700; font-size: 15px; }
-.ss-row-label a { display: inline-flex; align-items: center; min-height: 44px; color: var(--fg); text-underline-offset: 3px; }
+/* The Sessions table: one line per session on a desk (label, model, status, started, duration, cost, session id, the resume
+   actions); one column per session on a phone, each fact prefixed by its name. */
+.ss-head, .ss-row { display: grid; grid-template-columns: minmax(240px, 2.4fr) minmax(130px, 1.2fr) minmax(100px, 1fr) minmax(125px, 1fr) minmax(110px, 0.9fr) minmax(105px, 1.1fr) minmax(0, 1.4fr) auto; align-items: center; column-gap: 12px; }
+.ss-head { padding: 4px 0; border-bottom: 1px solid var(--border-strong); color: var(--muted); font-size: 12px; font-weight: 700; letter-spacing: .02em; text-transform: uppercase; }
+.ss-row { padding: 5px 0; border-bottom: 1px solid var(--border); color: var(--muted); font-size: 13.5px; line-height: 1.35; font-variant-numeric: tabular-nums; }
+.ss-row > span { min-width: 0; overflow-wrap: anywhere; }
+.ss-row-label { font-weight: 700; font-size: 14px; color: var(--fg); }
+.ss-row-label a { display: inline-flex; align-items: center; color: var(--fg); text-underline-offset: 3px; }
 .ss-row-label a:hover { color: var(--accent); }
-.ss-row-meta { display: flex; flex-wrap: wrap; gap: 2px 0; color: var(--muted); font-size: 13.5px; font-variant-numeric: tabular-nums; }
-/* Each fact keeps its words together and reads as one line with middle dots between them, wrapping only between facts. */
+.ss-row-resume { display: flex; justify-content: flex-end; }
+.ss-resume-actions { display: inline-flex; gap: 6px; }
+.ss-row .ss-copy { min-height: 30px; min-width: 0; padding: 0 10px; font-size: 13px; white-space: nowrap; }
+.ss-resume-open { grid-column: 1 / -1; margin-top: 6px; padding-bottom: 4px; }
+.ss-row .ss-item { white-space: normal; }
+/* Each fact of a lane-review line keeps its words together and reads as one line with middle dots between them. */
 .ss-item { white-space: nowrap; }
-.ss-row-meta .ss-item + .ss-item::before, .ss-lines .ss-item + .ss-item::before { content: "·"; margin: 0 7px; color: var(--edge-soft); }
+.ss-lines .ss-item + .ss-item::before { content: "·"; margin: 0 7px; color: var(--edge-soft); }
 .ss-dim { color: var(--muted); }
 .ss-nr { color: var(--muted); font-style: italic; }
 .ss-id { font-family: var(--font-mono); font-size: 12.5px; overflow-wrap: anywhere; white-space: normal; }
@@ -74,11 +83,19 @@
 .ss-chip-link:hover { border-color: var(--accent); color: var(--accent); }
 .ss-chip-link:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 
+/* Under 1360 px (the columns need about 900 px plus the resume buttons and the workspace gutters) the columns would not fit: each session reads as one column, each fact prefixed by its name. */
+@media (max-width: 1360px) {
+  .ss-head { display: none; }
+  .ss-row { grid-template-columns: minmax(0, 1fr); row-gap: 2px; padding: 6px 0 10px; }
+  .ss-row .ss-item::before { content: attr(data-label) ": "; color: var(--muted); }
+  .ss-row-resume { justify-content: flex-start; }
+  .ss-resume-cmd { flex-basis: 100%; }
+}
+@media (max-width: 720px) {
+  .ss-row-label a { min-height: 44px; }
+  .ss-row .ss-copy { min-height: 44px; min-width: 64px; padding: 0 14px; }
+}
 @media (max-width: 480px) {
   .ss-facts { grid-template-columns: 1fr; gap: 0; }
   .ss-facts dt { margin-top: 6px; font-size: 12.5px; }
-  .ss-row-meta { display: grid; gap: 1px; }
-  .ss-row-meta .ss-item { white-space: normal; }
-  .ss-row-meta .ss-item + .ss-item::before { content: none; }
-  .ss-resume-cmd { flex-basis: 100%; }
 }

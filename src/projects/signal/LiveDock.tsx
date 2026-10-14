@@ -12,10 +12,12 @@ import { useServedRun } from '../LiveStatus.tsx'
 import { NowBanner } from '../NowBanner.tsx'
 import { deadlinesLabel, OVERRIDE_LABEL } from '../status.ts'
 import { formatAgo, formatSpan, utcTitle } from '../time.ts'
+import { useTimeZone } from '../useNow.ts'
 import { stateTone, toneClass } from '../tone.ts'
 import { Time } from '../Time.tsx'
 import { Glyph } from './Glyph.tsx'
 import { rememberDockOpen } from './dock.ts'
+import { dockWords } from './dockWords.ts'
 import type { LatestEvent, StageNode } from './model.ts'
 
 type Props = {
@@ -57,9 +59,23 @@ export function LiveDock({ detail, now, clock, nodes, nowId, latest, timeline, i
   const accepted = acceptedOf(detail)
   const step = accepted || nowId === null ? null : nodes.find(node => node.id === nowId) ?? null
   const tone = accepted ? stateTone({ status: detail.summary.status, accepted }) : step ? step.tone : stateTone({ status: detail.summary.status, attention: null })
-  const word = accepted ? OVERRIDE_LABEL : step ? step.word : detail.summary.status.replace('_', ' ')
-  const since = now?.since ?? step?.start?.at ?? null
-  const sinceText = since === null ? null : `for ${formatSpan(Math.max(0, clock - Date.parse(since)))}`
+  const stepWord = accepted ? OVERRIDE_LABEL : step ? step.word : detail.summary.status.replace('_', ' ')
+  const [zone] = useTimeZone()
+  const activity = detail.summary.activity ?? null
+  const interrupted = activity?.attention?.kind === 'interrupted' || now?.situation === 'interrupted'
+  const words = dockWords({
+    status: detail.summary.status,
+    accepted: accepted !== null,
+    interrupted,
+    stoppedSince: activity?.attention?.since ?? now?.since ?? null,
+    runningSince: now?.since ?? step?.start?.at ?? null,
+    end: timeline?.runEnd?.at ?? activity?.finished_at ?? null,
+    created: detail.summary.created_at,
+    clock,
+    zone,
+  })
+  const word = words.word ?? stepWord
+  const sinceText = words.since
   const start = Date.parse(detail.summary.created_at)
   const end = timeline?.runEnd ? Date.parse(timeline.runEnd.at) : null
   const ran = end === null ? (detail.summary.status === 'running' ? clock - start : null) : end - start
@@ -92,8 +108,10 @@ export function LiveDock({ detail, now, clock, nodes, nowId, latest, timeline, i
         onClick={toggle}
       >
         <Glyph tone={tone} />
-        <span className="lv-now"><b>{step ? step.label : detail.summary.run_id}</b> <span className="w">{word}</span></span>
-        {sinceText && <span className="lv-since">{sinceText}</span>}
+        <span className="lv-text">
+          <span className="lv-now"><b className="lv-label">{step ? step.label : detail.summary.run_id}</b> <span className="w">{word}</span></span>
+          {sinceText && <>{' '}<span className="lv-since">{sinceText}</span></>}
+        </span>
         <span className="lv-chev" aria-hidden="true"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M5 12.5l5-5 5 5" /></svg></span>
       </button>
       <div className="lv-body" id="sb-live-body" hidden={!open}>

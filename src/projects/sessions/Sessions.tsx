@@ -227,41 +227,80 @@ export function NightShiftCount({ sessions, nodeHref, nodeLabel, onNavigate }: {
   )
 }
 
-function SessionRowLine({ row, nodeHref, onNavigate }: { row: SessionRow; nodeHref: (nodeId: string) => string; onNavigate: (pathname: string) => void }) {
-  const items: [string, ReactNode][] = [
-    ['model', row.model ? <>{row.model}{row.transport ? <span className="ss-dim"> via {row.transport}</span> : null}</> : row.transport ? <>model not recorded<span className="ss-dim"> via {row.transport}</span></> : 'model not recorded'],
-    ['status', row.verdict ? `${row.status} · ${row.verdict}` : row.status],
-    ['started', row.started_at ? <>started <Time iso={row.started_at} seconds /></> : 'start not recorded'],
-    ['duration', durationText(row.duration_seconds) ?? 'duration not recorded'],
-    ['cost', costText(row.cost_usd, row.cost_kind)],
-    ['session', row.session_id ? <code className="ss-id">{row.session_id}</code> : 'no session id'],
+/** One session's line of the Sessions table: the facts in columns, and for a Claude Code session Copy and a toggle for the full command. */
+function SessionTableRow({ row, nodeHref, onNavigate }: { row: SessionRow; nodeHref: (nodeId: string) => string; onNavigate: (pathname: string) => void }) {
+  const [shown, setShown] = useState(false)
+  const [copied, setCopied] = useState<'copied' | 'failed' | null>(null)
+  const timer = useRef<number | null>(null)
+  useEffect(() => () => { if (timer.current !== null) window.clearTimeout(timer.current) }, [])
+  const resume = resumeText(row)
+  const copy = async () => {
+    if (!resume) return
+    let outcome: 'copied' | 'failed' = 'copied'
+    try {
+      await navigator.clipboard.writeText(resume.command)
+    } catch {
+      // No clipboard (an insecure origin or a denied permission): the toggle still shows the command to select by hand.
+      outcome = 'failed'
+    }
+    setCopied(outcome)
+    if (timer.current !== null) window.clearTimeout(timer.current)
+    timer.current = window.setTimeout(() => setCopied(null), 2500)
+  }
+  const model = row.model ? <>{row.model}{row.transport ? <span className="ss-dim"> via {row.transport}</span> : null}</> : row.transport ? <>model not recorded<span className="ss-dim"> via {row.transport}</span></> : 'model not recorded'
+  const cells: [string, string, ReactNode][] = [
+    ['model', 'model', model],
+    ['status', 'status', row.verdict ? `${row.status} · ${row.verdict}` : row.status],
+    ['started', 'started', row.started_at ? <Time iso={row.started_at} seconds /> : 'start not recorded'],
+    ['duration', 'duration', durationText(row.duration_seconds) ?? 'duration not recorded'],
+    ['cost', 'cost', costText(row.cost_usd, row.cost_kind)],
+    ['session', 'session id', row.session_id ? <code className="ss-id">{row.session_id}</code> : 'no session id'],
   ]
   return (
-    <li className="ss-row" data-testid="session-row" data-role={row.role} data-session-key={row.key}>
-      <span className="ss-row-label">
+    <li className="ss-row" role="row" data-testid="session-row" data-role={row.role} data-session-key={row.key}>
+      <span className="ss-row-label" role="cell">
         {row.node_id ? <AppLink href={nodeHref(row.node_id)} onNavigate={onNavigate} data-testid="session-row-link">{row.label}</AppLink> : <span>{row.label}</span>}
       </span>
-      <span className="ss-row-meta">
-        {items.map(([key, value]) => <span key={key} className="ss-item" data-fact={key}>{value}</span>)}
+      {cells.map(([key, label, value]) => <span key={key} className="ss-item" role="cell" data-fact={key} data-label={label}>{value}</span>)}
+      <span className="ss-row-resume" role="cell">
+        {resume && (
+          <span data-testid="session-resume" className="ss-resume-actions">
+            <button type="button" className="ss-copy" onClick={copy} aria-label={`Copy the resume command for ${row.label}`} data-testid="session-resume-copy">
+              {copied === 'copied' ? 'Copied' : copied === 'failed' ? 'Select to copy' : 'Copy'}
+            </button>
+            <button type="button" className="ss-copy ss-toggle" aria-expanded={shown} aria-label={`${shown ? 'Hide' : 'Show'} the resume command for ${row.label}`} data-testid="session-resume-toggle" onClick={() => setShown(previous => !previous)}>
+              {shown ? 'Hide command' : 'Show command'}
+            </button>
+            <span className="ss-sr" aria-live="polite">{copied === 'copied' ? 'Resume command copied' : copied === 'failed' ? 'Copy failed; show the command and select it' : ''}</span>
+          </span>
+        )}
       </span>
-      <ResumeCommand row={row} />
+      {resume && shown && (
+        <div className="ss-resume ss-resume-open" role="cell" data-testid="session-resume-detail">
+          <code className="ss-resume-cmd" data-testid="session-resume-command">{resume.command}</code>
+          {resume.note && <span className="ss-resume-note" data-testid="session-resume-note">{resume.note}</span>}
+        </div>
+      )}
     </li>
   )
 }
 
-/** The run page's Sessions section (PRD 3.4): every session in start order grouped by role, both totals, and resume commands. */
+/** The run page's Sessions table (PRD 3.4): every session in start order grouped by role, one line each, both totals above it. */
 export function SessionsSection({ sessions, nodeHref, onNavigate }: { sessions: Sessions; nodeHref: (nodeId: string) => string; onNavigate: (pathname: string) => void }) {
   const groups = groupSessions(sessions)
   if (groups.length === 0) return null
   return (
     <section className="ss-section" data-testid="sessions-section" aria-labelledby="sessions-title">
-      <h3 id="sessions-title">Sessions</h3>
+      <h3 id="sessions-title" tabIndex={-1}>Sessions</h3>
       <p className="ss-totals" data-testid="sessions-totals">{totalsText(sessions.totals)}</p>
       {groups.map(group => (
         <div key={group.role} className="ss-group" data-testid={`session-group-${group.role}`}>
           <h4>{group.label} <span className="ss-dim">{group.rows.length}</span></h4>
-          <ul className="ss-rows">
-            {group.rows.map(row => <SessionRowLine key={row.key} row={row} nodeHref={nodeHref} onNavigate={onNavigate} />)}
+          <ul className="ss-rows" role="table" aria-label={`${group.label} sessions`}>
+            <li className="ss-head" role="row">
+              {['Session', 'Model', 'Status', 'Started', 'Duration', 'Cost', 'Session id', ''].map((title, index) => <span key={index} role="columnheader">{title}</span>)}
+            </li>
+            {group.rows.map(row => <SessionTableRow key={row.key} row={row} nodeHref={nodeHref} onNavigate={onNavigate} />)}
           </ul>
         </div>
       ))}
