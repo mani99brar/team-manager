@@ -3,7 +3,8 @@
  * own recorded steps. A run whose steps are not read (pending or failed) has no stop: nothing is claimed from their absence.
  */
 import type { RunSummary } from '../api.ts'
-import type { RunClass } from '../lists.ts'
+import { monthDay, rowTime, stoppedLabel, type RunClass } from '../lists.ts'
+import { formatSpan, type Zone } from '../time.ts'
 import { PHASES, phaseOf } from './phases.ts'
 import type { ProjectStepsRun } from './types.ts'
 
@@ -56,7 +57,7 @@ export type StepsReadState = 'loading' | 'failed' | 'read'
 /**
  * What a run row says in place of a stop it cannot name (no recorded stop and no served focus label): "reading steps…" while
  * the steps load, "steps not read" only when the read failed, "no steps recorded" when the read holds no steps for the run,
- * so a load never reads as a failure (M1). The `aria` sentence is the row's spoken form.
+ * so a load never reads as a failure. The `aria` sentence is the row's spoken form.
  */
 export function noStopWording(stepsRead: StepsReadState): { text: string; aria: string } {
   if (stepsRead === 'loading') return { text: 'reading steps…', aria: 'Reading its steps.' }
@@ -64,15 +65,28 @@ export function noStopWording(stepsRead: StepsReadState): { text: string; aria: 
   return { text: 'no steps recorded', aria: 'No steps recorded.' }
 }
 
-/** One run's steps read: the project's read, except that a run whose own entry failed to read is 'failed' (M1). */
+/** One run's steps read: the project's read, except that a run whose own entry failed to read is 'failed'. */
 export function runStepsRead(entry: ChartRun, stepsRead: StepsReadState): StepsReadState {
   return entry.stepsError ? 'failed' : stepsRead
 }
 
 /**
  * Whether a feature's landing state is known: only once the steps are read and none of its runs' entries failed to read.
- * Until then an empty landing list is unknown, never "nothing landed" (M1).
+ * Until then an empty landing list is unknown, never "nothing landed".
  */
 export function landingKnown(entries: readonly ChartRun[], stepsRead: StepsReadState): boolean {
   return entries.every(entry => runStepsRead(entry, stepsRead) === 'read')
+}
+
+/**
+ * A run row's date and duration: "started Oct 9 · ran 1h05m" once finished, "started Oct 9 · running 41m" from the page's
+ * list clock while it runs, a stopped run's "paused 10 d (since Oct 2)"; "started Oct 9" alone when nothing else is recorded.
+ */
+export function runWhen(entry: ChartRun, now: number, zone: Zone): string {
+  const time = rowTime(entry.run, now)
+  const started = `started ${monthDay(entry.run.created_at, now, zone)}`
+  if (time.kind === 'finished') return `${started} · ran ${formatSpan(time.ms)}`
+  if (time.kind === 'live') return `${started} · running ${formatSpan(time.ms)}`
+  if (time.kind === 'stopped') return stoppedLabel(time.how, time.since, now, zone)
+  return started
 }

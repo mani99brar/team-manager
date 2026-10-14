@@ -54,12 +54,18 @@ test(`[scenario:runs-home] Runs home lists Needs you, Running and Recent across 
   await expect(row(needs, RUN_LISTS_ASKING)).toContainText(PROJECT.name)
   await expect(needs).not.toContainText(UX_LISTS_WORKFLOW_NAME)
 
-  // Today: the other live runs moved today, so they are Today rows, never repeated in another section.
-  await expect(row(today, RUN_LISTS_LIVE)).toHaveAttribute('data-status', 'running')
-  await expect(row(today, RUN_LISTS_STOPPED)).toHaveAttribute('data-status', 'running')
-  await expect(row(today, RUN_LISTS_LIVE)).not.toHaveAttribute('data-attention', /.+/)
-  await expect(today.getByRole('link', { name: new RegExp(`^${RUN_LISTS_LIVE}(?:\\s|$)`) })).toHaveCount(1)
-  for (const runId of [RUN_LISTS_ASKING, RUN_LISTS_ANSWERED, RUN_LISTS_APPROVAL]) await expect(row(today, runId)).toHaveCount(0)
+  // Running: the other live runs are running and wait on nobody, so they are Running rows, never repeated in another section;
+  // Today holds only runs that finished today.
+  const runningRuns = page.getByTestId('running-runs')
+  await expect(row(runningRuns, RUN_LISTS_LIVE)).toHaveAttribute('data-status', 'running')
+  await expect(row(runningRuns, RUN_LISTS_STOPPED)).toHaveAttribute('data-status', 'running')
+  await expect(row(runningRuns, RUN_LISTS_LIVE)).not.toHaveAttribute('data-attention', /.+/)
+  await expect(runningRuns.getByRole('link', { name: new RegExp(`^${RUN_LISTS_LIVE}(?:\\s|$)`) })).toHaveCount(1)
+  for (const runId of [RUN_LISTS_LIVE, RUN_LISTS_STOPPED]) await expect(row(today, runId)).toHaveCount(0)
+  for (const runId of [RUN_LISTS_ASKING, RUN_LISTS_ANSWERED, RUN_LISTS_APPROVAL]) {
+    await expect(row(today, runId)).toHaveCount(0)
+    await expect(row(runningRuns, runId)).toHaveCount(0)
+  }
 
   // Recent: finished in the last seven days, newest first, with the finish time and the duration from the served activity.
   expect(await ownIds(recent)).toEqual([RUN_LISTS_FAILED, RUN_LISTS_FAILED_EARLIER])

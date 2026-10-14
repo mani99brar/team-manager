@@ -21,7 +21,7 @@
  */
 import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { validateRunDetail, type RunActivity, type RunDetail, type RunInputs, type WorkflowDefinition } from '../../../contracts/projects/v1.ts'
+import { validateRunDetail, type RunActivity, type RunDetail, type RunInputs, type RunSummary, type WorkflowDefinition } from '../../../contracts/projects/v1.ts'
 import { eventSchema, type WorkflowEvent } from '../../../contracts/workflow/v1.ts'
 import {
   ADAPTER_CHECKS, ADAPTER_SESSION, BASE_COMMIT, OUTPUT_COMMIT_ADAPTER, OUTPUT_COMMIT_UI, PATH_TOKEN, PROJECT, UI_CHECKS, UI_SESSION,
@@ -307,3 +307,122 @@ function seed({ repository, runsRoot, writeRun, receipt, leakFor }: SeedContext)
 }
 
 export const uxLists: UxFixtureModule = { payloads, seed }
+
+// ---- The ordered and filtered lists' own world, served by page.route in both phases (never seeded) ---------------------
+//
+// Five projects only these routes serve, so every count over them is asserted by value: `lists-b-order` (a feature with a
+// needs-you, a running, a paused and three finished runs, and three more features whose default, newest and oldest orders
+// differ), `lists-b-fold` (seven features of one or two runs each: one needs you, one runs, one cannot be read, the rest
+// closed), `lists-b-filter` (a feature answered as two pages, page 2 entirely older than page 1's newest finished run, so
+// appending it never changes which run the feature header reads its reviewers from), and `lists-b-runner` / `lists-b-parked`
+// (a project whose only live run is running, one whose only live runs are paused).
+
+/** The page clock of the stage B scenarios: 2026-10-13 at noon UTC. */
+export const LISTS_B_NOW = '2026-10-13T12:00:00Z'
+const B_NODES = laneGraphNodes(['ui'])
+
+type BRun = { id: string; status: RunSummary['status']; created: string; moved: string; focus?: string | null; attention?: RunActivity['attention']; feature?: string; headline?: string; accepted?: boolean }
+export type BWorkflow = { workflow_id: string; runs: BRun[]; page2?: BRun[]; unreadable?: boolean }
+export type BProject = { project_id: string; name: string; workflows: BWorkflow[] }
+
+const FINISHED_B = ['succeeded', 'failed', 'cancelled']
+export function bSummary(projectId: string, workflowId: string, run: BRun): RunSummary {
+  const finished = FINISHED_B.includes(run.status)
+  const definition = bDefinition(projectId, workflowId)
+  return {
+    contract_version: '1.5.0', project_id: projectId, workflow_id: workflowId, definition_revision: definition.definition_revision, run_id: run.id, status: run.status,
+    created_at: run.created, updated_at: run.moved,
+    activity: {
+      feature: run.feature ?? `${workflowId} feature`, last_activity_at: run.moved, finished_at: finished ? run.moved : null,
+      focus: run.focus ? { node_id: run.focus, label: B_NODES.find(node => node.node_id === run.focus)?.label ?? run.focus, status: run.status, since: null } : null,
+      attention: run.attention ?? null, waiting_questions: run.attention?.kind === 'question' ? 1 : 0, headline: run.headline ?? null, controller: null,
+    },
+    ...(run.accepted ? { accepted: { candidate: 'c'.repeat(40), reason: 'accepted by hand', by: 'operator', accepted_at: run.moved, on_main: true, review: 'none' as const, open_findings: [], abandoned: null } } : {}),
+  }
+}
+export const bDefinition = (projectId: string, workflowId: string): WorkflowDefinition => definition(projectId, workflowId, `Feature ${workflowId}`, B_NODES)
+
+const T = (day: number, hour: number, minute = 0) => `2026-10-${String(day).padStart(2, '0')}T${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}:00Z`
+const question = (since: string): RunActivity['attention'] => ({ kind: 'question', node_id: 'launch_ui', since })
+const pane = (since: string): RunActivity['attention'] => ({ kind: 'pane', node_id: 'launch_ui', since })
+const pausedAt = (since: string): RunActivity['attention'] => ({ kind: 'paused', node_id: 'review', since })
+
+/** The feature page's mixed workflow: needs you, running, paused (the latest created), then three finished runs. */
+export const B_MIX = { needs: 'mix-needs', running: 'mix-running', paused: 'mix-paused', done1: 'mix-done-1', done2: 'mix-done-2', done3: 'mix-done-3' } as const
+export const B_ORDER: BProject = {
+  project_id: 'lists-b-order', name: 'Lists B order',
+  workflows: [
+    { workflow_id: 'order-mix', runs: [
+      { id: B_MIX.needs, status: 'running', created: T(10, 8), moved: T(13, 8), focus: 'launch_ui', attention: question(T(13, 8)) },
+      { id: B_MIX.running, status: 'running', created: T(12, 8), moved: T(13, 11), focus: 'verify_ui' },
+      { id: B_MIX.paused, status: 'paused', created: T(13, 9), moved: T(13, 9, 30), focus: 'review', attention: pausedAt(T(13, 9, 30)) },
+      { id: B_MIX.done1, status: 'failed', created: T(11, 8), moved: T(13, 10), focus: 'review' },
+      { id: B_MIX.done2, status: 'succeeded', created: T(9, 8), moved: T(12, 10) },
+      { id: B_MIX.done3, status: 'cancelled', created: T(8, 8), moved: T(8, 9), focus: 'candidate' },
+    ] },
+    { workflow_id: 'order-running', runs: [{ id: 'order-running-1', status: 'running', created: T(1, 8), moved: T(13, 7), focus: 'launch_ui' }] },
+    { workflow_id: 'order-done-new', runs: [{ id: 'order-done-new-1', status: 'succeeded', created: T(13, 9), moved: T(13, 11, 30) }] },
+    { workflow_id: 'order-done-old', runs: [{ id: 'order-done-old-1', status: 'failed', created: T(2, 8), moved: T(5, 9), focus: 'verify_ui' }] },
+  ],
+}
+/** The default, newest and oldest feature orders of `lists-b-order`; they all differ. */
+export const B_ORDER_FEATURES = {
+  live: ['order-mix', 'order-running', 'order-done-new', 'order-done-old'],
+  newest: ['order-done-new', 'order-mix', 'order-running', 'order-done-old'],
+  oldest: ['order-done-old', 'order-running', 'order-mix', 'order-done-new'],
+}
+/** The mixed workflow's rows under each sort (default, newest created, oldest created). */
+export const B_MIX_ORDER = {
+  live: [B_MIX.needs, B_MIX.running, B_MIX.paused, B_MIX.done1, B_MIX.done2, B_MIX.done3],
+  newest: [B_MIX.paused, B_MIX.running, B_MIX.done1, B_MIX.needs, B_MIX.done2, B_MIX.done3],
+  oldest: [B_MIX.done3, B_MIX.done2, B_MIX.needs, B_MIX.done1, B_MIX.running, B_MIX.paused],
+}
+
+export const B_FOLD: BProject = {
+  project_id: 'lists-b-fold', name: 'Lists B fold',
+  workflows: [
+    { workflow_id: 'fold-needs', runs: [{ id: 'fold-needs-1', status: 'running', created: T(12, 8), moved: T(13, 9), focus: 'launch_ui', attention: pane(T(13, 9)) }] },
+    { workflow_id: 'fold-running', runs: [{ id: 'fold-running-1', status: 'running', created: T(11, 0), moved: T(12, 18), focus: 'verify_ui' }] },
+    { workflow_id: 'fold-broken', runs: [], unreadable: true },
+    { workflow_id: 'fold-done', runs: [{ id: 'fold-done-1', status: 'failed', created: T(9, 8), moved: T(9, 9, 5), focus: 'review' }, { id: 'fold-done-2', status: 'succeeded', created: T(10, 8), moved: T(10, 9) }] },
+    { workflow_id: 'fold-paused', runs: [{ id: 'fold-paused-1', status: 'paused', created: T(2, 8), moved: T(3, 10), focus: 'review', attention: pausedAt(T(3, 10)) }] },
+    { workflow_id: 'fold-old', runs: [{ id: 'fold-old-1', status: 'succeeded', created: T(1, 8), moved: T(1, 9) }] },
+    { workflow_id: 'fold-cancelled', runs: [{ id: 'fold-cancelled-1', status: 'cancelled', created: T(4, 8), moved: T(4, 8, 30), focus: 'candidate' }] },
+  ],
+}
+
+/** The filtered feature: page 1 with a next cursor, page 2 older than page 1's newest finished run (fr-fail-review). */
+export const B_FILTER: BProject = {
+  project_id: 'lists-b-filter', name: 'Lists B filter',
+  workflows: [
+    { workflow_id: 'filter-runs', runs: [
+      { id: 'fr-needs', status: 'running', created: T(13, 8), moved: T(13, 10), focus: 'launch_ui', attention: question(T(13, 10)) },
+      { id: 'fr-running', status: 'running', created: T(13, 7), moved: T(13, 11), focus: 'verify_ui' },
+      { id: 'fr-paused', status: 'paused', created: T(12, 7), moved: T(12, 8), focus: 'review', attention: pausedAt(T(12, 8)) },
+      { id: 'fr-fail-review', status: 'failed', created: T(13, 6), moved: T(13, 9), focus: 'review', headline: 'Independent review found two blockers' },
+      { id: 'fr-ok', status: 'succeeded', created: T(13, 5), moved: T(13, 8, 30) },
+      { id: 'fr-fail-verify', status: 'failed', created: T(12, 6), moved: T(12, 9), focus: 'verify_ui' },
+      { id: 'fr-fail-launch', status: 'failed', created: T(11, 6), moved: T(11, 9), focus: 'launch_ui', feature: 'Pirate sea race' },
+      { id: 'fr-override', status: 'succeeded', created: T(10, 6), moved: T(10, 9), accepted: true },
+      { id: 'fr-cancelled', status: 'cancelled', created: T(9, 6), moved: T(9, 9), focus: 'candidate' },
+    ], page2: [
+      { id: 'fr-old-fail-review', status: 'failed', created: T(1, 6), moved: T(1, 9), focus: 'review' },
+      { id: 'fr-old-ok', status: 'succeeded', created: '2026-09-30T06:00:00Z', moved: '2026-09-30T09:00:00Z' },
+    ] },
+    { workflow_id: 'filter-other', runs: [{ id: 'fo-running', status: 'running', created: T(13, 1), moved: T(13, 2), focus: 'launch_ui' }] },
+  ],
+}
+
+export const B_RUNNER: BProject = {
+  project_id: 'lists-b-runner', name: 'Lists B runner',
+  workflows: [{ workflow_id: 'runner', runs: [{ id: 'runner-1', status: 'running', created: T(12, 1), moved: T(12, 2), focus: 'launch_ui' }, { id: 'runner-0', status: 'succeeded', created: T(11, 1), moved: T(11, 2) }] }],
+}
+export const B_PARKED: BProject = {
+  project_id: 'lists-b-parked', name: 'Lists B parked',
+  workflows: [
+    { workflow_id: 'parked-a', runs: [{ id: 'parked-a-1', status: 'paused', created: T(12, 1), moved: T(13, 6), focus: 'review', attention: pausedAt(T(13, 6)) }] },
+    { workflow_id: 'parked-b', runs: [{ id: 'parked-b-1', status: 'paused', created: T(12, 2), moved: T(13, 6, 30), focus: 'review', attention: pausedAt(T(13, 6, 30)) }] },
+  ],
+}
+
+export const B_PROJECTS: readonly BProject[] = [B_ORDER, B_FOLD, B_FILTER, B_RUNNER, B_PARKED]

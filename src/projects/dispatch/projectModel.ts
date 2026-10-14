@@ -4,7 +4,7 @@
  * project tone) reuses `lists.ts` so the dispatch pages and Runs home read state the same way.
  */
 import type { ProjectRuns, RunSummary } from '../api.ts'
-import { classifyRuns, classOf, endedAt, isFinished, movedAt, type RunClasses } from '../lists.ts'
+import { classifyRuns, classOf, compareCreated, compareLive, endedAt, isFinished, movedAt, type RunClasses } from '../lists.ts'
 import { stateTone, type Tone } from '../tone.ts'
 
 const ms = (iso: string) => Date.parse(iso)
@@ -97,4 +97,37 @@ export function projectRunInfo(entry: ProjectRuns | null): ProjectRunInfo {
   const latestRun = latestRunOf(runs)
   const worstLatestCount = featureTones.filter(candidate => candidate === tone).length
   return { state: allBad ? 'failed' : 'read', waits, paused, running, allBad, badFeatures, lastActivity, tone, features: workflows.length, readableFeatures: readable.length, counts, runCount: runs.length, latestRun, worstLatestCount }
+}
+
+/**
+ * The project page's features in a sort: by default the feature with the most urgent run first (needs the operator, running,
+ * paused, none), then the latest activity, then `workflow_id`; under "newest" / "oldest" by last activity descending /
+ * ascending, ties by `workflow_id`. A feature with no read run comes after the rest under every sort, by `workflow_id`.
+ */
+export function orderFeatures<T extends { workflow: { workflow_id: string }; rank: number; lastActivity: number | null }>(groups: readonly T[], sort: 'live' | 'newest' | 'oldest'): T[] {
+  return [...groups].sort((a, b) => {
+    if ((a.lastActivity === null) !== (b.lastActivity === null)) return a.lastActivity === null ? 1 : -1
+    const byId = a.workflow.workflow_id.localeCompare(b.workflow.workflow_id)
+    if (a.lastActivity === null || b.lastActivity === null) return byId
+    if (sort === 'live') return a.rank - b.rank || b.lastActivity - a.lastActivity || byId
+    return (sort === 'newest' ? b.lastActivity - a.lastActivity : a.lastActivity - b.lastActivity) || byId
+  })
+}
+
+/** An open feature's run rows in a sort: the list order by default, else by `created_at` in the features' direction. */
+export function orderFeatureRuns<T extends { run: RunSummary }>(runs: readonly T[], sort: 'live' | 'newest' | 'oldest', classes: RunClasses): T[] {
+  const compare = sort === 'live' ? compareLive(classes) : compareCreated(sort === 'newest' ? 'desc' : 'asc')
+  return [...runs].sort((a, b) => compare(a.run, b.run))
+}
+
+/**
+ * Whether a feature is open: the operator's own toggle when given; else, while the bar filters, a feature with a match (an
+ * unreadable one stays open with its read error, never "0 of 0"); else a feature with a run that needs the operator or is
+ * running, or one that cannot be read.
+ */
+export function featureOpen(group: { rank: number; unreadable: boolean; matches: number }, filtering: boolean, own: boolean | undefined): boolean {
+  if (own !== undefined) return own
+  if (group.unreadable) return true
+  if (filtering) return group.matches > 0
+  return group.rank <= 1
 }

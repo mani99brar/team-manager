@@ -163,7 +163,7 @@ const nooriginRuns = {
   'main-001': summary(DISPATCH_NOORIGIN, 'main', 'main-001', { status: 'succeeded', stop: 'integrate', feature: 'Main' }),
 }
 
-// ---- The runs that need the operator, and the ones that do not (ux-critique-fixes M2, M14, M19) -----------------------
+// ---- The runs that need the operator, and the ones that do not ---------------------------------------------
 // No Origin carries the Needs-you cases, each in its own workflow so that what is latest is decided per workflow: a run paused
 // at the design challenge, an interrupted paused run and an interrupted running run (each the latest of its workflow); a
 // challenge-paused run superseded by a later failed run of its workflow (whose feature text differs, and which ran 50 h); an
@@ -582,7 +582,7 @@ function writeDispatchRun(runsRootDir: string, runId: string, updatedAt: string,
   if (shape.kind !== 'unreadable') writeFileSync(join(dir, 'plan.json'), `${JSON.stringify({ run_id: runId, base_commit: RUN_BASE }, null, 2)}\n`)
 }
 
-/** Writes one of the M2 runs (`M2_RUNS`) in the storage format, its rows as given, so the server derives the same state. */
+/** Writes one of the runs that need the operator, or not (`M2_RUNS`) in the storage format, its rows as given, so the server derives the same state. */
 function writeM2Run(runsRootDir: string, run: M2Run): void {
   const dir = join(runsRootDir, run.runId)
   mkdirSync(dir, { recursive: true })

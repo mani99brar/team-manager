@@ -72,13 +72,15 @@
    V23). The column count is decided from the body's own width with a container query, not a viewport media query, so it is
    right whatever the shell around it (the workspace border and padding the media-query arithmetic used to leave out). A
    container query cannot style its own container, so `.dispatch-body-container` wraps the body and carries the container;
-   `.dispatch-project-body` (the grid it styles) is the child. 876px = a 480px chart + 16px gap + the 380px GitHub column. */
+   `.dispatch-project-body` (the grid it styles) is the child. 876px = a 480px chart + 16px gap + the 380px GitHub column.
+   A project without a GitHub remote (`-wide`) has no GitHub column in the body, so it keeps one track at any width. */
 .projects-shell .dispatch-project.has-pane { display: grid; grid-template-columns: minmax(0, 1fr) minmax(380px, 420px); column-gap: 16px; align-items: start; }
-.projects-shell .dispatch-project.has-pane > .dispatch-project-head { grid-column: 1 / -1; }
+.projects-shell .dispatch-project.has-pane > .dispatch-project-head,
+.projects-shell .dispatch-project.has-pane > .dispatch-gh-line { grid-column: 1 / -1; }
 .projects-shell .dispatch-body-container { min-width: 0; }
 .projects-shell .dispatch-project.has-pane .dispatch-body-container { container-type: inline-size; container-name: dispatch-body; }
 .projects-shell .dispatch-project.has-pane .dispatch-project-body { grid-template-columns: minmax(0, 1fr); }
-@container dispatch-body (min-width: 876px) { .projects-shell .dispatch-project.has-pane .dispatch-project-body { grid-template-columns: minmax(0, 1fr) 380px; } }
+@container dispatch-body (min-width: 876px) { .projects-shell .dispatch-project.has-pane .dispatch-project-body:not(.dispatch-project-body-wide) { grid-template-columns: minmax(0, 1fr) 380px; } }
 .projects-shell .dispatch-project-main { min-width: 0; }
 .projects-shell .dispatch-crumbs { font-size: 12.5px; color: var(--muted); }
 .projects-shell .dispatch-crumbs a { color: var(--muted); }
@@ -89,14 +91,48 @@
 .projects-shell .dispatch-fig b { color: var(--fg); font-size: 15px; }
 .projects-shell .dispatch-jump { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
 .projects-shell .dispatch-jump button { font: inherit; font-size: 13px; font-weight: 600; min-height: 36px; padding: 0 12px; border: 1px solid var(--border-strong); border-radius: 10px; background: var(--surface); color: var(--fg); cursor: pointer; }
-.projects-shell .dispatch-filter input { width: 100%; max-width: 420px; height: 40px; padding: 0 12px; border: 1px solid var(--border-strong); border-radius: 10px; background: var(--surface); color: var(--fg); font: inherit; }
+.projects-shell .dispatch-filter .run-filter { margin: 4px 0 0; }
+@media (min-width: 761px) {
+  .projects-shell .dispatch-filter .run-filter-status button { padding: 2px 10px; }
+  .projects-shell .dispatch-filter .run-filter-search, .projects-shell .dispatch-filter .run-filter-field select { min-height: 28px; }
+}
+/* A project without a GitHub remote: its GitHub column is one line under the header, and the chart takes the width. */
+.projects-shell .dispatch-gh-line { margin-top: 10px; }
+.projects-shell .dispatch-gh-line .dispatch-gline { margin: 0; font-size: 13px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.projects-shell .dispatch-gh-line .dispatch-gh-title { font-weight: 700; color: var(--fg); }
+.projects-shell .dispatch-project-body.dispatch-project-body-wide { grid-template-columns: minmax(0, 1fr); }
+.projects-shell .dispatch-order { margin: 4px 0; font-size: 13px; }
+/* Each feature is one header row (its link, then the Show runs disclosure beside it); its runs open below on demand. */
+.projects-shell .dispatch-feature-row { display: flex; align-items: stretch; gap: 8px; min-width: 0; }
+.projects-shell .dispatch-feature-row > .lists-group-head { flex: 1 1 auto; min-width: 0; flex-direction: row; flex-wrap: wrap; align-items: baseline; gap: 2px 12px; padding: 4px 12px; }
+.projects-shell .dispatch-feature-word { font-weight: 700; color: var(--tone, var(--fg)); }
+.projects-shell .dispatch-feature-last { margin-left: auto; color: var(--muted); font-size: 12.5px; }
+.projects-shell .dispatch-feature-toggle { flex: none; font: inherit; font-size: 13px; font-weight: 600; min-height: 26px; padding: 0 12px; border: 1px solid var(--border-strong); border-radius: 10px; background: var(--surface); color: var(--fg); cursor: pointer; align-self: center; }
+.projects-shell .dispatch-feature-toggle[aria-expanded="true"] { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+.projects-shell .dispatch-feature-body { margin-top: 2px; }
+.projects-shell .dispatch-chart > .lists-groups { gap: 6px; }
+.projects-shell .dispatch-feature-row > .lists-group-head { min-height: 0; line-height: 1.35; }
+/* Above 760 px the figures and the jump buttons share one row, so the features start inside the first screen. */
+@media (min-width: 761px) {
+  .projects-shell .dispatch-project-head { display: flex; flex-wrap: wrap; align-items: center; column-gap: 16px; }
+  .projects-shell .dispatch-project-head > .dispatch-figs, .projects-shell .dispatch-project-head > .dispatch-filter { flex-basis: 100%; }
+  .projects-shell .dispatch-project-head > .dispatch-figs, .projects-shell .dispatch-project-head > .dispatch-jump { margin: 4px 0; }
+  .projects-shell .dispatch-project-head > .dispatch-meta { flex: 1 1 320px; min-width: 0; }
+}
+.projects-shell .lists-group.dispatch-feature { margin-top: 0; gap: 0; }
+.projects-shell .dispatch-run-when { color: var(--muted); font-size: 12.5px; white-space: nowrap; }
+.projects-shell .dispatch-defs { display: flex; flex-wrap: wrap; gap: 0 18px; margin-bottom: 2px; }
+.projects-shell .dispatch-defs > .dispatch-def { margin: 0; }
+.projects-shell .dispatch-defs > .dispatch-order { margin: 0; flex-basis: 100%; }
+.projects-shell .dispatch-defs > .dispatch-def[open] { flex-basis: 100%; }
+.projects-shell .dispatch-def-users { margin: 4px 0 0; font-size: 12px; }
 
 /* step chart */
-.projects-shell .dispatch-chart { margin-top: 8px; }
+.projects-shell .dispatch-chart { margin-top: 4px; }
 /* The axis, the run tracks and the "ended here" row share one 8-column template (set inline from CHART_COLUMNS) and the same
    12px side padding, so column i of the axis spans column i of every track at every width (V3). The "phase" and "ended here"
    captions sit above/below the track as block labels, never as a grid column, so they do not shift the columns. */
-.projects-shell .dispatch-axis { position: sticky; top: 0; z-index: 2; background: var(--bg); padding: 6px 12px; border-bottom: 1px solid var(--border); }
+.projects-shell .dispatch-axis { position: sticky; top: 0; z-index: 2; background: var(--bg); padding: 2px 12px; border-bottom: 1px solid var(--border); }
 .projects-shell .dispatch-axis-l { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin-bottom: 3px; }
 .projects-shell .dispatch-axis-track, .projects-shell .dispatch-track, .projects-shell .dispatch-ends-track { display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); align-items: center; }
 .projects-shell .dispatch-ax { font-size: 11px; color: var(--muted); text-align: center; white-space: nowrap; min-width: 0; padding: 0 2px; }
@@ -108,18 +144,17 @@
 }
 /* Steps of this definition fold (V7). */
 .projects-shell .dispatch-def { margin: 6px 12px 0; font-size: 12.5px; }
-.projects-shell .dispatch-def summary { cursor: pointer; color: var(--muted); display: flex; gap: 8px; align-items: baseline; min-height: 28px; }
+.projects-shell .dispatch-def summary { cursor: pointer; color: var(--muted); display: flex; gap: 8px; align-items: baseline; min-height: 24px; }
 .projects-shell .dispatch-def-list { list-style: none; margin: 6px 0 0; padding: 0; display: grid; gap: 2px; }
 .projects-shell .dispatch-def-list li { display: flex; gap: 10px; align-items: baseline; }
 .projects-shell .dispatch-def-phase { min-width: 72px; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
 .projects-shell .dispatch-def-label { color: var(--fg); }
 .projects-shell .dispatch-feature { list-style: none; }
-.projects-shell .lists-group.dispatch-feature { margin-top: 14px; }
 .projects-shell .dispatch-feature-id { font-family: var(--font-mono); font-weight: 700; }
 .projects-shell .dispatch-chain { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
 .projects-shell .dispatch-chip-run { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: var(--tone, var(--muted)); background: var(--tone-soft, var(--surface-2)); border-radius: 999px; padding: 1px 8px; }
 .projects-shell .dispatch-runs { margin-top: 6px; display: grid; gap: 2px; }
-.projects-shell .dispatch-run { display: grid; grid-template-columns: minmax(0, 1fr); gap: 3px; width: 100%; padding: 10px 12px; border: 0; border-top: 1px solid var(--border); background: none; text-align: left; cursor: pointer; color: var(--fg); }
+.projects-shell .dispatch-run { display: grid; grid-template-columns: minmax(0, 1fr); gap: 1px; width: 100%; padding: 4px 12px; border: 0; border-top: 1px solid var(--border); background: none; text-align: left; cursor: pointer; color: var(--fg); }
 .projects-shell .dispatch-run:hover { background: var(--surface-2); }
 .projects-shell .dispatch-run[aria-selected="true"] { background: var(--accent-soft); box-shadow: inset 0 0 0 1px var(--accent); }
 .projects-shell .dispatch-run-1 { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
@@ -132,7 +167,7 @@
 .projects-shell .dispatch-run-2 { font-size: 12.5px; color: var(--muted); }
 .projects-shell .dispatch-run-2 b { color: var(--fg); }
 .projects-shell .dispatch-tag { font-size: 11px; color: var(--muted); border: 1px solid var(--border); border-radius: 999px; padding: 0 6px; }
-.projects-shell .dispatch-track { margin-top: 4px; }
+.projects-shell .dispatch-track { margin-top: 0; }
 .projects-shell .dispatch-cell { display: flex; align-items: center; justify-content: center; gap: 3px; min-height: 22px; position: relative; }
 .projects-shell .dispatch-cell::before { content: ""; position: absolute; left: 0; right: 0; top: 50%; height: 2px; background: var(--edge-soft, var(--border)); }
 .projects-shell .dispatch-cell.ahead::before { background: repeating-linear-gradient(90deg, var(--border) 0 4px, transparent 4px 8px); }
@@ -152,9 +187,10 @@
 .projects-shell #dispatch-runs-section { container-type: inline-size; container-name: dispatch-chart; }
 
 /* Needs you and running (V5) */
-.projects-shell .dispatch-needs { margin-bottom: 12px; }
-.projects-shell .dispatch-needs-h { font-size: 13px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); margin: 0 0 6px; }
-.projects-shell .dispatch-needs-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+.projects-shell .dispatch-needs { margin-bottom: 4px; display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 16px; }
+.projects-shell .dispatch-needs > p { margin: 0; }
+.projects-shell .dispatch-needs-h { font-size: 13px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); margin: 0; }
+.projects-shell .dispatch-needs-list { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 4px 18px; }
 .projects-shell .dispatch-needs-list li { display: flex; align-items: baseline; gap: 8px; }
 .projects-shell .dispatch-needs-list a { color: var(--accent); text-decoration: none; }
 .projects-shell .dispatch-needs-list code { font-family: var(--font-mono); }
@@ -239,9 +275,11 @@
    so its Copy/Run buttons and legend/all-steps disclosures are sized here, scoped to the pane. */
 @media (max-width: 480px) {
   .projects-shell .dispatch-cards { grid-template-columns: minmax(0, 1fr); }
+  .projects-shell .dispatch-run-1, .projects-shell .dispatch-feature-row { flex-wrap: wrap; }
+  .projects-shell .dispatch-run-when { white-space: normal; }
   .projects-shell .dispatch-jump button,
   .projects-shell .dispatch-pane-open, .projects-shell .dispatch-pane-close, .projects-shell .dispatch-pane-nav button,
-  .projects-shell .dispatch-filter input,
+  .projects-shell .dispatch-feature-toggle, .projects-shell .dispatch-def summary,
   .projects-shell .dispatch-gh-ahead-btn, .projects-shell .dispatch-show-more,
   .projects-shell .dispatch-pane .command-copy, .projects-shell .dispatch-pane .command-run-button, .projects-shell .dispatch-pane .command-step > summary,
   .projects-shell .dispatch-pane .command-legend > summary, .projects-shell .dispatch-pane .command-all-steps > summary { min-height: 44px; }

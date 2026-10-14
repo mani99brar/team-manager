@@ -127,13 +127,57 @@ export const movedAt = (run: Pick<RunSummary, 'updated_at' | 'activity'>) => run
 
 export type HomeSections<T> = { needsYou: T[]; today: T[]; running: T[]; paused: T[]; superseded: T[]; recent: T[]; classes: RunClasses }
 
+/** When a run last moved, for every list order: its end once finished, else its last activity. */
+export const lastActivityAt = (run: Pick<RunSummary, 'status' | 'accepted' | 'updated_at' | 'activity'>) => ms(isFinished(run) ? endedAt(run) : movedAt(run))
+
 /**
- * Runs home's sections (docs/PRD_VIEWER_REVAMP.md 5.1, Today first since 2026-10-09): what needs the operator (a question, a
- * pane, an approval, a decision at the design challenge or an interrupted latest run, longest waiting first); every run that
- * moved today (running ones first, then latest activity first), whatever its status; the runs still running since an earlier
- * day; the runs paused since an earlier day, longest paused first; the superseded paused runs, folded apart; and the runs
- * finished in the last seven days before today. A run sits in exactly one section. `zone` decides where today begins;
- * without it, today is the UTC day. `classes` is the list's classification (`classifyRuns`), computed here when not given.
+ * A run's group in the one list order: 0 needs the operator (its class), 1 running, 2 paused and not superseded, 3 the rest
+ * (finished runs, superseded paused runs, and runs that wait to start). A finished run never ranks above a live one, whatever
+ * attention it is served with; status alone never makes a run need the operator.
+ */
+export function liveRank(run: Pick<RunSummary, 'status' | 'accepted'>, cls: RunClass): 0 | 1 | 2 | 3 {
+  if (cls.needs !== null) return 0
+  if (isFinished(run)) return 3
+  if (run.status === 'running') return 1
+  if (run.status === 'paused' && cls.supersededBy === null) return 2
+  return 3
+}
+
+type Ordered = Pick<RunSummary, 'project_id' | 'workflow_id' | 'run_id' | 'status' | 'accepted' | 'updated_at' | 'created_at' | 'activity'>
+
+/**
+ * The one list order ("needs you and running first, then latest activity"): needs the operator, running, paused (not
+ * superseded), the rest; inside each group the latest activity first (`movedAt` unfinished, `endedAt` finished), ties by
+ * `run_id`. `classes` is the list's one classification (`classifyRuns`), computed once per list by the caller.
+ */
+export function compareLive(classes: RunClasses): (a: Ordered, b: Ordered) => number {
+  return (a, b) => liveRank(a, classOf(classes, a)) - liveRank(b, classOf(classes, b))
+    || lastActivityAt(b) - lastActivityAt(a) || a.run_id.localeCompare(b.run_id)
+}
+
+/** The list sorts: the default order above, or by creation time newest or oldest first, ties by `run_id` ascending. */
+export const LIST_SORTS = ['live', 'newest', 'oldest'] as const
+export type ListSort = (typeof LIST_SORTS)[number]
+
+/** Runs by `created_at`, newest (`desc`) or oldest first, ties by `run_id` ascending in both directions. */
+export function compareCreated(direction: 'desc' | 'asc'): (a: Pick<RunSummary, 'created_at' | 'run_id'>, b: Pick<RunSummary, 'created_at' | 'run_id'>) => number {
+  const sign = direction === 'desc' ? -1 : 1
+  return (a, b) => sign * (ms(a.created_at) - ms(b.created_at)) || a.run_id.localeCompare(b.run_id)
+}
+
+/** A list's rows in the chosen sort: the default order, or by creation time. */
+export function sortRuns<T extends { run: Ordered }>(rows: readonly T[], sort: ListSort, classes: RunClasses): T[] {
+  const compare = sort === 'live' ? compareLive(classes) : compareCreated(sort === 'newest' ? 'desc' : 'asc')
+  return [...rows].sort((a, b) => compare(a.run, b.run))
+}
+
+/**
+ * Runs home's sections (Triage): what needs the operator (a question, a pane, an approval, a decision at the design
+ * challenge or an interrupted latest run), longest waiting first; every running run that needs nobody, whatever day it last
+ * moved (with the runs that wait to start); the runs that finished today; the paused runs no later run superseded; the
+ * superseded paused runs, folded apart; and the runs finished in the last seven days before today. A run sits in exactly one
+ * section, and the rows of every section but Needs you follow the list order (`compareLive`). `zone` decides where today
+ * begins; without it, today is the UTC day. `classes` is the list's classification (`classifyRuns`), computed here when not given.
  */
 export function homeSections<T extends { run: RunSummary }>(rows: readonly T[], now: number, zone: Zone = 'utc', classes: RunClasses = classifyRuns(rows.map(row => row.run))): HomeSections<T> {
   const needsYou: T[] = []
@@ -144,26 +188,46 @@ export function homeSections<T extends { run: RunSummary }>(rows: readonly T[], 
   const recent: T[] = []
   const todayKey = dayKey(now, zone)
   for (const row of rows) {
-    const finished = isFinished(row.run)
-    const moved = finished ? endedAt(row.run) : movedAt(row.run)
     const cls = classOf(classes, row.run)
     if (cls.supersededBy !== null) superseded.push(row)
     else if (cls.needs !== null) needsYou.push(row)
-    else if (dayKey(moved, zone) === todayKey && ms(moved) <= now + 60_000) today.push(row)
-    else if (finished) { if (ms(endedAt(row.run)) >= now - RECENT_WINDOW_MS) recent.push(row) }
-    else if (row.run.status === 'paused') paused.push(row)
+    else if (isFinished(row.run)) {
+      const ended = endedAt(row.run)
+      if (dayKey(ended, zone) === todayKey && ms(ended) <= now + 60_000) today.push(row)
+      else if (ms(ended) >= now - RECENT_WINDOW_MS) recent.push(row)
+    } else if (row.run.status === 'paused') paused.push(row)
     else running.push(row)
   }
   const since = (row: T) => ms(row.run.activity?.attention?.since ?? movedAt(row.run))
-  const moved = (row: T) => ms(isFinished(row.run) ? endedAt(row.run) : movedAt(row.run))
   needsYou.sort((a, b) => since(a) - since(b) || a.run.run_id.localeCompare(b.run.run_id))
-  today.sort((a, b) => Number(b.run.status === 'running') - Number(a.run.status === 'running') || moved(b) - moved(a) || a.run.run_id.localeCompare(b.run.run_id))
-  running.sort((a, b) => ms(movedAt(b.run)) - ms(movedAt(a.run)) || a.run.run_id.localeCompare(b.run.run_id))
-  paused.sort((a, b) => since(a) - since(b) || a.run.run_id.localeCompare(b.run.run_id))
-  superseded.sort((a, b) => since(a) - since(b) || a.run.run_id.localeCompare(b.run.run_id))
-  recent.sort((a, b) => ms(endedAt(b.run)) - ms(endedAt(a.run)) || a.run.run_id.localeCompare(b.run.run_id))
+  const live = compareLive(classes)
+  for (const section of [today, running, paused, superseded, recent]) section.sort((a, b) => live(a.run, b.run))
   return { needsYou, today, running, paused, superseded, recent, classes }
 }
+
+/**
+ * Triage's sections under a sort: the default keeps `homeSections`' rows; "newest" and "oldest" keep every run in its
+ * section and order the rows inside each section by `created_at`. Section order and placement never move.
+ */
+export function sortHomeSections<T extends { run: RunSummary }>(sections: HomeSections<T>, sort: ListSort): HomeSections<T> {
+  if (sort === 'live') return sections
+  const compare = compareCreated(sort === 'newest' ? 'desc' : 'asc')
+  const by = (rows: T[]) => [...rows].sort((a, b) => compare(a.run, b.run))
+  return {
+    needsYou: by(sections.needsYou), today: by(sections.today), running: by(sections.running), paused: by(sections.paused),
+    superseded: by(sections.superseded), recent: by(sections.recent), classes: sections.classes,
+  }
+}
+
+/** A Triage section's row order in words, under each sort; Needs you keeps its longest-waiting order under the default. */
+export function sectionOrderWords(sort: ListSort, needsYou = false): string {
+  if (sort === 'newest') return 'newest created first'
+  if (sort === 'oldest') return 'oldest created first'
+  return needsYou ? 'longest waiting first' : 'latest activity first'
+}
+
+/** Triage's state sections in page order (Pinned, when shown, comes before them); the jump links follow it. */
+export const HOME_SECTION_ORDER = ['needs-you', 'running-runs', 'today-runs', 'paused-runs', 'recent-runs'] as const
 
 /** How many paused runs the Paused section shows before the rest fold behind "Show all". */
 export const PAUSED_SHOWN = 5
@@ -371,7 +435,7 @@ export function servedNow(now: Now, served: ServedRun | null): Now {
 export const RECENT_SHOWN = 10
 /** Projects fold into a rail group when this many or more share the prefix before their last `-` segment. */
 export const PREFIX_GROUP_MIN = 3
-export const RECENT_FILTERS = ['all', 'failed', 'succeeded', 'today'] as const
+export const RECENT_FILTERS = ['all', 'failed', 'succeeded'] as const
 export type RecentFilter = (typeof RECENT_FILTERS)[number]
 
 /** What a mixed list knows about a row beyond its run: its feature title and project, and its workflow's node labels. */
@@ -412,15 +476,13 @@ export function dayLabel(key: string, now: number, zone: Zone): string {
   return `${MONTH_NAMES[month - 1]} ${day}${year === todayYear ? '' : ` ${year}`}`
 }
 
-/** Recent's filters: Failed and Succeeded by status, Today by the day the run ended in the reader's zone. */
+/** Recent's filters: Failed and Succeeded by status. */
 export function filterRecent<T extends { run: RunSummary }>(rows: readonly T[], filter: RecentFilter, now: number, zone: Zone): T[] {
+  void now
+  void zone
   // The override (L12) is not a failure; under Succeeded it appears only with its own marker (the row's chip), never as a reviewed success.
   if (filter === 'failed') return rows.filter(row => !row.run.accepted && row.run.status === 'failed')
   if (filter === 'succeeded') return rows.filter(row => row.run.status === 'succeeded')
-  if (filter === 'today') {
-    const today = dayKey(now, zone)
-    return rows.filter(row => dayKey(endedAt(row.run), zone) === today)
-  }
   return [...rows]
 }
 

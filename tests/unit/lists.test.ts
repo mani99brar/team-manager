@@ -12,7 +12,14 @@ import {
   NEXT_STEP, PREFIX_GROUP_MIN, projectFacts, projectPrefix, projectTone, railEntries, readsNextPage, RECENT_FILTERS, RECENT_SHOWN, recentCounts,
   recordHomeReadings, recordReading, RECENT_WINDOW_MS, reviewStepsOf, rowSummary, rowTime, searchRows, servedDisagreement, servedNow, sincePausedLabel, stepTally, waitingKind, workflowTitle, type ServedRun,
   classifyRuns, classOf, rowLook, stoppedLabel, type RunClass,
+  compareLive, HOME_SECTION_ORDER, liveRank, sectionOrderWords, sortHomeSections, sortRuns, type HomeSections,
 } from '../../src/projects/lists.ts'
+import {
+  DATE_CHOICES, DATE_FILTER_LABEL, DEFAULT_FILTER, filterActive, filterItems, inDateWindow, projectScopeLine, runPhase, scopeLine, SORT_CHOICES, statusCounts, statusOf,
+  STATUS_FILTERS, type FilterItem, type RunFilterState,
+} from '../../src/projects/runFilter.ts'
+import { PHASES } from '../../src/projects/dispatch/phases.ts'
+import { B_FILTER, B_MIX, B_MIX_ORDER, B_ORDER, bSummary } from '../project-workflows/fixtures/ux-lists.ts'
 import { createPinStore, PINS_KEY, PINS_MAX, type PinStorage } from '../../src/projects/pins.ts'
 import { projectRunInfo } from '../../src/projects/dispatch/projectModel.ts'
 import { definition, laneGraphNodes, runDetail, type NodeState } from '../project-workflows/fixtures.ts'
@@ -91,10 +98,11 @@ describe('Runs home sections', () => {
   test('Needs you holds the questions, panes and approvals, longest waiting first', () => {
     assert.deepEqual(ids(sections.needsYou), ['approval', 'pane', 'asking'])
   })
-  test('Today holds every run that moved today and waits on nobody, running first, then latest activity first', () => {
+  test('Today holds only the runs that finished today; a running run that moved today is in Running', () => {
     // `interrupted` is paused and a later run of its workflow exists (every run here shares created_at; the tie goes to the
     // greater run id, `too-old`): it is superseded, folded apart, never in Today.
-    assert.deepEqual(ids(sections.today), ['live'])
+    assert.deepEqual(ids(sections.today), [])
+    assert.ok(ids(sections.running).includes('live'))
     assert.deepEqual(ids(sections.superseded), ['interrupted'])
     assert.equal(sections.classes.get('alpha-project\u0000ux-lists\u0000interrupted')?.supersededBy, 'too-old')
     // A run finished today is Today's, not Recent's; a run that moved today in UTC but yesterday in a zone west of it follows the zone.
@@ -105,17 +113,17 @@ describe('Runs home sections', () => {
     assert.deepEqual(ids(west.today), sameDay ? ['done-today'] : [])
     assert.deepEqual(ids(west.recent), sameDay ? [] : ['done-today'])
   })
-  test('Running holds the unfinished runs since an earlier day that are not paused and wait on nobody, latest activity first', () => {
-    assert.deepEqual(ids(sections.running), ['legacy-running'])
+  test('Running holds every unfinished run that is not paused and waits on nobody, whatever day it moved, latest activity first', () => {
+    assert.deepEqual(ids(sections.running), ['live', 'legacy-running'])
   })
-  test('Paused holds the paused runs since an earlier day that wait on nobody, oldest first (longest stopped at the top)', () => {
+  test('Paused holds the paused runs that wait on nobody, latest activity first (the list order)', () => {
     assert.deepEqual(ids(sections.paused), [])
     // Two paused runs: the one stopped longer ago leads; a since-less paused run orders by its last activity.
     // Each in its own workflow, so each is the latest of its workflow and none is superseded.
     const older = summary('paused-older', 'paused', { workflow: 'w-older', activity: activity({ attention: { kind: 'paused', node_id: 'handoff', since: '2026-03-18T08:00:00Z' } }) })
     const newer = summary('paused-newer', 'paused', { workflow: 'w-newer', activity: activity({ attention: { kind: 'paused', node_id: 'handoff', since: '2026-03-20T08:00:00Z' } }) })
     const sinceless = summary('paused-sinceless', 'paused', { workflow: 'w-sinceless', activity: activity({ attention: { kind: 'paused', node_id: null, since: null }, last_activity_at: '2026-03-19T08:00:00Z' }) })
-    assert.deepEqual(ids(homeSections([row(newer), row(older), row(sinceless)], NOW).paused), ['paused-older', 'paused-sinceless', 'paused-newer'])
+    assert.deepEqual(ids(homeSections([row(newer), row(older), row(sinceless)], NOW).paused), ['paused-newer', 'paused-older', 'paused-sinceless'])
   })
   test('Recent holds finished runs of the last seven days before today, newest first; an older run is absent, and no run appears twice', () => {
     assert.deepEqual(ids(sections.recent), ['legacy-recent', 'failed-now', 'failed-earlier'])
@@ -321,14 +329,15 @@ describe('Recent filters and day groups', () => {
     assert.deepEqual(ids(filterRecent(rows, 'all', NOW_MARCH_12, 'utc')), ids(rows))
     assert.deepEqual(ids(filterRecent(rows, 'failed', NOW_MARCH_12, 'utc')), ['f-today', 'f-older'])
     assert.deepEqual(ids(filterRecent(rows, 'succeeded', NOW_MARCH_12, 'utc')), ['s-today', 's-yesterday', 'legacy'])
-    assert.deepEqual(ids(filterRecent(rows, 'today', NOW_MARCH_12, 'utc')), ['f-today', 's-today'])
-    assert.deepEqual(recentCounts(rows, NOW_MARCH_12, 'utc'), { all: 6, failed: 2, succeeded: 3, today: 2 })
-    assert.deepEqual([...RECENT_FILTERS], ['all', 'failed', 'succeeded', 'today'])
+    // Recent offers no "Today" filter: today's runs sit in Triage's Today section, and the one bar's "Today" filters every section.
+    assert.deepEqual(recentCounts(rows, NOW_MARCH_12, 'utc'), { all: 6, failed: 2, succeeded: 3 })
+    assert.deepEqual([...RECENT_FILTERS], ['all', 'failed', 'succeeded'])
+    assert.ok(!(RECENT_FILTERS as readonly string[]).includes('today'))
   })
   test('the filter counts are over the searched set, so a button names the rows that filter keeps (P2 1)', () => {
     // Searching the run id "f-" narrows to the two failed runs; the counts are then over that set, not every row.
-    assert.deepEqual(recentCounts(searchRows(rows, 'f-'), NOW_MARCH_12, 'utc'), { all: 2, failed: 2, succeeded: 0, today: 1 })
-    assert.deepEqual(recentCounts(searchRows(rows, 'nothing-matches'), NOW_MARCH_12, 'utc'), { all: 0, failed: 0, succeeded: 0, today: 0 })
+    assert.deepEqual(recentCounts(searchRows(rows, 'f-'), NOW_MARCH_12, 'utc'), { all: 2, failed: 2, succeeded: 0 })
+    assert.deepEqual(recentCounts(searchRows(rows, 'nothing-matches'), NOW_MARCH_12, 'utc'), { all: 0, failed: 0, succeeded: 0 })
   })
   test('a day key is the calendar day in the chosen zone', () => {
     assert.equal(dayKey('2026-03-12T01:00:00Z', 'utc'), '2026-03-12')
@@ -444,10 +453,10 @@ describe('Runs home cards', () => {
   test('a paused run served without attention.since waits on nobody: a Paused row, not a Needs-you card (run 007)', () => {
     const held = summary('held', 'paused', { created: '2026-03-20T07:00:00Z', activity: activity({ last_activity_at: '2026-03-20T07:00:16Z', attention: { kind: 'paused', node_id: 'handoff', since: null } }) })
     assert.equal(waitingKind(held), null)
-    // Held today: a Today row (it moved today); held since an earlier day: a Paused row. Never a Needs-you card.
+    // Held today or since an earlier day: a Paused row (a run paused today never goes to Today). Never a Needs-you card.
     const sections = homeSections([{ run: held }], NOW)
-    assert.deepEqual(sections.today.map(row => row.run.run_id), ['held'])
-    assert.equal(sections.paused.length + sections.running.length + sections.needsYou.length, 0)
+    assert.deepEqual(sections.paused.map(row => row.run.run_id), ['held'])
+    assert.equal(sections.today.length + sections.running.length + sections.needsYou.length, 0)
     const earlier = homeSections([{ run: held }], NOW + 2 * DAY)
     assert.deepEqual(earlier.paused.map(row => row.run.run_id), ['held'])
     assert.equal(earlier.today.length + earlier.needsYou.length, 0)
@@ -713,5 +722,335 @@ describe('the Triage pin store ([O10])', () => {
     } finally {
       globalThis.fetch = original
     }
+  })
+})
+
+const ACCEPTED: NonNullable<RunSummary['accepted']> = { candidate: 'a'.repeat(40), reason: 'manual', by: 'operator', accepted_at: '2026-03-19T08:00:00Z', on_main: true, review: 'none', open_findings: [], abandoned: null }
+
+describe('the one list order (compareLive) and the sorts', () => {
+  const T = '2026-03-20T'
+  const run = (runId: string, status: RunSummary['status'], fields: { created: string; moved: string; workflow?: string; attention?: RunActivity['attention']; accepted?: boolean }) => {
+    const finished = ['succeeded', 'failed', 'cancelled'].includes(status)
+    const base = summary(runId, status, { created: fields.created, updated: fields.moved, workflow: fields.workflow ?? runId, activity: activity({ last_activity_at: fields.moved, finished_at: finished ? fields.moved : null, attention: fields.attention ?? null }) })
+    return fields.accepted ? { ...base, accepted: ACCEPTED } as RunSummary : base
+  }
+  const asking = run('asking', 'running', { created: `${T}01:00:00Z`, moved: `${T}02:00:00Z`, attention: { kind: 'question', node_id: 'launch_ui', since: `${T}02:00:00Z` } })
+  const pane = run('pane', 'running', { created: `${T}01:00:00Z`, moved: `${T}01:30:00Z`, attention: { kind: 'pane', node_id: 'launch_ui', since: `${T}01:30:00Z` } })
+  const approval = run('approval', 'awaiting_approval', { created: `${T}01:00:00Z`, moved: `${T}01:10:00Z`, attention: { kind: 'approval', node_id: 'handoff', since: `${T}01:10:00Z` } })
+  const decision = run('decision', 'paused', { created: `${T}01:00:00Z`, moved: `${T}00:10:00Z`, attention: { kind: 'paused', node_id: 'challenge', since: `${T}00:10:00Z` } })
+  const halted = run('halted', 'paused', { created: `${T}01:00:00Z`, moved: `${T}00:05:00Z`, attention: { kind: 'interrupted', node_id: 'verify_ui', since: null } })
+  const live = run('live', 'running', { created: `${T}05:00:00Z`, moved: `${T}11:00:00Z` })
+  const liveOld = run('live-old', 'running', { created: `${T}00:00:00Z`, moved: '2026-03-18T11:00:00Z' })
+  const parked = run('parked', 'paused', { created: `${T}03:00:00Z`, moved: `${T}09:00:00Z`, attention: { kind: 'paused', node_id: 'review', since: `${T}09:00:00Z` } })
+  const failed = run('failed', 'failed', { created: `${T}02:00:00Z`, moved: `${T}11:30:00Z` })
+  // The failed run served with interrupted attention (as alpha-project/ux-run/run-freeze-interrupted is): finished, needs nobody.
+  const frozen = run('frozen', 'failed', { created: `${T}02:00:00Z`, moved: `${T}11:45:00Z`, attention: { kind: 'interrupted', node_id: 'handoff', since: null } })
+  const done = run('done', 'succeeded', { created: `${T}04:00:00Z`, moved: `${T}10:00:00Z` })
+  // A superseded paused run: a later run of its own workflow exists.
+  const stale = run('stale', 'paused', { created: `${T}00:30:00Z`, moved: `${T}11:50:00Z`, workflow: 'shared', attention: { kind: 'question', node_id: 'launch_ui', since: `${T}11:50:00Z` } })
+  const successor = run('successor', 'cancelled', { created: `${T}06:00:00Z`, moved: `${T}06:30:00Z`, workflow: 'shared' })
+  const all = [asking, pane, approval, decision, halted, live, liveOld, parked, failed, frozen, done, stale, successor]
+  const classes = classifyRuns(all)
+  const ids = (list: { run_id: string }[]) => list.map(item => item.run_id)
+
+  test('needs the operator, running, paused (not superseded), the rest; each by latest activity; ties by run id; any input order', () => {
+    const order = ['asking', 'pane', 'approval', 'decision', 'halted', 'live', 'live-old', 'parked', 'stale', 'frozen', 'failed', 'done', 'successor']
+    assert.deepEqual(ids([...all].sort(compareLive(classes))), order)
+    assert.deepEqual(ids([...all].reverse().sort(compareLive(classes))), order)
+    assert.deepEqual(ids([...all].sort((a, b) => a.run_id.localeCompare(b.run_id)).sort(compareLive(classes))), order)
+    // Ties on last activity fall to the run id.
+    const twinA = run('twin-a', 'failed', { created: `${T}01:00:00Z`, moved: `${T}08:00:00Z` })
+    const twinB = run('twin-b', 'failed', { created: `${T}02:00:00Z`, moved: `${T}08:00:00Z` })
+    assert.deepEqual(ids([twinB, twinA].sort(compareLive(classifyRuns([twinA, twinB])))), ['twin-a', 'twin-b'])
+  })
+  test('a question-, pane- or approval-waiting run, a decision-waiting and an interrupted latest run rank first; status alone never does', () => {
+    for (const item of [asking, pane, approval, decision, halted]) assert.equal(liveRank(item, classOf(classes, item)), 0, item.run_id)
+    assert.equal(liveRank(live, classOf(classes, live)), 1)
+    assert.equal(liveRank(parked, classOf(classes, parked)), 2)
+    // A superseded paused run ranks with the finished, whatever attention it is served with.
+    assert.equal(classOf(classes, stale).supersededBy, 'successor')
+    assert.equal(liveRank(stale, classOf(classes, stale)), 3)
+  })
+  test('a failed run with interrupted attention ranks with the finished, never above a running or paused run, and counts in no wait count', () => {
+    assert.equal(classOf(classes, frozen).needs, null)
+    assert.equal(liveRank(frozen, classOf(classes, frozen)), 3)
+    const order = ids([...all].sort(compareLive(classes)))
+    assert.ok(order.indexOf('frozen') > order.indexOf('parked') && order.indexOf('frozen') > order.indexOf('live-old'))
+    const sections = homeSections(all.map(item => ({ run: item })), Date.parse(`${T}12:00:00Z`))
+    assert.ok(!sections.needsYou.some(row => row.run.run_id === 'frozen'))
+    assert.ok(sections.today.some(row => row.run.run_id === 'frozen'))
+    const entry = { project: { project_id: 'alpha-project', name: 'Alpha' }, error: null, workflows: [{ workflow: DEFINITION, runs: all, more: false, error: null }] }
+    assert.equal(projectRunInfo(entry as never).waits, 5)
+    assert.equal(statusOf(frozen, classOf(classes, frozen)), 'failed')
+  })
+  test('the sorts: by created_at newest or oldest first, ties by run id ascending in both', () => {
+    const rows = [failed, done, live].map(item => ({ run: item }))
+    assert.deepEqual(sortRuns(rows, 'live', classes).map(row => row.run.run_id), ['live', 'failed', 'done'])
+    assert.deepEqual(sortRuns(rows, 'newest', classes).map(row => row.run.run_id), ['live', 'done', 'failed'])
+    assert.deepEqual(sortRuns(rows, 'oldest', classes).map(row => row.run.run_id), ['failed', 'done', 'live'])
+    const twin = run('twin', 'failed', { created: `${T}02:00:00Z`, moved: `${T}03:00:00Z` })
+    assert.deepEqual(sortRuns([{ run: twin }, { run: failed }], 'newest', classes).map(row => row.run.run_id), ['failed', 'twin'])
+    assert.deepEqual(sortRuns([{ run: twin }, { run: failed }], 'oldest', classes).map(row => row.run.run_id), ['failed', 'twin'])
+  })
+})
+
+describe('Triage sections: placement, order and the sorts', () => {
+  const NOW_T = Date.parse('2026-03-20T12:00:00Z')
+  const run = (runId: string, status: RunSummary['status'], created: string, moved: string, attention: RunActivity['attention'] = null, workflow = runId) => {
+    const finished = ['succeeded', 'failed', 'cancelled'].includes(status)
+    return summary(runId, status, { created, updated: moved, workflow, activity: activity({ last_activity_at: moved, finished_at: finished ? moved : null, attention }) })
+  }
+  // Three running runs and three finished-today runs whose default, newest and oldest orders all differ.
+  const runA = run('run-a', 'running', '2026-03-15T08:00:00Z', '2026-03-20T09:00:00Z')
+  const runB = run('run-b', 'running', '2026-03-19T08:00:00Z', '2026-03-18T10:00:00Z')
+  const runC = run('run-c', 'running', '2026-03-17T08:00:00Z', '2026-03-20T11:00:00Z')
+  const doneA = run('done-a', 'failed', '2026-03-20T01:00:00Z', '2026-03-20T03:00:00Z')
+  const doneB = run('done-b', 'succeeded', '2026-03-20T05:00:00Z', '2026-03-20T06:00:00Z')
+  const doneC = run('done-c', 'cancelled', '2026-03-19T23:00:00Z', '2026-03-20T10:00:00Z')
+  const pausedToday = run('paused-today', 'paused', '2026-03-20T02:00:00Z', '2026-03-20T08:00:00Z', { kind: 'paused', node_id: 'review', since: '2026-03-20T08:00:00Z' })
+  const askingLive = run('asking-live', 'running', '2026-03-20T02:00:00Z', '2026-03-20T07:00:00Z', { kind: 'question', node_id: 'launch_ui', since: '2026-03-20T07:00:00Z' })
+  const supersededLive = run('rerun-old', 'running', '2026-03-10T02:00:00Z', '2026-03-12T07:00:00Z', { kind: 'interrupted', node_id: 'launch_ui', since: null }, 'rerun')
+  const rerunNew = run('rerun-new', 'failed', '2026-03-11T02:00:00Z', '2026-03-16T07:00:00Z', null, 'rerun')
+  const recentOld = run('recent-old', 'failed', '2026-03-16T02:00:00Z', '2026-03-17T07:00:00Z')
+  const tooOld = run('too-old', 'failed', '2026-03-01T02:00:00Z', '2026-03-02T07:00:00Z')
+  const rows = [runA, runB, runC, doneA, doneB, doneC, pausedToday, askingLive, supersededLive, rerunNew, recentOld, tooOld].map(item => ({ run: item }))
+  const sections = homeSections(rows, NOW_T)
+  const ids = (list: { run: RunSummary }[]) => list.map(item => item.run.run_id)
+  const state = (s: HomeSections<{ run: RunSummary }>) => [s.needsYou, s.running, s.today, s.paused, s.superseded, s.recent].map(ids)
+
+  test('Running holds every needs-null running run whatever day it moved; Today only the runs that finished today; a run paused today is in Paused', () => {
+    assert.deepEqual(ids(sections.running), ['run-c', 'run-a', 'run-b', 'rerun-old'])
+    assert.deepEqual(ids(sections.today), ['done-c', 'done-b', 'done-a'])
+    assert.deepEqual(ids(sections.paused), ['paused-today'])
+    assert.deepEqual(ids(sections.needsYou), ['asking-live'])
+    assert.ok(!ids(sections.today).includes('paused-today') && !ids(sections.running).includes('done-a'))
+    // A needs-operator running run is in Needs you only; an interrupted running run that a later run superseded keeps Running.
+    assert.ok(!ids(sections.running).includes('asking-live') && !ids(sections.today).includes('asking-live'))
+    assert.equal(classOf(sections.classes, supersededLive).needs, null)
+    assert.deepEqual(ids(sections.recent), ['recent-old', 'rerun-new'])
+  })
+  test('each run is in exactly one state section, and the jump links follow the section order', () => {
+    const placed = state(sections).flat()
+    assert.equal(new Set(placed).size, placed.length)
+    assert.ok(!placed.includes('too-old'))
+    assert.deepEqual([...HOME_SECTION_ORDER], ['needs-you', 'running-runs', 'today-runs', 'paused-runs', 'recent-runs'])
+  })
+  test('"Newest created first" and "Oldest created first" keep every run in its section and re-order the rows by created_at', () => {
+    const newest = sortHomeSections(sections, 'newest')
+    const oldest = sortHomeSections(sections, 'oldest')
+    assert.deepEqual(ids(newest.running), ['run-b', 'run-c', 'run-a', 'rerun-old'])
+    assert.deepEqual(ids(oldest.running), ['rerun-old', 'run-a', 'run-c', 'run-b'])
+    assert.deepEqual(ids(newest.today), ['done-b', 'done-a', 'done-c'])
+    assert.deepEqual(ids(oldest.today), ['done-c', 'done-a', 'done-b'])
+    for (const sorted of [newest, oldest]) {
+      assert.deepEqual(state(sorted).map(list => [...list].sort()), state(sections).map(list => [...list].sort()))
+    }
+    assert.equal(sortHomeSections(sections, 'live'), sections)
+  })
+  test('each section names its row order; Needs you keeps longest waiting first under the default sort', () => {
+    assert.equal(sectionOrderWords('live'), 'latest activity first')
+    assert.equal(sectionOrderWords('live', true), 'longest waiting first')
+    assert.equal(sectionOrderWords('newest'), 'newest created first')
+    assert.equal(sectionOrderWords('oldest', true), 'oldest created first')
+    // Needs you: longest waiting first, oldest wait on top.
+    const two = homeSections([askingLive, run('pane-old', 'running', '2026-03-20T01:00:00Z', '2026-03-20T09:00:00Z', { kind: 'pane', node_id: 'launch_ui', since: '2026-03-20T05:00:00Z' })].map(item => ({ run: item })), NOW_T)
+    assert.deepEqual(ids(two.needsYou), ['pane-old', 'asking-live'])
+  })
+  test('the superseded fold follows the list order (latest activity first)', () => {
+    const shared = (runId: string, moved: string) => run(runId, 'paused', '2026-03-10T00:00:00Z', moved, { kind: 'paused', node_id: 'handoff', since: '2026-03-10T00:00:00Z' }, 'shared')
+    const later = run('shared-z', 'running', '2026-03-19T00:00:00Z', '2026-03-20T11:00:00Z', null, 'shared')
+    const fold = homeSections([shared('p-1', '2026-03-12T00:00:00Z'), shared('p-2', '2026-03-14T00:00:00Z'), shared('p-3', '2026-03-13T00:00:00Z'), later].map(item => ({ run: item })), NOW_T)
+    assert.deepEqual(ids(fold.superseded), ['p-2', 'p-3', 'p-1'])
+  })
+  test('the scope line counts the runs in the state sections (Pinned apart, the reads beyond seven days left out)', () => {
+    const unfiltered = state(sections).reduce((sum, list) => sum + list.length, 0)
+    assert.equal(unfiltered, rows.length - 1)
+    assert.equal(scopeLine('triage', unfiltered, unfiltered, false), `${unfiltered} of ${unfiltered} runs · live runs and runs finished in the last 7 days`)
+  })
+  test('the classification is computed once over the unfiltered list: hiding a successor never makes its predecessor need the operator', () => {
+    const before = classifyRuns(rows.map(row => row.run))
+    const filtered = filterItems(rows.map(row => ({ run: row.run, cls: classOf(before, row.run) })), { ...DEFAULT_FILTER, q: 'rerun-old' }, { now: NOW_T, zone: 'utc' })
+    assert.deepEqual(filtered.map(item => item.run.run_id), ['rerun-old'])
+    assert.equal(filtered[0].cls.needs, null)
+    // Classifying the filtered rows alone would make it the latest and interrupted: the reason the bar reuses the first one.
+    assert.equal(classOf(classifyRuns([supersededLive]), supersededLive).needs, 'interrupted')
+  })
+})
+
+describe('the filter bar model (runFilter)', () => {
+  const NOW_F = Date.parse('2026-03-20T12:00:00Z')
+  const context = { now: NOW_F, zone: 'utc' as const }
+  const run = (runId: string, status: RunSummary['status'], moved: string, fields: { focus?: string | null; attention?: RunActivity['attention']; feature?: string; headline?: string; workflow?: string; created?: string; noActivity?: boolean; accepted?: boolean } = {}) => {
+    const finished = ['succeeded', 'failed', 'cancelled'].includes(status)
+    const base = fields.noActivity ? summary(runId, status, { updated: moved, workflow: fields.workflow ?? runId }) : summary(runId, status, {
+      created: fields.created ?? '2026-03-01T00:00:00Z', updated: moved, workflow: fields.workflow ?? runId,
+      activity: activity({ last_activity_at: moved, finished_at: finished ? moved : null, attention: fields.attention ?? null, feature: fields.feature ?? 'Runs home lists', headline: fields.headline ?? null, focus: fields.focus ? { node_id: fields.focus, label: fields.focus, status: status, since: null } : null }),
+    })
+    return fields.accepted ? { ...base, accepted: ACCEPTED } as RunSummary : base
+  }
+  const runs = [
+    run('needs-1', 'running', '2026-03-20T10:00:00Z', { attention: { kind: 'question', node_id: 'launch_ui', since: '2026-03-20T10:00:00Z' }, focus: 'launch_ui' }),
+    run('running-1', 'running', '2026-03-20T09:00:00Z', { focus: 'verify_ui' }),
+    run('paused-1', 'paused', '2026-03-15T09:00:00Z', { focus: 'review', workflow: 'shared', created: '2026-03-01T00:00:00Z' }),
+    run('later-1', 'succeeded', '2026-03-16T09:00:00Z', { workflow: 'shared', created: '2026-03-02T00:00:00Z' }),
+    run('failed-review', 'failed', '2026-03-20T08:00:00Z', { focus: 'review', headline: 'Independent review found two blockers' }),
+    run('failed-verify', 'failed', '2026-03-19T23:30:00Z', { focus: 'repair-1', feature: 'Pirate sea race' }),
+    run('failed-frozen', 'failed', '2026-03-12T08:00:00Z', { focus: 'handoff', attention: { kind: 'interrupted', node_id: 'handoff', since: null } }),
+    run('ok-1', 'succeeded', '2026-03-05T08:00:00Z'),
+    run('override-1', 'succeeded', '2026-03-19T08:00:00Z', { accepted: true }),
+    run('cancelled-1', 'cancelled', '2026-03-18T08:00:00Z', { focus: 'candidate' }),
+    run('legacy', 'succeeded', '2026-03-10T08:00:00Z', { noActivity: true }),
+    run('pending-1', 'pending', '2026-03-20T11:00:00Z', { noActivity: true }),
+  ]
+  const classes = classifyRuns(runs)
+  const items: FilterItem[] = runs.map(item => ({ run: item, cls: classOf(classes, item) }))
+  const keep = (state: Partial<RunFilterState>) => filterItems(items, { ...DEFAULT_FILTER, ...state }, context).map(item => item.run.run_id)
+
+  test('each status: Needs you from the class, a superseded paused run as Paused, an accepted run as Override only, a failed interrupted run as Failed', () => {
+    assert.deepEqual(keep({ status: ['needs'] }), ['needs-1'])
+    assert.deepEqual(keep({ status: ['running'] }), ['running-1'])
+    assert.equal(classOf(classes, runs[2]).supersededBy, 'later-1')
+    assert.deepEqual(keep({ status: ['paused'] }), ['paused-1'])
+    assert.deepEqual(keep({ status: ['failed'] }), ['failed-review', 'failed-verify', 'failed-frozen'])
+    assert.deepEqual(keep({ status: ['succeeded'] }), ['later-1', 'ok-1', 'legacy'])
+    assert.deepEqual(keep({ status: ['override'] }), ['override-1'])
+    assert.deepEqual(keep({ status: ['cancelled'] }), ['cancelled-1'])
+    assert.deepEqual(keep({ status: ['failed', 'cancelled'] }), ['failed-review', 'failed-verify', 'failed-frozen', 'cancelled-1'])
+    assert.equal(statusOf(runs[6], classOf(classes, runs[6])), 'failed')
+    assert.ok(!keep({ status: ['needs'] }).includes('failed-frozen'))
+    // Never left out of Failed when the other filters match.
+    assert.deepEqual(keep({ status: ['failed'], phase: 'Freeze' }), ['failed-frozen'])
+    assert.deepEqual(keep({ status: ['failed'], q: 'frozen' }), ['failed-frozen'])
+  })
+  test('the phase map: a review focus is Review, a repair node Verify, a succeeded run without focus Integrate, no activity Any step only', () => {
+    assert.deepEqual(keep({ phase: 'Review' }), ['paused-1', 'failed-review'])
+    assert.deepEqual(keep({ phase: 'Verify' }), ['running-1', 'failed-verify'])
+    assert.deepEqual(keep({ phase: 'Integrate' }), ['later-1', 'ok-1', 'override-1'])
+    assert.equal(runPhase(runs[10]), null)
+    assert.equal(runPhase(runs[11]), null)
+    assert.ok(!keep({ phase: 'Integrate' }).includes('legacy'))
+    assert.deepEqual(keep({ phase: 'Candidate' }), ['cancelled-1'])
+  })
+  test('the phase source order: the recorded step kind, else the definition, else the node-id rule', () => {
+    const custom = run('custom', 'failed', '2026-03-20T08:00:00Z', { focus: 'build_docs' })
+    // The node-id rule alone (Triage) puts an unknown node in Verify; a definition worker node is Launch.
+    assert.equal(PHASES[runPhase(custom)!], 'Verify')
+    assert.equal(PHASES[runPhase(custom, nodeId => (nodeId === 'build_docs' ? 'worker' : undefined))!], 'Launch')
+    // A recorded kind that conflicts with the current definition wins: the run's own recorded step decides.
+    const recorded = new Map([['build_docs', 'review']])
+    const definitionKind = new Map([['build_docs', 'worker']])
+    assert.equal(PHASES[runPhase(custom, nodeId => recorded.get(nodeId) ?? definitionKind.get(nodeId))!], 'Review')
+    // A focus node absent from the current definition keeps its recorded phase.
+    assert.equal(PHASES[runPhase(custom, nodeId => recorded.get(nodeId) ?? undefined)!], 'Review')
+  })
+  test('the date windows in the viewer\'s zone, around midnight', () => {
+    assert.deepEqual(keep({ date: 'today' }), ['needs-1', 'running-1', 'failed-review', 'pending-1'])
+    assert.ok(!keep({ date: 'today' }).includes('failed-verify'))
+    const justBefore = run('just-before', 'failed', '2026-03-19T23:59:59Z')
+    const justAfter = run('just-after', 'failed', '2026-03-20T00:00:00Z')
+    const at = Date.parse('2026-03-20T00:00:30Z')
+    assert.equal(inDateWindow(justBefore, 'today', at, 'utc'), false)
+    assert.equal(inDateWindow(justAfter, 'today', at, 'utc'), true)
+    // In the local zone the boundary is local midnight.
+    const localMidnight = new Date(2026, 2, 20, 0, 0, 0).getTime()
+    const localBefore = run('local-before', 'failed', new Date(localMidnight - 1000).toISOString())
+    const localAfter = run('local-after', 'failed', new Date(localMidnight + 1000).toISOString())
+    assert.equal(inDateWindow(localBefore, 'today', localMidnight + 60_000, 'local'), false)
+    assert.equal(inDateWindow(localAfter, 'today', localMidnight + 60_000, 'local'), true)
+    assert.deepEqual(keep({ date: '7d' }), ['needs-1', 'running-1', 'paused-1', 'later-1', 'failed-review', 'failed-verify', 'override-1', 'cancelled-1', 'pending-1'])
+    assert.equal(keep({ date: '30d' }).length, runs.length)
+    assert.equal(keep({ date: 'all' }).length, runs.length)
+    assert.equal(filterActive({ ...DEFAULT_FILTER, date: 'all' }), false)
+  })
+  test('multi-word text over the run id, the feature and the headline', () => {
+    assert.deepEqual(keep({ q: 'pirate race' }), ['failed-verify'])
+    assert.deepEqual(keep({ q: 'independent BLOCKERS' }), ['failed-review'])
+    assert.deepEqual(keep({ q: 'failed review' }), ['failed-review'])
+    assert.deepEqual(keep({ q: 'nothing-matches' }), [])
+  })
+  test('the counts of each status toggle are taken under the other controls', () => {
+    assert.deepEqual(statusCounts(items, DEFAULT_FILTER, context), { needs: 1, running: 1, paused: 1, failed: 3, succeeded: 3, override: 1, cancelled: 1 })
+    assert.deepEqual(statusCounts(items, { ...DEFAULT_FILTER, status: ['failed'], date: 'today' }, context), { needs: 1, running: 1, paused: 0, failed: 1, succeeded: 0, override: 0, cancelled: 0 })
+    assert.deepEqual(statusCounts(items, { ...DEFAULT_FILTER, phase: 'Review' }, context), { needs: 0, running: 0, paused: 1, failed: 1, succeeded: 0, override: 0, cancelled: 0 })
+  })
+  test('the scope line\'s closed set never calls a list with a cursor left "all loaded"', () => {
+    assert.equal(scopeLine('feature', 3, 50, true), '3 of 50 runs · Load more runs')
+    assert.equal(scopeLine('feature', 3, 60, false), '3 of 60 runs, all loaded')
+    assert.equal(scopeLine('project', 3, 80, true), '3 of 80 runs · the first 50 runs of each feature')
+    assert.equal(scopeLine('project', 3, 8, false), '3 of 8 runs, all loaded')
+    assert.equal(scopeLine('triage', 1, 9, false), '1 of 9 runs · live runs and runs finished in the last 7 days')
+    assert.equal(scopeLine('triage', 1, 9, true), '1 of 9 runs · live runs and runs finished in the last 7 days')
+  })
+  test('the project page\'s scope line never says "all loaded" or "0 of 0 runs" while reading, after a failed read or with an unread feature', () => {
+    const closed = [
+      /^\d+ of \d+ runs · Load more runs$/, /^\d+ of \d+ runs, all loaded$/, /^\d+ of \d+ runs · the first 50 runs of each feature$/,
+      /^\d+ of \d+ runs · live runs and runs finished in the last 7 days$/, /^Reading runs…$/, /^Runs not read: .+$/, /^\d+ of \d+ runs · \d+ features? cannot be read$/,
+    ]
+    const loading = projectScopeLine({ kind: 'loading' }, 0, 0, false)
+    const failed = projectScopeLine({ kind: 'failed', reason: 'HTTP 500' }, 0, 0, false)
+    const partly = projectScopeLine({ kind: 'ready', unread: '1 feature cannot be read' }, 2, 7, false)
+    const partlyMore = projectScopeLine({ kind: 'ready', unread: '2 features cannot be read' }, 2, 70, true)
+    assert.equal(loading, 'Reading runs…')
+    assert.equal(failed, 'Runs not read: HTTP 500')
+    assert.equal(partly, '2 of 7 runs · 1 feature cannot be read')
+    assert.equal(partlyMore, '2 of 70 runs · 2 features cannot be read')
+    assert.equal(projectScopeLine({ kind: 'ready', unread: null }, 3, 8, false), '3 of 8 runs, all loaded')
+    assert.equal(projectScopeLine({ kind: 'ready', unread: null }, 3, 80, true), '3 of 80 runs · the first 50 runs of each feature')
+    for (const line of [loading, failed, partly, partlyMore]) {
+      assert.doesNotMatch(line, /all loaded/)
+      assert.doesNotMatch(line, /0 of 0 runs/)
+    }
+    const every = [loading, failed, partly, partlyMore, projectScopeLine({ kind: 'ready', unread: null }, 3, 8, false), projectScopeLine({ kind: 'ready', unread: null }, 3, 80, true),
+      scopeLine('feature', 3, 50, true), scopeLine('triage', 1, 9, false)]
+    for (const line of every) assert.ok(closed.some(re => re.test(line)), `scope line outside the closed set: ${line}`)
+  })
+  test('the closed choices: Triage dates any, today, 7 days; the project page adds 30 days; only the feature page has All time; sorts name their keys', () => {
+    assert.deepEqual(DATE_CHOICES.triage.map(id => DATE_FILTER_LABEL[id]), ['Any date', 'Today', '7 days'])
+    assert.deepEqual(DATE_CHOICES.project.map(id => DATE_FILTER_LABEL[id]), ['Any date', 'Today', '7 days', '30 days'])
+    assert.deepEqual(DATE_CHOICES.feature.map(id => DATE_FILTER_LABEL[id]), ['Any date', 'Today', '7 days', '30 days', 'All time'])
+    assert.deepEqual(SORT_CHOICES.feature.map(choice => choice.label), ['Needs you and running first', 'Newest created first', 'Oldest created first'])
+    assert.deepEqual(SORT_CHOICES.triage.map(choice => choice.label), ['Needs you and running first', 'Newest created first', 'Oldest created first'])
+    assert.deepEqual(SORT_CHOICES.project.map(choice => choice.label), ['Needs you and running first', 'Latest activity first', 'Earliest activity first'])
+    assert.deepEqual(SORT_CHOICES.project.map(choice => choice.id), ['live', 'newest', 'oldest'])
+  })
+  test('the model has no request path: a counting fetch sees no call while every control is applied', async () => {
+    const original = globalThis.fetch
+    let calls = 0
+    globalThis.fetch = (async () => { calls += 1; throw new Error('no request') }) as typeof fetch
+    try {
+      for (const status of STATUS_FILTERS) keep({ status: [status] })
+      for (const phase of PHASES) keep({ phase })
+      for (const date of ['any', 'today', '7d', '30d', 'all'] as const) keep({ date })
+      statusCounts(items, { ...DEFAULT_FILTER, q: 'x' }, context)
+      scopeLine('feature', 0, 0, true)
+      await Promise.resolve()
+    } finally {
+      globalThis.fetch = original
+    }
+    assert.equal(calls, 0)
+  })
+})
+
+describe('the stage B list seeds, as the routes serve them', () => {
+  test('the live-first workflow holds one needs-operator run, one running run and one paused run that no later run superseded', () => {
+    const workflow = B_ORDER.workflows.find(item => item.workflow_id === 'order-mix')!
+    const runs = workflow.runs.map(run => bSummary(B_ORDER.project_id, workflow.workflow_id, run))
+    const classes = classifyRuns(runs)
+    const of = (runId: string) => classOf(classes, runs.find(run => run.run_id === runId)!)
+    assert.equal(runs.filter(run => classOf(classes, run).needs !== null).length, 1)
+    assert.equal(of(B_MIX.needs).needs, 'question')
+    assert.deepEqual(of(B_MIX.running), { needs: null, supersededBy: null })
+    assert.deepEqual(of(B_MIX.paused), { needs: null, supersededBy: null })
+    // The orders the scenario reads are the comparator's and the sorts' over these runs, and all three differ.
+    const rows = runs.map(run => ({ run }))
+    assert.deepEqual(sortRuns(rows, 'live', classes).map(row => row.run.run_id), B_MIX_ORDER.live)
+    assert.deepEqual(sortRuns(rows, 'newest', classes).map(row => row.run.run_id), B_MIX_ORDER.newest)
+    assert.deepEqual(sortRuns(rows, 'oldest', classes).map(row => row.run.run_id), B_MIX_ORDER.oldest)
+    assert.equal(new Set([B_MIX_ORDER.live, B_MIX_ORDER.newest, B_MIX_ORDER.oldest].map(order => order.join())).size, 3)
+  })
+  test('page 2 of the filtered feature is older than page 1\'s newest finished run, by update and finish', () => {
+    const workflow = B_FILTER.workflows.find(item => item.workflow_id === 'filter-runs')!
+    const finishedFirst = workflow.runs.filter(run => ['succeeded', 'failed', 'cancelled'].includes(run.status)).map(run => Date.parse(run.moved))
+    for (const run of workflow.page2 ?? []) assert.ok(Date.parse(run.moved) < Math.max(...finishedFirst), run.id)
   })
 })

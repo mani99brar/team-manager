@@ -97,18 +97,22 @@ export function StoppedSince({ how, since, now, zone, className }: { how: 'pause
   )
 }
 
+/** The pin toggle's visible words; its accessible name is these words and the run id ("Add to Triage, <run id>"). */
+const pinWords = (pinned: boolean) => (pinned ? 'In Triage' : 'Add to Triage')
+
 /**
- * "Add <run id> to Triage" / "Remove <run id> from Triage": pins a run to Triage's Pinned section, in this browser only. It
- * issues no request; every toggle on the page shares one store, so a change anywhere shows everywhere.
+ * "Add to Triage, <run id>" / "In Triage, <run id>" (pressed; activating it removes the pin): pins a run to Triage's Pinned
+ * section, in this browser only. It issues no request; every toggle on the page shares one store, so a change anywhere shows
+ * everywhere.
  */
 export function PinToggle({ target, className = '' }: { target: PinTarget; className?: string }) {
   const { pins, store } = usePins()
   const pinned = pins.some(pin => pin.project_id === target.project_id && pin.workflow_id === target.workflow_id && pin.run_id === target.run_id)
   return (
     <button type="button" className={`pin-toggle ${className}`.trim()} aria-pressed={pinned} data-pinned={pinned ? 'true' : 'false'}
-      aria-label={pinned ? `Remove ${target.run_id} from Triage` : `Add ${target.run_id} to Triage`}
+      aria-label={`${pinWords(pinned)}, ${target.run_id}`} title={pinned ? `Remove ${target.run_id} from Triage` : `Add ${target.run_id} to Triage`}
       onClick={() => store.toggle({ project_id: target.project_id, workflow_id: target.workflow_id, run_id: target.run_id })}>
-      <span aria-hidden="true">{pinned ? '★' : '☆'}</span> {pinned ? 'In Triage' : 'Pin'}
+      <span aria-hidden="true">{pinned ? '★' : '☆'}</span> {pinWords(pinned)}
     </button>
   )
 }

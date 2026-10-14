@@ -19,8 +19,11 @@ reading pane. The viewer code lives in `src/projects/dispatch/`; the look is the
 Appears on `/projects`, Triage, the project page and the workflow page (`railLevel` in `ProjectsView`). Run pages have no rail.
 
 - `aside[data-testid="dispatch-rail"]` with `a[data-testid="rail-all-projects"]` and `a[data-testid="rail-triage"]` at the top,
-  then `ul[data-testid="dispatch-rail-list"]` of `a.dispatch-rail-row[data-project-id]` in rail order ([D6]: needs you, running,
-  readable, unreadable, then by last activity). Each row: a glyph, the name, a badge (`.dispatch-rail-badge`: "N waits on you" /
+  then `ul[data-testid="dispatch-rail-list"]` of `a.dispatch-rail-row[data-project-id]` in rail order ([D6], reordered by
+  ux-critique-fixes-b: waits on you, then running, then paused, each by count; readable before unreadable; then by last activity,
+  then project id; `railOrder` in `derive.ts`). The Projects cards follow the same order. Below 1000 px the compact Triage chip
+  (`a[data-testid="chip-triage"]`) reads "Triage · N waits[ · M paused]": its number is the needs-operator count only, never
+  summed with paused. Each row: a glyph, the name, a badge (`.dispatch-rail-badge`: "N waits on you" /
   "N paused" / "N running" / "N unpushed" on the clone's primary only) and a sub-line (repository · "N features" or "cannot be
   read" · date). The current page's row has `aria-current="page"`.
 - Counts (ux-critique-fixes M2, M19): every count reads one classification of the project's runs (`classifyRuns`, `lists.ts`).
@@ -49,12 +52,34 @@ Appears on `/projects`, Triage, the project page and the workflow page (`railLev
 - Header `header[data-testid="dispatch-project-header"]`: `h1` name, the `https://github.com/<owner>/<name>` link and `.dispatch-vis`
   chip, `p.dispatch-meta` with `span[data-testid="dispatch-sync"]` (the sync phrase + "as of origin/<d> updated here <time>"),
   `p[data-testid="dispatch-figures"]`, the jump buttons ("Runs by feature", "Local and GitHub", "Pull requests · N open", "Issues
-  · N open") that move focus to `#dispatch-runs-section`, `#g-local`, `#g-prs`, `#g-iss`, and a filter box `input#dispatch-filter`
-  (`/` focuses it, Escape clears it).
+  · N open") that move focus to `#dispatch-runs-section`, `#g-local`, `#g-prs`, `#g-iss`, and the shared filter bar
+  (`div[data-testid="run-filter"]`, `FilterBar.tsx`: search `run-filter-q`, `run-filter-phase`, `run-filter-date` with "Any date",
+  "Today", "7 days", "30 days", `run-filter-sort`, the status toggles `button[data-filter]`, `run-filter-scope` "Reading runs…" while
+  the run lists are read, "Runs not read: <reason>" when every list failed, "<k> of <n> runs · <N> feature(s) cannot be read" when
+  some failed, else "<k> of <n> runs · the first 50 runs of each feature" or ", all loaded", never "all loaded" unless every
+  feature was read and none has more; `/` focuses the search, Escape clears it). The bar filters every feature's
+  rows; its state lives in the URL search (`routes.ts` `parseListSearch` / `listSearchString`).
+- A project whose GitHub status is `not_github` shows its GitHub column as one line under the header
+  (`aside[data-testid="dispatch-github"].dispatch-gh-line`, holding `#g-local`/`dispatch-gh-local` with the local sync and "GitHub
+  not read: not a GitHub remote", and the ahead button when there are commits ahead); the chart takes the full width, with a run
+  selected too (the body keeps one grid track however wide it is).
 - **Step chart** (`src/projects/dispatch/StepChart.tsx`), `div[data-testid="dispatch-chart"]`:
   - `div[data-testid="dispatch-axis"]` — the sticky axis of the eight phase labels (Challenge, Launch, Freeze, Verify, Candidate,
     Review, Approval, Integrate).
-  - `ul[data-testid="dispatch-features"]` of `li.dispatch-feature[data-workflow-id]`, each with `a.lists-group-head.ui-card.tone-<tone>`
+  - `div[data-testid="dispatch-defs"]` above the features: one `details[data-testid="dispatch-def"][data-revision]` "Steps of this
+    definition · N steps · used by K features" per distinct definition revision (the features that use it listed inside), so every
+    feature's steps stay reachable; no feature carries its own fold.
+  - `p[data-testid="project-features-sub"]` names the order: "<F> features · needs you and running first, then latest activity"
+    (default: features by their most urgent run, needs you, running, paused, none, then last activity, then workflow id), or
+    "· latest activity first · runs newest created first" / "· earliest activity first · runs oldest created first".
+  - `ul[data-testid="dispatch-features"]` of `li.dispatch-feature[data-workflow-id][data-open]`, each one header row: the link
+    `a.lists-group-head.ui-card.tone-<tone>` (the id, the state word `dispatch-feature-word`, the run count or "0 of N runs match",
+    the run chips oldest first, `dispatch-feature-last` "last activity <Mon D>|today") and beside it, inside the `li` and never
+    inside the link, `button[data-testid="dispatch-feature-toggle"]` "Show runs" / "Hide runs" (`aria-expanded`, `aria-controls`).
+    Open by default: a feature with a needs-operator or running run, or one that cannot be read; while a filter is active, every
+    feature with a match (an unreadable one stays open). The operator's toggles hold until the filter changes and are kept in the
+    history entry for Back. Each open run row carries `dispatch-run-when`: "started <Mon D> · ran <span>", "started <Mon D> ·
+    running <span>" (the list clock) or the stopped words. Each header
     (**[L1]: this hook keeps `accepted.spec.ts` passing — the header carries the feature's tone class, `tone-(override|fail|idle)`
     and never `tone-ok` when the latest run was accepted**; the tone is the latest registry run's). The header lists landed shas
     and a chain of run chips.
