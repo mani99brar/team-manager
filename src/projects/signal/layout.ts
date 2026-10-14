@@ -193,3 +193,90 @@ export function stepFrom(layout: StageLayout, id: string, key: 'ArrowRight' | 'A
   }
   return best
 }
+
+/** The live dock's own column beside the stage, and the width of the run frame from which it takes one. */
+export const DOCK_COLUMN_WIDTH = 312
+export const DOCK_COLUMN_FRAME = 1200
+/** What an overlaying dock keeps clear on the stage: its width plus its margin. */
+export const DOCK_RESERVE = 336
+/** The standard detail level's scale: the first view on a desk never opens below it. */
+export const FIRST_FIT_FLOOR = 0.6
+export const FIT_MIN_SCALE = 0.15
+export const FIT_MAX_SCALE = 1.4
+
+/** How much of the run frame's width the dock keeps clear on the stage: nothing beside a column, 336 px under an open overlay. */
+export function dockReserve(frameWidth: number, dockOpen: boolean): number {
+  return frameWidth >= DOCK_COLUMN_FRAME ? 0 : dockOpen ? DOCK_RESERVE : 0
+}
+
+export type View = { x: number; y: number; k: number }
+
+export type FitOptions = {
+  /** The stage's size. */
+  width: number
+  height: number
+  /** The picture's size at scale 1. */
+  graph: { width: number; height: number }
+  dir: Direction
+  /** The width on the stage's left an overlaying dock covers. */
+  reserved: number
+  /** True for the first view (mount, a width change, a new shape): never below the standard level, anchored on `anchor`. False is "Fit the graph". */
+  first: boolean
+  /** The card of the step the run is at, else the first step (top left, at scale 1); null without steps. */
+  anchor: { x: number; y: number } | null
+}
+
+const FIT_PAD = 56
+const FIT_TOP = 40
+const FIT_BOTTOM = 80
+const ANCHOR_MARGIN = 24
+
+/**
+ * Where the picture sits on the stage. "Fit the graph" (`first: false`) shows the whole graph between 15 % and 140 %. The
+ * first view on a desk takes that scale but never less than 60 %: when the whole graph does not fit there, the view keeps the
+ * flow's first column in sight if it can and always holds the anchor's card wholly inside the visible part (right of the
+ * dock's reserve, clear of the stage's edges). A phone's top-to-bottom flow keeps its own fit. Pure.
+ */
+export function fitView({ width, height, graph, dir, reserved, first, anchor }: FitOptions): View {
+  const phone = dir === 'TB'
+  if (phone) {
+    const k = Math.max(FIT_MIN_SCALE, Math.min(FIT_MAX_SCALE, Math.min((width - 24 * 2) / graph.width, 1)))
+    return { k, x: (width - graph.width * k) / 2, y: FIT_TOP }
+  }
+  const left = reserved
+  const whole = Math.min((width - left - FIT_PAD * 2) / graph.width, (height - FIT_TOP - 90) / graph.height)
+  const k = Math.max(first ? FIRST_FIT_FLOOR : FIT_MIN_SCALE, Math.min(FIT_MAX_SCALE, whole))
+  const spareX = width - left - graph.width * k
+  const spareY = height - FIT_TOP - FIT_BOTTOM - graph.height * k
+  const centred: View = { k, x: left + spareX / 2, y: FIT_TOP + Math.max(0, spareY / 2) }
+  if (!first || anchor === null || (spareX >= FIT_PAD * 2 && spareY >= 0)) return centred
+  // The whole graph does not fit at this scale: place the anchor's card inside the visible part, the first column too if both fit.
+  const cardW = NODE_WIDTH * k
+  const cardH = NODE_HEIGHT * k
+  const visibleLeft = left + ANCHOR_MARGIN
+  const visibleRight = width - ANCHOR_MARGIN
+  let x: number
+  if (spareX >= FIT_PAD * 2) x = centred.x
+  else {
+    const fromStart = left + FIT_PAD
+    x = fromStart
+    if (anchor.x * k + x + cardW > visibleRight) {
+      // The first column and the anchor do not both fit: centre the anchor, never leaving empty stage beside the graph.
+      x = (visibleLeft + visibleRight) / 2 - (anchor.x + NODE_WIDTH / 2) * k
+      x = Math.min(fromStart, Math.max(x, width - FIT_PAD - graph.width * k))
+      x = Math.min(x, visibleRight - cardW - anchor.x * k)
+      x = Math.max(x, visibleLeft - anchor.x * k)
+    }
+  }
+  const visibleTop = ANCHOR_MARGIN
+  const visibleBottom = height - FIT_BOTTOM + ANCHOR_MARGIN
+  let y: number
+  if (spareY >= 0) y = centred.y
+  else {
+    y = (visibleTop + visibleBottom) / 2 - (anchor.y + NODE_HEIGHT / 2) * k
+    y = Math.min(FIT_TOP, Math.max(y, height - FIT_BOTTOM - graph.height * k))
+    y = Math.min(y, visibleBottom - cardH - anchor.y * k)
+    y = Math.max(y, visibleTop - anchor.y * k)
+  }
+  return { k, x, y }
+}

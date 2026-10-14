@@ -158,11 +158,13 @@ export type RailInfo = {
   loading?: boolean
 }
 
-/** Rail order: needs you, running, readable before unreadable, then by last activity ([D6]). */
+/**
+ * Rail order, the lists' one order for projects ([D6]): runs that need the operator, then running runs, then paused runs
+ * (each by how many), readable before unreadable, then by last activity, then project id. The Projects cards follow it.
+ */
 export function railOrder<T extends RailInfo>(infos: readonly T[]): T[] {
-  const needs = (info: RailInfo) => info.waits + info.paused
   return [...infos].sort((a, b) =>
-    (needs(b) - needs(a)) || (b.running - a.running) || (Number(a.allBad) - Number(b.allBad)) || (b.lastActivity - a.lastActivity) || a.projectId.localeCompare(b.projectId))
+    (b.waits - a.waits) || (b.running - a.running) || (b.paused - a.paused) || (Number(a.allBad) - Number(b.allBad)) || (b.lastActivity - a.lastActivity) || a.projectId.localeCompare(b.projectId))
 }
 
 /** A rail row's badge: "N waits on you", else "N paused", else "N running", else "N unpushed" on the clone's primary; null otherwise. */
@@ -185,6 +187,15 @@ export function railBadgeTone(info: RailInfo): Tone | null {
   if (info.paused > 0) return 'pause'
   if (info.running > 0) return 'run'
   return null
+}
+
+/**
+ * The compact Triage chip's words: the count that needs the operator (the Needs-you count, never summed with paused), then
+ * the paused runs apart under their own word ("3 waits · 2 paused"); "…" until the runs are read.
+ */
+export function compactTriage(counts: { waits: number; paused: number } | null): string {
+  if (counts === null) return '…'
+  return [`${counts.waits} ${counts.waits === 1 ? 'wait' : 'waits'}`, counts.paused > 0 ? `${counts.paused} paused` : ''].filter(Boolean).join(' · ')
 }
 
 // ---- The Projects card state word (section 4.1) ----------------------------------------------------------------------

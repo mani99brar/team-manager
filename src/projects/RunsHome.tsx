@@ -1,11 +1,13 @@
-import { useEffect, useMemo, useState, useSyncExternalStore, type MouseEvent, type ReactNode } from 'react'
+import { useEffect, useMemo, useSyncExternalStore, type MouseEvent, type ReactNode } from 'react'
 import { describeApiError, type Project, type ProjectRuns, type RunSummary, type WorkflowDefinition, type WorkflowRuns } from './api.ts'
 import {
   PAUSED_SHOWN,
-  classifyRuns, classOf, filterRecent, firstRows, groupByDay, groupByProject, homeSections, laneNamesOf, latestFeature, latestRun, movedAt, NEXT_STEP,
-  RECENT_SHOWN, recentCounts, rowSummary, searchRows, stepTally, workflowTitle,
-  type ListRow, type NeedKind, type RecentFilter, type RunClasses,
+  classifyRuns, classOf, compareCreated, firstRows, groupByDay, groupByProject, homeSections, laneNamesOf, latestFeature, latestRun, movedAt, NEXT_STEP,
+  RECENT_SHOWN, rowSummary, sectionOrderWords, sortHomeSections, stepTally, workflowTitle,
+  type HomeSections, type ListRow, type ListSort, type NeedKind, type RowGroup, type RunClasses,
 } from './lists.ts'
+import { FilterBar, NoMatch, type ListControl } from './FilterBar.tsx'
+import { matchesFilter, scopeLine, statusCounts, type FilterItem } from './runFilter.ts'
 import { LiveStatus } from './LiveStatus.tsx'
 import { AppLink, LoadingPanel, StatusBadge } from './panels.tsx'
 import { runPathname, workflowPathname } from './routes.ts'
@@ -15,7 +17,7 @@ import { shortRevision } from './status.ts'
 import { Time } from './Time.tsx'
 import { formatAgo } from './time.ts'
 import { stateTone, toneClass } from './tone.ts'
-import { Chip, FilterButton, FilterRow, Section } from './ui/index.tsx'
+import { Chip, FilterButton, Section } from './ui/index.tsx'
 import { useTimeZone } from './useNow.ts'
 import type { Resource, ResourceMeta } from './useResource.ts'
 import './lists.css'
@@ -86,7 +88,15 @@ type HomeProps = {
   /** The read-only note, said once at the rail's foot. */
   note?: string | null
   onNavigate: (pathname: string) => void
+  /** The list's state from the URL (the one filter bar) and its writers. */
+  list: ListControl
+  /** The opened folds of this page (Paused's "Show all", the superseded fold) and their writer. */
+  folds: Readonly<Record<string, boolean>>
+  onFold: (key: string, open: boolean | null) => void
 }
+
+/** A Triage row as the filter bar reads it: the run, its class in the unfiltered list, and the names it is searched by. */
+const itemOf = (row: Row, classes: RunClasses): FilterItem => ({ run: row.run, cls: classOf(classes, row.run), names: [row.title, row.project.name] })
 
 /**
  * Runs home, `/projects` (docs/PRD_VIEWER_REVAMP.md 5.1, after PRD_VIEWER_UX 4.1): a project rail with a status dot per
@@ -94,26 +104,44 @@ type HomeProps = {
  * as cards and a searchable, filterable Recent grouped by day. Everything renders from the run lists' served activity; no run
  * detail is read for it.
  */
-export function RunsHome({ runs, meta, now, note = null, onNavigate }: HomeProps) {
+export function RunsHome({ runs, meta, now, note = null, onNavigate, list, folds, onFold }: HomeProps) {
   const [zone] = useTimeZone()
   const loaded = runs.status === 'ready' ? runs.data : null
   const rows = useMemo(() => loaded?.flatMap(entry => rowsOf(entry.project, entry.workflows)) ?? [], [loaded])
-  // The list's one classification: every section, row, card and count below reads it, never a run's attention alone.
+  // The list's one classification, over every loaded run before any filter: every section, row, card and count below reads
+  // it, so hiding a run never changes what another needs.
   const classes = useMemo(() => classifyRuns(rows.map(row => row.run)), [rows])
-  const sections = homeSections(rows, now, zone, classes)
-  const [allPaused, setAllPaused] = useState(false)
+  const all = homeSections(rows, now, zone, classes)
+  // The one bar filters the full set before sectioning: each section keeps its runs that match, in the chosen sort.
+  const filter = list.filter
+  const filtering = list.active
+  const context = { now, zone }
+  const keep = (items: Row[]) => (filtering ? items.filter(row => matchesFilter(itemOf(row, classes), filter, context)) : items)
+  const sections: HomeSections<Row> = sortHomeSections({
+    needsYou: keep(all.needsYou), today: keep(all.today), running: keep(all.running), paused: keep(all.paused),
+    superseded: keep(all.superseded), recent: keep(all.recent), classes,
+  }, filter.sort)
+  const sectioned = [...all.needsYou, ...all.running, ...all.today, ...all.paused, ...all.superseded, ...all.recent]
+  const matched = sections.needsYou.length + sections.running.length + sections.today.length + sections.paused.length + sections.superseded.length + sections.recent.length
+  const counts = statusCounts(sectioned.map(row => itemOf(row, classes)), filter, context)
+  const allPaused = folds['paused-all'] === true
   const errors = (loaded ?? []).flatMap(entry => entry.error !== null
     ? [{ what: entry.project.name, error: entry.error }]
     : entry.workflows.filter(item => item.error !== null).map(item => ({ what: `${entry.project.name} · ${item.workflow.workflow_id}`, error: item.error })))
   // A project is unread when its own read failed or every one of its workflows' run lists did.
   const unreadProjects = (loaded ?? []).filter(entry => entry.error !== null || (entry.workflows.length > 0 && entry.workflows.every(item => item.error !== null))).length
-  // With nothing waiting, moved today or running, Paused is the only work left: it shows every paused run, unfolded. With no
+  // With nothing waiting, running or finished today, Paused is the only work left: it shows every paused run, unfolded. With no
   // run list read there is no evidence for that, so the quiet line needs one read list (a partial read says it is incomplete).
+  // Under a filter the sections say what matched instead.
   const listsRead = (loaded ?? []).some(entry => entry.error === null && entry.workflows.some(item => item.error === null))
-  const quiet = listsRead && sections.needsYou.length === 0 && sections.today.length === 0 && sections.running.length === 0
+  const quiet = !filtering && listsRead && all.needsYou.length === 0 && all.today.length === 0 && all.running.length === 0
   const pausedShown = allPaused || quiet ? sections.paused : sections.paused.slice(0, PAUSED_SHOWN)
   const count = (items: Row[]) => (loaded === null ? null : items.length)
-  const needsCount = count(sections.needsYou)
+  // The tab title counts what waits, over the unfiltered list.
+  const needsCount = count(all.needsYou)
+  /** A section's header count: its rows, or "<k> of <n>" while the bar filters. */
+  const heading = (title: string, shown: Row[], total: Row[]) => `${title}${loaded === null ? '' : ` · ${filtering ? `${shown.length} of ${total.length}` : total.length}`}`
+  const order = sectionOrderWords(filter.sort)
 
   // The tab title keeps the count of what waits, so a background tab still says it.
   useEffect(() => {
@@ -131,9 +159,9 @@ export function RunsHome({ runs, meta, now, note = null, onNavigate }: HomeProps
     target?.querySelector<HTMLElement>('a[data-run-id]')?.focus({ preventScroll: true })
   }
   const jumps: { id: string; label: string; count: number | null }[] = [
-    { id: 'needs-you', label: 'Needs you', count: needsCount },
-    { id: 'today-runs', label: 'Today', count: count(sections.today) },
+    { id: 'needs-you', label: 'Needs you', count: count(sections.needsYou) },
     { id: 'running-runs', label: 'Running', count: count(sections.running) },
+    { id: 'today-runs', label: 'Today', count: count(sections.today) },
     { id: 'paused-runs', label: 'Paused', count: count(sections.paused) },
     { id: 'recent-runs', label: 'Recent', count: count(sections.recent) },
   ]
@@ -145,6 +173,8 @@ export function RunsHome({ runs, meta, now, note = null, onNavigate }: HomeProps
       ))}
     </ul>
   )
+  const sub = (rows: Row[], empty: string, words = order) => (filtering && rows.length === 0 ? 'No run matches.' : rows.length === 0 ? empty : [stepTally(rows), words].filter(Boolean).join(' · '))
+  const none = (shown: Row[], total: Row[]) => filtering && shown.length === 0 && total.length > 0 && <NoMatch />
 
   return (
     <div className="triage-layout">
@@ -170,38 +200,45 @@ export function RunsHome({ runs, meta, now, note = null, onNavigate }: HomeProps
               </p>
             )}
             <Pinned rows={rows} classes={classes} now={now} onNavigate={onNavigate} />
+            <FilterBar kind="triage" state={filter} counts={counts} scope={scopeLine('triage', matched, sectioned.length, false)} active={filtering}
+              onChange={(next, options) => list.change(next, options)} onCommit={list.flush} onClear={list.clear} />
             {quiet && <p className="home-quiet" data-testid="home-quiet">Nothing waits on you, moved today or runs</p>}
-            <Section id="needs-you" headingId="needs-you-title" data-testid="needs-you" className="home-section" hidden={quiet} title={`Needs you${needsCount !== null ? ` · ${needsCount}` : ''}`}
-              sub={needsCount === 0 ? 'nothing waits on you' : 'longest waiting first; the command is on the run page'}>
+            <Section id="needs-you" headingId="needs-you-title" data-testid="needs-you" className="home-section" hidden={quiet} title={heading('Needs you', sections.needsYou, all.needsYou)}
+              sub={filtering && sections.needsYou.length === 0 ? 'No run matches.' : all.needsYou.length === 0 ? 'nothing waits on you' : `${sectionOrderWords(filter.sort, true)}; the command is on the run page`}>
+              {none(sections.needsYou, all.needsYou)}
               {sections.needsYou.length > 0 && (
                 <ul className="home-cards">
                   {sections.needsYou.map(row => <NeedsCard key={row.key} row={row} kind={classOf(classes, row.run).needs!} now={now} onNavigate={onNavigate} />)}
                 </ul>
               )}
             </Section>
-            <Section id="today-runs" headingId="today-title" data-testid="today-runs" className="home-section" hidden={quiet} title={`Today${count(sections.today) !== null ? ` · ${count(sections.today)}` : ''}`}
-              sub={sections.today.length === 0 ? 'nothing moved today' : `every run that moved today, running first · ${stepTally(sections.today) || 'latest activity first'}`}>
-              {sections.today.length > 0 && rowsList(sections.today)}
-            </Section>
-            <Section id="running-runs" headingId="running-title" data-testid="running-runs" className="home-section" hidden={quiet} title={`Running${count(sections.running) !== null ? ` · ${count(sections.running)}` : ''}`}
-              sub={sections.running.length === 0 ? 'nothing else is running' : `since an earlier day · ${stepTally(sections.running) || 'latest activity first'}`}>
+            <Section id="running-runs" headingId="running-title" data-testid="running-runs" className="home-section" hidden={quiet} title={heading('Running', sections.running, all.running)}
+              sub={sub(sections.running, 'nothing is running')}>
+              {none(sections.running, all.running)}
               {sections.running.length > 0 && rowsList(sections.running)}
             </Section>
-            <Section id="paused-runs" headingId="paused-title" data-testid="paused-runs" className="home-section" title={`Paused${count(sections.paused) !== null ? ` · ${count(sections.paused)}` : ''}`}
-              sub={sections.paused.length === 0 ? 'nothing is paused' : `since an earlier day, longest paused first · ${stepTally(sections.paused) || ''}`}>
+            <Section id="today-runs" headingId="today-title" data-testid="today-runs" className="home-section" hidden={quiet} title={heading('Today', sections.today, all.today)}
+              sub={sub(sections.today, 'nothing finished today')}>
+              {none(sections.today, all.today)}
+              {sections.today.length > 0 && rowsList(sections.today)}
+            </Section>
+            <Section id="paused-runs" headingId="paused-title" data-testid="paused-runs" className="home-section" title={heading('Paused', sections.paused, all.paused)}
+              sub={sub(sections.paused, 'nothing is paused')}>
+              {none(sections.paused, all.paused)}
               {sections.paused.length > 0 && rowsList(pausedShown)}
               {sections.paused.length > pausedShown.length && (
-                <button type="button" className="home-show-older" data-testid="paused-show-all" onClick={() => setAllPaused(true)}>Show all {sections.paused.length} paused</button>
+                <button type="button" className="home-show-older" data-testid="paused-show-all" onClick={() => onFold('paused-all', true)}>Show all {sections.paused.length} paused</button>
               )}
               {sections.superseded.length > 0 && (
                 // Paused runs a later run of their own feature replaced: nobody waits on them, so they stay folded away.
-                <details className="home-superseded" data-testid="superseded-runs">
+                <details className="home-superseded" data-testid="superseded-runs" open={folds.superseded === true}
+                  onToggle={event => { const open = (event.currentTarget as HTMLDetailsElement).open; if (open !== (folds.superseded === true)) onFold('superseded', open ? true : null) }}>
                   <summary>{sections.superseded.length} superseded</summary>
                   {rowsList(sections.superseded, row => ({ text: `superseded by ${classOf(classes, row.run).supersededBy}` }))}
                 </details>
               )}
             </Section>
-            <Recent rows={sections.recent} classes={classes} now={now} zone={zone} onNavigate={onNavigate} />
+            <Recent rows={sections.recent} total={all.recent.length} filtering={filtering} sort={filter.sort} classes={classes} now={now} zone={zone} onNavigate={onNavigate} list={list} />
             {errors.length > 0 && (
               <Section headingId="attention-title" data-testid="lists-errors" role="alert" className="home-section" title={`Attention · ${errors.length}`}
                 sub="Some runs could not be loaded, so these lists may be incomplete.">
@@ -236,7 +273,7 @@ function Pinned({ rows, classes, now, onNavigate }: { rows: readonly Row[]; clas
   const byKey = new Map(rows.map(row => [row.key, row]))
   return (
     <Section id="pinned-runs" headingId="pinned-title" data-testid="pinned-runs" className="home-section" title={`Pinned · ${pins.length}`}
-      sub={pins.length === 0 ? 'no run pinned' : 'pinned in this browser, newest first; each run also stays in its own section'}>
+      sub={pins.length === 0 ? 'no run pinned' : saved ? 'pinned in this browser, newest first; each run also stays in its own section' : 'newest first; each run also stays in its own section'}>
       {!saved && <p className="projects-muted lists-empty" data-testid="pins-not-saved">Pins are not saved in this browser</p>}
       {pins.length > 0 && (
         <ul className="run-rows">
@@ -262,39 +299,36 @@ function Pinned({ rows, classes, now, onNavigate }: { rows: readonly Row[]; clas
   )
 }
 
-const FILTER_LABEL: Record<RecentFilter, string> = { all: 'All', failed: 'Failed', succeeded: 'Succeeded', today: 'Today' }
+/** Recent's groups under a sort: the groups keep the order the default rows give them; the rows inside each follow the sort. */
+function sortedGroups<T extends { run: Row['run'] }>(groups: RowGroup<T>[], sort: ListSort): RowGroup<T>[] {
+  if (sort === 'live') return groups
+  const compare = compareCreated(sort === 'newest' ? 'desc' : 'asc')
+  return groups.map(group => ({ ...group, rows: [...group.rows].sort((a, b) => compare(a.run, b.run)) }))
+}
 
 /**
- * Recent (docs/PRD_VIEWER_REVAMP.md 5.1): finished runs of the last seven days, newest first, searched client-side on the run
- * id, the feature and the outcome, filtered (All, Failed, Succeeded, Today) and grouped by day or by project; the first ten
- * rows show, the rest behind "Show older" until the search, the filter or the grouping changes.
+ * Recent (docs/PRD_VIEWER_REVAMP.md 5.1): finished runs of the last seven days before today, latest first, grouped by day or
+ * by project; the first ten rows show, the rest behind "Show older". Its search and status filters are Triage's one bar;
+ * the grouping and "Show older" live in the URL with the bar's state.
  */
-function Recent({ rows, classes, now, zone, onNavigate }: { rows: Row[]; classes: RunClasses; now: number; zone: 'local' | 'utc'; onNavigate: (pathname: string) => void }) {
-  const [query, setQuery] = useState('')
-  const [filter, setFilter] = useState<RecentFilter>('all')
-  const [byProject, setByProject] = useState(false)
-  const view = `${query}\u0000${filter}\u0000${byProject}`
-  const [expandedFor, setExpandedFor] = useState<string | null>(null)
-  // The filter counts are over the set the search narrowed to (P2 1), so a button's number equals the rows that filter keeps.
-  const searched = searchRows(rows, query)
-  const counts = recentCounts(searched, now, zone)
-  const kept = filterRecent(searched, filter, now, zone)
-  const groups = byProject ? groupByProject(kept) : groupByDay(kept, now, zone)
-  const shown = expandedFor === view ? { groups, hidden: 0 } : firstRows(groups, RECENT_SHOWN)
-  const filters = (['all', 'failed', 'succeeded', 'today'] as const).map(id => ({ id, label: FILTER_LABEL[id], count: id === 'failed' || id === 'succeeded' ? counts[id] : undefined }))
+function Recent({ rows, total, filtering, sort, classes, now, zone, onNavigate, list }: {
+  rows: Row[]; total: number; filtering: boolean; sort: ListSort; classes: RunClasses; now: number; zone: 'local' | 'utc'; onNavigate: (pathname: string) => void; list: ListControl
+}) {
+  const byProject = list.search.group
+  // Groups are made from the rows in the default order, so a sort re-orders rows inside a group and never the groups.
+  const live = [...rows].sort((a, b) => Date.parse(b.run.activity?.finished_at ?? b.run.updated_at) - Date.parse(a.run.activity?.finished_at ?? a.run.updated_at) || a.run.run_id.localeCompare(b.run.run_id))
+  const groups = sortedGroups(byProject ? groupByProject(live) : groupByDay(live, now, zone), sort)
+  const shown = list.search.older ? { groups, hidden: 0 } : firstRows(groups, RECENT_SHOWN)
   return (
-    <Section id="recent-runs" headingId="recent-title" data-testid="recent-runs" className="home-section" title={`Recent · ${rows.length}`} sub="finished in the last 7 days, before today">
+    <Section id="recent-runs" headingId="recent-title" data-testid="recent-runs" className="home-section" title={`Recent · ${filtering ? `${rows.length} of ${total}` : total}`}
+      sub={filtering && rows.length === 0 ? 'No run matches.' : `finished in the last 7 days, before today · ${sectionOrderWords(sort)}`}>
       <div className="home-tools">
-        <label htmlFor="runs-search" className="visually-hidden">Search runs</label>
-        <input id="runs-search" className="home-search" type="search" value={query} placeholder="Search run id, feature or outcome" autoComplete="off"
-          onChange={event => setQuery(event.target.value)} />
-        <FilterRow aria-label="Filter recent runs" filters={filters} selected={filter} onSelect={id => setFilter(id as RecentFilter)} />
         <div className="ui-filters" role="group" aria-label="Group recent runs">
-          <FilterButton pressed={byProject} onClick={() => setByProject(value => !value)}>Group by project</FilterButton>
+          <FilterButton pressed={byProject} onClick={() => list.change({ group: !byProject })}>Group by project</FilterButton>
         </div>
       </div>
-      {rows.length === 0 && <p className="projects-muted lists-empty">No run finished in the last 7 days.</p>}
-      {rows.length > 0 && kept.length === 0 && <p className="projects-muted lists-empty">No recent run matches.</p>}
+      {total === 0 && <p className="projects-muted lists-empty">No run finished in the last 7 days.</p>}
+      {total > 0 && rows.length === 0 && <NoMatch />}
       {shown.groups.map(group => (
         <div key={group.key} className="recent-group" data-day={byProject ? undefined : group.key} data-group={byProject ? group.key : undefined}>
           <h3 className="recent-group-label">{group.label}</h3>
@@ -306,7 +340,7 @@ function Recent({ rows, classes, now, zone, onNavigate }: { rows: Row[]; classes
         </div>
       ))}
       {shown.hidden > 0 && (
-        <button type="button" className="home-show-older" onClick={() => setExpandedFor(view)}>Show older {shown.hidden}</button>
+        <button type="button" className="home-show-older" onClick={() => list.change({ older: true })}>Show older {shown.hidden}</button>
       )}
     </Section>
   )

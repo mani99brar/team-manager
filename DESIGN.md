@@ -237,16 +237,16 @@ Severities, on severity chips only, with `sev-fg` text: **P0 Red** (#a51d27), **
 
 ## Layout
 
-The run page is a frame that takes the window below the identity line (measured on mount and on resize, never under 420 px) and never scrolls the page: the stage pans and zooms inside it. The identity line is one wrapping row; Details folds the pinned facts under it. The dock sits 16 px from the stage's top-left at 312 px wide (its body scrolls past the stage's height minus 100 px); the sheet is 440 px on the right edge; the controls sit bottom right, the legend bottom left, the keyboard hint top right.
+The run page is a frame that takes the window below the identity line, less the one-line Sessions cue when the run has sessions (measured on mount and on resize, never under 420 px) and never scrolls sideways: the stage pans and zooms inside it. The identity line is one wrapping row; Details folds the pinned facts under it. When the run frame is 1200 px wide or wider the dock is a 312 px column on the stage's left, open or folded, never over the stage; narrower, it sits 16 px from the stage's top-left over the stage at 312 px wide (its body scrolls past the stage's height minus 100 px). The sheet is 440 px on the right edge; the controls sit bottom right, the legend bottom left, the keyboard hint top right.
 
-Cards are 232 × 136 px (growing to 176 px when their lines wrap); columns are 72 px apart along the flow and rows 44 px apart across it; a column is centred on the tallest one. The fit leaves the dock's 336 px clear on a desk and scales between 15 % and 140 %; the three detail levels switch at 60 % and 125 %.
+Cards are 232 × 136 px (growing to 176 px when their lines wrap); columns are 72 px apart along the flow and rows 44 px apart across it; a column is centred on the tallest one. The first view on a desk is fitted at no less than 60 % (the standard level) and at most 140 %; when the whole graph does not fit at 60 % it is placed on the step the run is at and pans. 'Fit the graph' shows the whole graph, down to 15 %, where chips wrap their labels on two lines. The overlaying dock (on a run frame under 1200 px) keeps its 336 px clear. The three detail levels switch at 60 % and 125 %.
 
 Responsive behaviour:
-- **Stage under 720 px (phones):** the flow runs top to bottom; the hint, the detail-level tag and the definition chip hide (a changed definition stays, as a warning); the dock folds when a step opens; the sheet rises from the bottom to 78 % of the stage with 16 px top corners; the legend stacks in one column; the identity line puts the feature on its own last line and hides the live chip.
+- **Stage under 720 px (phones):** the flow runs top to bottom; the hint, the detail-level tag, the definition chip and the branch hide (a changed definition stays, as a warning); the dock folds when a step opens; the sheet rises from the bottom to 78 % of the stage with 16 px top corners; the legend stacks in one column; the identity line puts the feature on its own last line and hides the live chip.
 - **The list pages** keep their breakpoints of the Calm look (860 px rail, 760 px phone rules).
 - The page never scrolls sideways; a command scrolls inside its box.
 
-**The Stage Is The Page Rule.** Nothing on the run page sits below the stage; what is not a card lives in the dock or the sheet.
+**The Stage Is The Page Rule.** Nothing on the run page sits below the stage except the Sessions table, announced by a one-line cue under the stage inside the first screen; what is not a card lives in the dock or the sheet.
 
 ## Elevation & Depth
 
@@ -265,13 +265,13 @@ Cards and the open-page button are 10 px; the dock and the legend 12 px; the she
 ## Components
 
 ### Identity line
-One row on a Sheet with a hairline below: the run id (mono 700), the status badge and its short meaning, the Untried chip, the feature title ellipsized with its full text in the tooltip, the pinned definition (`definition <sha> · current|changed since`), the live chip and the Local/UTC toggle, a pill link to the other view (Assignment or Run graph), and a `Details` disclosure that opens the pinned facts beneath. On the Assignment page the same line sits over the tabs and the assignment.
+One row on a Sheet with a hairline below: the run id (mono 700), the status badge and its short meaning, the Untried chip, the feature title ellipsized with its full text in the tooltip, the pinned definition's state (`definition current`, or `definition changed since` as a warning; the revision is in Details and the tooltip), the source branch and base commit in mono (`<branch> @ <sha>`, ellipsized, the full values in the tooltip), the live chip and the Local/UTC toggle, a pill link to the other view (Assignment or Run graph), and a `Details` disclosure that opens the pinned facts beneath. On the Assignment page the same line sits over the tabs and the assignment.
 
 ### Step card
 232 × 136 px, Sheet fill (Inset when pending), 1.5 px Rule outline in the executor's dash, 10 px corners, a 5 px band in the tone. Row one: the 18 px glyph and the label (two lines). Row two: the state word pill (soft fill), `kind · executor`, `attempt n` and the round line of a repair or the review. Row three: the lane in a mono chip, the duration, the open P1 count. Row four (full detail only): the last event's time and text, or what the step did. At the overview level the card shows a chip: glyph and label, then two or three facts. A card that waits on the operator adds the 3 px Attention Ring; the step the run is at adds an Ink outline; a selected card the accent ring. Keyboard focus is the 2 px accent outline. Hover lifts.
 
 ### Live dock
-A floating panel: the bar (44 px, the tone's glyph, the step the run is at in bold, its word in the tone's colour, "for 41m15s", a chevron) folds the body. The body: the Now banner (4 px left rule and the tone's soft fill, 13 px, the headline at 14 px, More, "Open <step> ›" which centres the step, and the command block with one Copy per command), "Latest events" as five rows (14 px glyph, the step in bold, the age, the message clamped to two lines; a row is a button that centres its step), the figures `Ran · Spent · Deadlines` with "not recorded" in italic Pencil where nothing is recorded, and one Pencil source line.
+A floating panel: the bar (44 px, the tone's glyph, the step the run is at in bold, its word in the tone's colour, how long it has run while it runs ("for 41m15s"), since when a stopped run stopped ("paused 10 d (since Oct 2)") and how long ago a finished run ended and how long it ran ("failed 4 d ago · ran 1h05m"), a chevron) folds the body. The body: the Now banner (4 px left rule and the tone's soft fill, 13 px, the headline at 14 px, More, "Open <step> ›", which opens the step's page, and "Show in graph", which centres the step and opens its sheet, and the command block with one Copy per command), "Latest events" as five rows (14 px glyph, the step in bold, the age, the message clamped to two lines; a row is a button that centres its step), the figures `Ran · Spent · Deadlines` with "not recorded" in italic Pencil where nothing is recorded, and one Pencil source line.
 
 ### Step sheet
 A 440 px Sheet with a hairline on its stage side and the float shadow: a head with the 5 px band, the title (20px 700), the state pill, `kind · executor` and the id in mono, and a 44 px close button; a scrolling body of sections separated by hairlines (What it did, Facts as Inset tiles, Command, Reviewers as toned pills, Findings as severity-chip lines with "Show all", Repair, Questions to you, the attack pass or the panel where the step owns it, Events with mono times); a footer with the full-width Ink "Open step page" button. A phone shows it as a bottom sheet.
@@ -285,11 +285,14 @@ A 440 px Sheet with a hairline on its stage side and the float shadow: a head wi
 - **Lane chip**: mono 12px 600 in a 1 px Rule box with 4 px corners.
 - **Severity chip**: solid P0/P1/P2 with `sev-fg` text, mono 11px.
 
+### Sessions table
+Under the stage, one line per session grouped by role (label linked to its step, model, status, started, duration, cost, session id), the totals line above it; a Claude row has one Copy and a Show command toggle for the full resume command. The cue under the stage, `Sessions · n · <spent> ↓`, is a link to it.
+
 ### Command line
 Mono 13px on an Inset box with a hairline, 8 px corners; a Copy button beside it that says "Copied" or "Selected"; the honesty caption under the block. Unchanged in content from the Calm look.
 
 ### Lists, rails, rows, finding cards, section headers, buttons
-The home, project, feature and node pages keep the Calm components (run rows with a 4 px tone stripe, finding cards, figures, section headers, filter pills, the step strip, tabs) on the new tokens and faces. A finding card's head is the severity, the reviewer, the lane and the message's first sentence at normal weight, with the rest of the message, the requirement and the fields behind More; a blocking finding is marked in place (a "blocks integration" chip and the fail stripe) in the one findings list, which opens on the open P0/P1, never repeated in a second list. Figures are numbers only; a state (a worker's completion) is a chip on the heading it belongs to. On node pages the step strip is the only sticky band and there are no tabs (an Assignment link in the run bar replaces them); the run page and the Assignment view keep their tabs.
+The home, project, feature and node pages keep the Calm components (run rows with a 4 px tone stripe, finding cards, figures, section headers, filter pills, the step strip, tabs) on the new tokens and faces. A finding card's head is the severity, the reviewer, the lane and the message's first sentence at normal weight, with the rest of the message, the requirement and the fields behind More; a blocking finding is marked in place (a "blocks integration" chip and the fail stripe) in the one findings list, which opens on the open P0/P1, never repeated in a second list. Figures are numbers only; a state (a worker's completion) is a chip on the heading it belongs to. On node pages the step strip is the only sticky band and there are no tabs (an Assignment link in the run bar replaces them); the run page and the Assignment view keep their tabs. Every run list (Triage, the project page, the feature page) has one filter bar (status, stopped-at phase, date, text, sort) and a scope line that says which runs were searched. Lists put the runs that need the operator first, then running, then paused, then the rest by latest activity, and the sub-header names the order. On the project page each feature is one header row (its link, state, run chips, last-activity date) with a Show runs disclosure; run rows carry their date and duration; the definition fold appears once per revision. A stopped run (paused, or interrupted while paused or running) reads as days since it stopped, 'paused 10 d (since Oct 2)'; only a running run shows a ticking span. Spans of 48 h and more read in days and hours. A badge is toned by what it counts (warn waits, pause paused, run running), never by the row's last result. Pinned is a shortcut list at the top of Triage; a pinned run keeps its place in its state section. On run and node pages the crumbs share one row with the run's 'Add to Triage' toggle, outside the workspace.
 
 **The Selection Is Not State Rule.** Selection and the current item are drawn in Signal Violet (the ring, the hot edge) or Ink (the "now" outline), never in a tone.
 
@@ -298,7 +301,7 @@ The home, project, feature and node pages keep the Calm components (run rows wit
 ### Do:
 - **Do** take every colour inside the Projects viewer from the tokens on `.projects-shell`, and give a new token a dark counterpart under both dark selectors.
 - **Do** route every state through `tone.ts`, draw it with the tone classes, and repeat it with a `Glyph` or a word.
-- **Do** keep the run page to the identity line, the stage, the dock and the sheet; put a new run-level record in the sheet of the step that owns it.
+- **Do** keep the run page to the identity line, the stage, the dock, the sheet and the Sessions table under its cue; put a new run-level record in the sheet of the step that owns it.
 - **Do** show "not recorded" in italic Pencil wherever the records hold nothing; never guess a time, a cost or a model.
 - **Do** keep every control at 44 px, the stage keyboard-walkable, and the page free of sideways scroll at 390 px.
 - **Do** self-host any face and never let the page ask another host for anything.
@@ -306,7 +309,7 @@ The home, project, feature and node pages keep the Calm components (run rows wit
 
 ### Don't:
 - **Don't** use the accent for a status, or a tone for selection.
-- **Don't** add sections, tables or lists under the stage; the stage is the page.
+- **Don't** add sections, tables or lists under the stage beyond the Sessions table; the stage is the page.
 - **Don't** tint the ground, a card or a panel for grouping or emphasis.
 - **Don't** add a web-font request, a third face or an icon font; glyphs are the drawn symbols of `Glyph.tsx`.
 - **Don't** put a control on any page that acts on a run.

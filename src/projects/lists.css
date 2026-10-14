@@ -145,6 +145,20 @@
 .pin-toggle:hover { border-color: var(--accent); color: var(--accent); }
 .pin-toggle[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
 .pin-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* Beside a run row the toggle sits on the row's first line as a compact control, never a full-height bordered box. */
+.run-row-item > .pin-toggle { align-self: flex-start; min-height: 0; height: 24px; margin-top: 6px; padding: 0 8px; border-color: transparent; background: transparent; }
+.run-row-item > .pin-toggle[aria-pressed="true"] { border-color: transparent; background: var(--accent-soft); }
+
+/* The filter bar every run list shares: a search box, three selects, the status toggles and the scope line. Not a form. */
+.run-filter { display: flex; flex-direction: column; gap: 4px; margin: 6px 0 10px; }
+.run-filter-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.run-filter-search { flex: 1 1 220px; min-width: 0; max-width: 360px; box-sizing: border-box; min-height: 32px; padding: 4px 10px; font: inherit; color: var(--fg); background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); }
+.run-filter-field { display: inline-flex; align-items: center; gap: 6px; font-size: 0.85rem; color: var(--muted); }
+.run-filter-field select { box-sizing: border-box; min-height: 32px; font: inherit; color: var(--fg); background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 2px 6px; }
+.run-filter-status { flex-wrap: wrap; align-items: center; }
+.run-filter-clear { font: inherit; font-size: 0.85rem; cursor: pointer; color: var(--accent); background: none; border: 1px solid transparent; border-radius: var(--radius); padding: 2px 8px; }
+.run-filter-scope { margin-left: auto; font-size: 0.85rem; color: var(--muted); }
+.run-filter-none .run-filter-clear { margin-left: 4px; }
 .projects-shell .home-card { display: flex; flex-direction: column; }
 .home-card-pin { align-self: flex-end; margin: 0 14px 10px; }
 .pinned-unread-row { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; }
@@ -211,7 +225,10 @@
 
 @media (max-width: 760px) {
   /* The toggles are full tap targets on a phone. */
-  .pin-toggle, .crumb-pin { min-height: 44px; height: auto; }
+  .pin-toggle, .crumb-pin, .run-row-item > .pin-toggle { min-height: 44px; height: auto; }
+  /* Every filter control is a full tap target on a phone. */
+  .run-filter-search, .run-filter-field select, .run-filter-status button, .run-filter-clear { min-height: 44px; }
+  .run-filter-search { max-width: none; flex-basis: 100%; }
   /* Three short lines: id and status, then the time, then the summary. */
   .run-row { grid-template-columns: minmax(0, 1fr); }
   .run-row-when { text-align: left; white-space: normal; padding-left: calc(1.1em + 8px); }

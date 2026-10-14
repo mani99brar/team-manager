@@ -1,11 +1,12 @@
-import { useCallback, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from 'react'
 import type { Now, RunAttention, Timeline } from '../../../contracts/projects/triage.ts'
 import type { PanelResults, ReviewResult, RunDetail, RunInputs, Sessions, WorkflowEvent } from '../api.ts'
 import type { StepRow } from '../steps.ts'
 import { formatSpan } from '../time.ts'
+import { sessionsCueText } from '../sessions/model.ts'
 import { spentText } from '../sessions/model.ts'
 import { GlyphDefs } from './Glyph.tsx'
-import { PHONE_STAGE_WIDTH } from './layout.ts'
+import { DOCK_COLUMN_FRAME, dockReserve, PHONE_STAGE_WIDTH } from './layout.ts'
 import { readDockOpen } from './dock.ts'
 import { LiveDock } from './LiveDock.tsx'
 import { latestEvents, nowNodeId, stageNodes } from './model.ts'
@@ -13,9 +14,7 @@ import { NodeSheet } from './NodeSheet.tsx'
 import { RunStage, type StageHandle } from './RunStage.tsx'
 import './signal.css'
 
-/** The live dock's width plus its margin, which the fit keeps clear on a desk. */
-const DOCK_RESERVE = 336
-/** The stage never shrinks below this, whatever the window. */
+/** The stage never shrinks below this, whatever the window and the cue under it. */
 const MIN_STAGE_HEIGHT = 420
 
 type Props = {
@@ -50,7 +49,11 @@ export function SignalRun({ detail, rows, timeline, events, inputs, review, atte
   const frame = useRef<HTMLDivElement>(null)
   const [selected, setSelected] = useState<string | null>(null)
   const [dockOpen, setDockOpen] = useState(readDockOpen)
+  const cue = useRef<HTMLAnchorElement>(null)
   const [height, setHeight] = useState<number | null>(null)
+  // The run frame's measured width, never the viewport's: the dock takes its own column from 1200 px of it.
+  const [frameWidth, setFrameWidth] = useState(0)
+  const cueText = sessions ? sessionsCueText(sessions) : null
   const nodes = useMemo(() => stageNodes({ detail, rows, timeline, events, inputs, review, attention, reviewRound, sessions, panels }, formatSpan), [detail, rows, timeline, events, inputs, review, attention, reviewRound, sessions, panels])
   const labels = useMemo(() => new Map(detail.definition.nodes.map(node => [node.node_id, node.label])), [detail.definition.nodes])
   const latest = useMemo(() => latestEvents(timeline, labels), [timeline, labels])
@@ -58,15 +61,38 @@ export function SignalRun({ detail, rows, timeline, events, inputs, review, atte
   // A step that leaves the picture (a re-export) has no sheet; the selection is simply not found.
   const selectedNode = selected === null ? null : nodes.find(node => node.id === selected) ?? null
 
-  // The stage takes the window below the identity line, so the graph is the page and nothing under it needs a scroll.
+  // The frame takes the window below the identity line, less the cue under the stage when it renders, so the graph is the page
+  // and nothing but the Sessions table needs a scroll; measured on mount, on resize and when the cue comes or goes.
+  const hasCue = cueText !== null
   useLayoutEffect(() => {
     const element = frame.current
     if (!element) return
-    const measure = () => setHeight(Math.max(MIN_STAGE_HEIGHT, window.innerHeight - element.getBoundingClientRect().top - 8))
+    const measure = () => {
+      const cueHeight = cue.current?.getBoundingClientRect().height ?? 0
+      const top = element.getBoundingClientRect().top + window.scrollY
+      setHeight(Math.max(MIN_STAGE_HEIGHT + cueHeight + 2, window.innerHeight - top - 4))
+      setFrameWidth(element.clientWidth)
+    }
     measure()
     window.addEventListener('resize', measure)
-    return () => window.removeEventListener('resize', measure)
-  }, [])
+    // The identity line above may grow after the first paint (its rows wrap, Details opens): the frame follows its top.
+    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(measure)
+    observer?.observe(element)
+    if (element.parentElement) observer?.observe(element.parentElement)
+    return () => {
+      window.removeEventListener('resize', measure)
+      observer?.disconnect()
+    }
+  }, [hasCue])
+
+  // The cue leads to the Sessions heading: scrolled into view, focused, the URL untouched.
+  const toSessions = (event: MouseEvent<HTMLAnchorElement>) => {
+    event.preventDefault()
+    const heading = document.getElementById('sessions-title')
+    if (!heading) return
+    heading.scrollIntoView({ block: 'start' })
+    heading.focus({ preventScroll: true })
+  }
 
   // On a phone the dock and the sheet would cover each other: opening a step folds the dock to its bar.
   const phone = () => (frame.current?.clientWidth ?? Number.POSITIVE_INFINITY) <= PHONE_STAGE_WIDTH
@@ -79,17 +105,23 @@ export function SignalRun({ detail, rows, timeline, events, inputs, review, atte
     stage.current?.goTo(nodeId)
   }, [])
 
+  // The dock sits outside the stage, so Escape pressed inside it closes the open sheet here.
+  const closeFromDock = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (event.key === 'Escape' && selected !== null && event.target instanceof Element && event.target.closest('.sb-live')) select(null)
+  }
+  const column = frameWidth >= DOCK_COLUMN_FRAME
   return (
-    <div ref={frame} className="sb-frame" data-testid="run-board" style={height === null ? undefined : { height }}>
+    <div ref={frame} className={`sb-frame${column ? ' dock-col' : ''}`} data-testid="run-board" data-dock={column ? 'column' : 'overlay'} style={height === null ? undefined : { height }} onKeyDown={closeFromDock}>
       <GlyphDefs />
-      <RunStage ref={stage} nodes={nodes} nowId={nowId} selectedId={selected} onSelect={select} reservedLeft={dockOpen ? DOCK_RESERVE : 0} sheetOpen={selectedNode !== null}>
-        <LiveDock detail={detail} now={now} clock={clock} nodes={nodes} nowId={nowId} latest={latest} timeline={timeline} inputs={inputs} open={dockOpen} onOpenChange={setDockOpen} onGo={goTo} nodeHref={nodeHref} onNavigate={onNavigate} spent={sessions ? spentText(sessions.totals) : null} />
+      <LiveDock detail={detail} now={now} clock={clock} nodes={nodes} nowId={nowId} latest={latest} timeline={timeline} inputs={inputs} open={dockOpen} onOpenChange={setDockOpen} onGo={goTo} nodeHref={nodeHref} onNavigate={onNavigate} spent={sessions ? spentText(sessions.totals) : null} />
+      <RunStage ref={stage} nodes={nodes} nowId={nowId} selectedId={selected} onSelect={select} reservedLeft={dockReserve(frameWidth, dockOpen)} sheetOpen={selectedNode !== null} cued={hasCue}>
         {selectedNode && (
           <NodeSheet node={selectedNode} now={now} isFocus={selectedNode.id === (now?.focus?.node_id ?? null)} href={nodeHref(selectedNode.id)} onNavigate={onNavigate} onClose={() => select(null)}>
             {sheetExtras?.(selectedNode.id)}
           </NodeSheet>
         )}
       </RunStage>
+      {cueText !== null && <a ref={cue} href="#sessions-title" className="sb-cue" data-testid="sessions-cue" onClick={toSessions}>{cueText}</a>}
       <p className="visually-hidden" role="status">{selectedNode ? `${selectedNode.label} details open` : ''}</p>
     </div>
   )

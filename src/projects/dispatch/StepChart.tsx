@@ -9,12 +9,14 @@
  * command, with the literal `<run-id>` placeholder for a whole-workflow failure ([P21]).
  */
 import type { WorkflowDefinition } from '../api.ts'
+import { dayKey, monthDay } from '../lists.ts'
 import { runPathname, workflowPathname } from '../routes.ts'
+import type { Zone } from '../time.ts'
 import { AppLink } from '../panels.tsx'
 import { OVERRIDE_LABEL, STATUS_LABEL } from '../status.ts'
 import { stateTone, toneClass, type Tone } from '../tone.ts'
 import { CHART_COLUMNS, PHASE_SHORT, PHASES, phaseOf } from './phases.ts'
-import { endedCounts, landingKnown, noStopWording, runStepsRead, stopOf, type ChartRun, type StepsReadState } from './stops.ts'
+import { endedCounts, landingKnown, noStopWording, runStepsRead, runWhen, stopOf, type ChartRun, type StepsReadState } from './stops.ts'
 import { landingWording } from './derive.ts'
 import { StateGlyph } from './common.tsx'
 import type { Landing, ProjectStepsRun, ProjectStepsWorkflow } from './types.ts'
@@ -83,9 +85,9 @@ function landingText(landing: Landing | null, defaultBranch: string | null, sour
   return landingWording(landing, defaultBranch, sourceBranch)
 }
 
-function ChartRow({ entry, landing, defaultBranch, stepsRead, selected, onSelect }: {
+function ChartRow({ entry, landing, defaultBranch, stepsRead, selected, onSelect, now, zone }: {
   entry: ChartRun; landing: Landing | null; defaultBranch: string | null; stepsRead: StepsReadState
-  selected: boolean; onSelect: (runId: string) => void
+  selected: boolean; onSelect: (runId: string) => void; now: number; zone: Zone
 }) {
   const tone = runTone(entry)
   const word = runWord(entry)
@@ -95,7 +97,7 @@ function ChartRow({ entry, landing, defaultBranch, stepsRead, selected, onSelect
   const stopLabel = stopStep?.label ?? (stop === null ? entry.run.activity?.focus?.label ?? null : 'launch')
   const repairs = (entry.steps?.steps ?? []).filter(s => /^repair-/.test(s.node_id)).length
   const integrated = entry.steps?.integrated_commit ?? null
-  // A row with no stop to name says whether its steps are still loading, failed to read, or hold nothing for it (M1).
+  // A row with no stop to name says whether its steps are still loading, failed to read, or hold nothing for it.
   const noStop = noStopWording(runStepsRead(entry, stepsRead))
   return (
     <button type="button" className={`dispatch-run tone-${tone}`} data-run-id={entry.run.run_id} aria-selected={selected} aria-pressed={selected}
@@ -106,6 +108,7 @@ function ChartRow({ entry, landing, defaultBranch, stepsRead, selected, onSelect
         <span className="dispatch-run-id">{num(entry.run.run_id)}</span>
         <span className="dispatch-word">{word}</span>
         {repairs > 0 && <span className="dispatch-tag">{repairs} {repairs === 1 ? 'repair' : 'repairs'}</span>}
+        <span className="dispatch-run-when" data-testid="dispatch-run-when">{runWhen(entry, now, zone)}</span>
         <span className="dispatch-run-r">
           {integrated && <span className="dispatch-res"><code>{integrated.slice(0, 7)}</code>{landing && <span className="dispatch-off">{landingText(landing, defaultBranch, entry.steps?.source_branch ?? null)}</span>}</span>}
         </span>
@@ -123,23 +126,32 @@ function ChartRow({ entry, landing, defaultBranch, stepsRead, selected, onSelect
 }
 
 /**
- * The "Steps of this definition" fold (PRD 4.3, V7): the workflow's current definition steps (label and phase), read from
- * the definition the chart already holds (`workflow.nodes`), so a feature with no runs, or one whose definition changed since
- * its latest run, still shows the right steps; the run tracks keep their own recorded steps ([P30]).
+ * The "Steps of this definition" folds (PRD 4.3, V7), once per distinct definition revision above the chart: the current
+ * definition's steps (label and phase) read from the definitions the page holds (`workflow.nodes`), naming how many features
+ * use it, so every feature's steps stay reachable (an unreadable one's included, [P30]); the run tracks keep their own
+ * recorded steps.
  */
-function DefinitionFold({ workflow }: { workflow: WorkflowDefinition }) {
+export function DefinitionFolds({ workflows, order }: { workflows: readonly WorkflowDefinition[]; order?: string }) {
+  const revisions = new Map<string, WorkflowDefinition[]>()
+  for (const workflow of workflows) revisions.set(workflow.definition_revision, [...(revisions.get(workflow.definition_revision) ?? []), workflow])
   return (
-    <details className="dispatch-def" data-testid="dispatch-def">
-      <summary>Steps of this definition <span className="dispatch-muted">{workflow.nodes.length} steps</span></summary>
-      <ol className="dispatch-def-list">
-        {workflow.nodes.map(node => (
-          <li key={node.node_id} data-node-id={node.node_id}>
-            <span className="dispatch-def-phase">{PHASES[phaseOf(node.node_id, node.kind)]}</span>
-            <span className="dispatch-def-label">{node.label}</span>
-          </li>
-        ))}
-      </ol>
-    </details>
+    <div className="dispatch-defs" data-testid="dispatch-defs">
+      {order && <p className="dispatch-muted dispatch-order" data-testid="project-features-sub">{order}</p>}
+      {[...revisions.entries()].map(([revision, users]) => (
+        <details key={revision} className="dispatch-def" data-testid="dispatch-def" data-revision={revision}>
+          <summary>Steps of this definition <span className="dispatch-muted">{users[0].nodes.length} steps · {users.length} {users.length === 1 ? 'feature' : 'features'}</span></summary>
+          <p className="dispatch-muted dispatch-def-users">{users.map(user => user.workflow_id).join(', ')}</p>
+          <ol className="dispatch-def-list">
+            {users[0].nodes.map(node => (
+              <li key={node.node_id} data-node-id={node.node_id}>
+                <span className="dispatch-def-phase">{PHASES[phaseOf(node.node_id, node.kind)]}</span>
+                <span className="dispatch-def-label">{node.label}</span>
+              </li>
+            ))}
+          </ol>
+        </details>
+      ))}
+    </div>
   )
 }
 
@@ -155,6 +167,12 @@ export type FeatureGroup = {
   landings: Map<string, Landing>
   /** The feature's run list: still loading, failed, or read. Only a read list may say how many runs it holds. */
   runsRead: 'loading' | 'failed' | 'read'
+  /** The most urgent group among its runs (0 needs the operator, 1 running, 2 paused, 3 none), for the list order. */
+  rank: number
+  /** The latest last activity among its read runs, in epoch ms; null without a read run. */
+  lastActivity: number | null
+  /** Whether the feature has more runs than the page read (its first page only). */
+  more: boolean
 }
 
 type Props = {
@@ -163,16 +181,35 @@ type Props = {
   groups: readonly FeatureGroup[]
   /** Whether the project's run filter is active, so a group filtered to nothing says "0 of N runs match" (V30). */
   filtering: boolean
-  /** The project's steps read, so a run row without a stop says "reading steps…" while it loads, never "not read" (M1). */
+  /** The project's steps read, so a run row without a stop says "reading steps…" while it loads, never "not read". */
   stepsRead: StepsReadState
   selectedRunId: string | null
   onSelect: (runId: string) => void
   onNavigate: (pathname: string) => void
+  /** Whether a feature's runs show (its "Show runs" disclosure), and its toggle. */
+  isOpen: (group: FeatureGroup) => boolean
+  onToggle: (group: FeatureGroup) => void
+  /** The page's list clock and zone, for the dated rows. */
+  now: number
+  zone: Zone
+  /** The features' order in words, shown above the definition folds. */
+  order?: string
 }
 
-export function StepChart({ projectId, defaultBranch, groups, filtering, stepsRead, selectedRunId, onSelect, onNavigate }: Props) {
+/** A feature's state word on its header: what its most urgent run is, else its latest run's outcome. */
+function stateWord(group: FeatureGroup): string | null {
+  if (group.runsRead !== 'read' || group.steps?.error) return null
+  if (group.rank === 0) return 'needs you'
+  if (group.rank === 1) return 'running'
+  if (group.rank === 2) return 'paused'
+  const latest = group.runs.reduce<ChartRun | null>((best, entry) => (best === null || Date.parse(entry.run.updated_at) > Date.parse(best.run.updated_at) ? entry : best), null)
+  return latest === null ? 'no runs' : runWord(latest).toLowerCase()
+}
+
+export function StepChart({ projectId, defaultBranch, groups, filtering, stepsRead, selectedRunId, onSelect, onNavigate, isOpen, onToggle, now, zone, order }: Props) {
   return (
     <div className="dispatch-chart" data-testid="dispatch-chart">
+      <DefinitionFolds workflows={groups.map(group => group.workflow)} order={order} />
       <div className="dispatch-axis" data-testid="dispatch-axis">
         <span className="dispatch-axis-l" aria-hidden="true">phase</span>
         <span className="dispatch-axis-track" style={{ gridTemplateColumns: CHART_COLUMNS }}>
@@ -191,11 +228,16 @@ export function StepChart({ projectId, defaultBranch, groups, filtering, stepsRe
           const landed = group.runs.filter(entry => entry.steps?.integrated_commit).map(entry => entry.steps!.integrated_commit!)
           const counts = endedCounts(group.runs)
           const total = counts.slice(0, 7).reduce((a, b) => a + b, 0)
+          const open = isOpen(group)
+          const word = stateWord(group)
+          const bodyId = `dispatch-feature-runs-${group.workflow.workflow_id}`
           return (
-            <li key={group.workflow.workflow_id} className="lists-group dispatch-feature" data-workflow-id={group.workflow.workflow_id}>
+            <li key={group.workflow.workflow_id} className={`lists-group dispatch-feature${open ? ' is-open' : ''}`} data-workflow-id={group.workflow.workflow_id} data-open={open ? 'true' : 'false'}>
+              <div className="dispatch-feature-row">
               <AppLink href={workflowPathname(projectId, group.workflow.workflow_id)} onNavigate={onNavigate}
                 className={`projects-card lists-group-head ui-card ${toneClass(tone)}`}>
                 <span className="dispatch-feature-id">{group.workflow.workflow_id}</span>
+                {word !== null && <span className="dispatch-feature-word" data-testid="dispatch-feature-word">{word}</span>}
                 <span className="dispatch-muted">
                   {error || group.runsRead === 'failed'
                     ? 'cannot be read'
@@ -205,12 +247,12 @@ export function StepChart({ projectId, defaultBranch, groups, filtering, stepsRe
                       ? `0 of ${group.total} runs match`
                       : `${group.runs.length} ${group.runs.length === 1 ? 'run' : 'runs'}`}
                   {landed.length > 0 && <> · landed {landed.map(sha => <code key={sha}>{sha.slice(0, 7)}</code>)}</>}
-                  {/* "nothing landed" only when every run's steps were read: a pending or failed read leaves it unknown (M1). */}
+                  {/* "nothing landed" only when every run's steps were read: a pending or failed read leaves it unknown. */}
                   {!error && group.runsRead === 'read' && landed.length === 0 && group.runs.length > 0 && landingKnown(group.runs, stepsRead) && ' · nothing landed'}
                 </span>
                 {group.runs.length > 1 && (
                   <span className="dispatch-chain" aria-label="Runs oldest first">
-                    {[...group.runs].reverse().map(entry => (
+                    {[...group.runs].sort((a, b) => Date.parse(a.run.created_at) - Date.parse(b.run.created_at) || a.run.run_id.localeCompare(b.run.run_id)).map(entry => (
                       <span key={entry.run.run_id} className={`dispatch-chip-run tone-${runTone(entry)}`}>
                         <StateGlyph tone={runTone(entry)} />
                         <span className="dispatch-mono">{num(entry.run.run_id)}</span>
@@ -219,7 +261,17 @@ export function StepChart({ projectId, defaultBranch, groups, filtering, stepsRe
                     ))}
                   </span>
                 )}
+                {group.lastActivity !== null && (
+                  <span className="dispatch-feature-last" data-testid="dispatch-feature-last">
+                    last activity {dayKey(group.lastActivity, zone) === dayKey(now, zone) ? 'today' : monthDay(new Date(group.lastActivity).toISOString(), now, zone)}
+                  </span>
+                )}
               </AppLink>
+              <button type="button" className="dispatch-feature-toggle" aria-expanded={open} aria-controls={bodyId} onClick={() => onToggle(group)} data-testid="dispatch-feature-toggle">
+                {open ? 'Hide runs' : 'Show runs'}
+              </button>
+              </div>
+              {open && <div id={bodyId} className="dispatch-feature-body">
               {error
                 ? (
                   <div className="dispatch-badrows">
@@ -234,7 +286,7 @@ export function StepChart({ projectId, defaultBranch, groups, filtering, stepsRe
                     <div className="dispatch-runs">
                       {group.runs.map(entry => (
                         <ChartRow key={entry.run.run_id} entry={entry} landing={group.landings.get(entry.run.run_id) ?? null} defaultBranch={defaultBranch} stepsRead={stepsRead}
-                          selected={selectedRunId === entry.run.run_id} onSelect={onSelect} />
+                          selected={selectedRunId === entry.run.run_id} onSelect={onSelect} now={now} zone={zone} />
                       ))}
                       {(group.steps?.errors ?? []).map(err => (
                         <p key={err.run_id} className="dispatch-badrow" role="alert">
@@ -253,14 +305,12 @@ export function StepChart({ projectId, defaultBranch, groups, filtering, stepsRe
                     )}
                   </>
                 )}
-              {/* The "Steps of this definition" fold reads the current definition (`workflow.nodes`), which is held whether or
-                  not the runs could be listed, so every feature group exposes it — an unreadable workflow included (V7, [P30]). */}
-              <DefinitionFold workflow={group.workflow} />
               {/* keep the run links discoverable for keyboard and deep-linking without leaving the pane */}
               {group.runs.map(entry => (
                 <a key={`link-${entry.run.run_id}`} className="visually-hidden" href={runPathname(projectId, group.workflow.workflow_id, entry.run.run_id)}
                   onClick={e => { e.preventDefault(); onSelect(entry.run.run_id) }}>Open {entry.run.run_id}</a>
               ))}
+              </div>}
             </li>
           )
         })}

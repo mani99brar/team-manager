@@ -98,11 +98,28 @@ type Props = {
   /** Whether the ahead view is the one currently docked, for the button's pressed state. */
   aheadOpen: boolean
   onNavigate: (pathname: string) => void
+  /** A project without a GitHub remote: the column is one line under the header (its local sync and the not-read reason). */
+  compact?: boolean
 }
 
-export function GithubColumn({ project, git, github, runBranches, others, primaryName, viewerLogin, readAt, onShowAhead, aheadOpen, onNavigate }: Props) {
+export function GithubColumn({ project, git, github, runBranches, others, primaryName, viewerLogin, readAt, onShowAhead, aheadOpen, onNavigate, compact = false }: Props) {
   const reason = github?.status === 'read' ? github.reason : github?.reason ?? 'not read yet'
   const notReadReason = github === null ? 'GitHub state not available' : reason ?? 'not read yet'
+  if (compact) {
+    const ahead = git !== null && (git.ahead_commits.length > 0 || git.landings.length > 0 || (git.origin?.compare === 'compared' && (git.origin.ahead ?? 0) > 0))
+    return (
+      <aside className="dispatch-gh dispatch-gh-line" aria-label="GitHub and local branch" data-testid="dispatch-github">
+        <p className="dispatch-gline" id="g-local" data-testid="dispatch-gh-local" tabIndex={-1}>
+          <span className="dispatch-gh-title">Local and GitHub</span>
+          {' · '}{git === null ? 'git state not available.' : syncPhrase(git, project.project_id, primaryName)}
+          {' · '}<span data-testid="dispatch-gh-local-notread">GitHub not read: {notReadReason}</span>
+          {ahead && (
+            <> {' · '}<button type="button" className="dispatch-gh-ahead-btn" data-testid="dispatch-ahead-button" aria-pressed={aheadOpen} onClick={onShowAhead}>Commits ahead and landings</button></>
+          )}
+        </p>
+      </aside>
+    )
+  }
   const read = github?.status === 'read'
   const headState = githubHeadState(github)
   const defaultBranch = git?.default_branch ?? null

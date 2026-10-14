@@ -6,7 +6,7 @@
  * are mocked from `fixtures/dispatch.ts` through `installHooks`; candidate phase: the real server serves the seeded repositories.
  */
 import { test, expect, type Locator, type Page } from '@playwright/test'
-import { attach, installHooks, phase, projectUrl, renderedText, workspace } from './support.ts'
+import { attach, gotoProjectOpen, installHooks, openAllFeatures, phase, projectUrl, renderedText, workspace } from './support.ts'
 import { mockDispatchResponse } from './mock.ts'
 import {
   DISPATCH_BUSY, DISPATCH_LOCAL, DISPATCH_NOORIGIN, DISPATCH_TRIO, DISPATCH_UNREADABLE, DISPATCH_WIDGETS, DISPATCH_WIDGETS_WT, RUN_WT_DROPPED,
@@ -19,6 +19,8 @@ const TRIAGE = '/projects/-/triage'
 const card = (page: Page, id: string) => page.locator(`.dispatch-card[data-project-id="${id}"]`)
 const railRow = (page: Page, id: string) => page.locator(`.dispatch-rail-row[data-project-id="${id}"]`)
 const run = (page: Page, id: string) => page.locator(`.dispatch-run[data-run-id="${id}"]`)
+/** The project page's filter-bar search box. */
+const projectSearch = (page: Page) => page.getByTestId('dispatch-project').getByTestId('run-filter-q')
 
 /** The bounding box of a locator, or a failing assertion. */
 async function box(locator: Locator) {
@@ -113,7 +115,7 @@ test(`[scenario:dispatch-triage] /projects/-/triage shows the former Runs home c
   await expect(page.getByTestId('running-runs')).toBeVisible()
   await expect(page.getByTestId('recent-runs')).toBeVisible()
   await expect(page.getByTestId('rail-triage')).toHaveAttribute('aria-current', 'page')
-  await page.goto(projectUrl(DISPATCH_WIDGETS))
+  await gotoProjectOpen(page, projectUrl(DISPATCH_WIDGETS))
   await page.getByTestId('rail-triage').click()
   await expect(page).toHaveURL(/\/projects\/-\/triage$/)
   await page.getByTestId('rail-all-projects').click()
@@ -122,7 +124,8 @@ test(`[scenario:dispatch-triage] /projects/-/triage shows the former Runs home c
 })
 
 test(`[scenario:dispatch-project] The project page header shows repository, checkout, sync, figures and jump buttons that move focus; git-not-read says so (${phase})`, async ({ page }, testInfo) => {
-  await page.goto(projectUrl(DISPATCH_WIDGETS))
+  test.slow() // the features are opened on every project page it reads
+  await gotoProjectOpen(page, projectUrl(DISPATCH_WIDGETS))
   const header = page.getByTestId('dispatch-project-header')
   await expect(header.getByRole('heading', { level: 1, name: 'Widgets' })).toBeVisible()
   await expect(header.getByRole('link', { name: /acme\/widgets/ })).toHaveAttribute('href', 'https://github.com/acme/widgets')
@@ -135,8 +138,8 @@ test(`[scenario:dispatch-project] The project page header shows repository, chec
     await header.getByRole('button', { name }).click()
     await expect(page.locator(`#${id}`)).toBeFocused()
   }
-  // The filter narrows the run rows; Escape clears it.
-  const filter = page.locator('#dispatch-filter')
+  // The filter bar's search narrows the run rows; Escape clears it.
+  const filter = projectSearch(page)
   await filter.fill('ui-polish-001')
   await expect(run(page, 'ui-polish-002')).toHaveCount(0)
   await expect(run(page, 'ui-polish-001')).toHaveCount(1)
@@ -144,14 +147,15 @@ test(`[scenario:dispatch-project] The project page header shows repository, chec
   await page.keyboard.press('Escape')
   await expect(filter).toHaveValue('')
   // A project whose git could not be read says "git not read", never "checkout detached".
-  await page.goto(projectUrl(DISPATCH_UNREADABLE))
+  await gotoProjectOpen(page, projectUrl(DISPATCH_UNREADABLE))
   await expect(page.getByTestId('dispatch-project-header')).toContainText('git not read')
   await expect(page.getByTestId('dispatch-project-header')).not.toContainText('detached')
   await attach(page, testInfo, 'dispatch-project')
 })
 
 test(`[scenario:dispatch-chart] The step chart: sticky axis once, solid/dotted track, lane dots, chips, landed sha, ended counts, 440px collapse, and a workflow-level error with the literal placeholder (${phase})`, async ({ page }, testInfo) => {
-  await page.goto(projectUrl(DISPATCH_WIDGETS))
+  test.slow() // the features are opened on every project page it reads
+  await gotoProjectOpen(page, projectUrl(DISPATCH_WIDGETS))
   const axis = page.getByTestId('dispatch-axis')
   await expect(axis).toHaveCount(1) // the sticky axis appears once
   await expect(axis).toHaveCSS('position', 'sticky')
@@ -194,19 +198,24 @@ test(`[scenario:dispatch-chart] The step chart: sticky axis once, solid/dotted t
   await expect(broken).toContainText('plan.json is missing')
   await expect(broken).toContainText('python -m workflow status broken-001 --by operator')
   // A workflow whose runs could not be listed: Trio's extra workflow, its row with the literal `<run-id>` placeholder ([P34]).
-  await page.goto(projectUrl(DISPATCH_TRIO))
+  await gotoProjectOpen(page, projectUrl(DISPATCH_TRIO))
   const locked = page.locator('li[data-workflow-id="trio-locked"]')
   await expect(locked).toContainText('cannot be read')
   await expect(locked).toContainText('could not be listed')
   await expect(locked).toContainText('python -m workflow status <run-id> --by operator')
-  // Every feature group exposes the "Steps of this definition" fold, the unreadable workflow included (V7, [P30]).
-  await expect(locked.getByTestId('dispatch-def')).toHaveCount(1)
-  await expect(locked.getByTestId('dispatch-def')).toContainText('Steps of this definition')
+  // Every feature's steps stay reachable from a "Steps of this definition" fold, once per revision above the chart, the
+  // unreadable workflow's included (V7, [P30]); no feature carries a fold of its own.
+  const lockedFold = page.getByTestId('dispatch-defs').getByTestId('dispatch-def').filter({ hasText: 'trio-locked' })
+  await expect(lockedFold).toHaveCount(1)
+  await expect(lockedFold).toContainText('Steps of this definition')
+  await expect(locked.getByTestId('dispatch-def')).toHaveCount(0)
   // A filter matching none of a feature's runs says "0 of N runs match" in its group header, not "0 runs" (V30).
-  await page.goto(projectUrl(DISPATCH_WIDGETS))
-  await page.locator('#dispatch-filter').fill('zzzznomatch')
+  await gotoProjectOpen(page, projectUrl(DISPATCH_WIDGETS))
+  await projectSearch(page).fill('zzzznomatch')
   await expect(page.locator('li[data-workflow-id="ui-polish"] a.lists-group-head')).toContainText('0 of 3 runs match')
-  await page.locator('#dispatch-filter').fill('')
+  await expect(page.locator('li[data-workflow-id="ui-polish"]')).toHaveAttribute('data-open', 'false')
+  await projectSearch(page).fill('')
+  await openAllFeatures(page)
   // A landed sha in a run row sits on one line at 1100px (V29): its box is a single client rect, never a mid-sha break.
   await page.setViewportSize({ width: 1100, height: 900 })
   const landedSha = run(page, 'ui-polish-001').locator('.dispatch-res code').first()
@@ -217,7 +226,8 @@ test(`[scenario:dispatch-chart] The step chart: sticky axis once, solid/dotted t
 })
 
 test(`[scenario:dispatch-pane] Selecting a run docks the pane with facts, the lead, steps, today's CommandBlock and Open run page; j/k move; Close and Escape undock and return focus (${phase})`, async ({ page }, testInfo) => {
-  await page.goto(projectUrl(DISPATCH_WIDGETS))
+  test.slow() // the features are opened on every project page it reads
+  await gotoProjectOpen(page, projectUrl(DISPATCH_WIDGETS))
   // With nothing selected there is no pane and the project is not docked.
   await expect(page.getByTestId('dispatch-pane')).toHaveCount(0)
   await expect(page.getByTestId('dispatch-project')).not.toHaveClass(/has-pane/)
@@ -261,7 +271,7 @@ test(`[scenario:dispatch-pane] Selecting a run docks the pane with facts, the le
   await page.goto(`${projectUrl(DISPATCH_WIDGETS)}/workflows/ui-polish/runs/ui-polish-002`)
   const runPageCommand = (await page.getByTestId('now-command').first().innerText()).trim()
   expect(runPageCommand).toBe(paneCommand)
-  await page.goto(projectUrl(DISPATCH_WIDGETS))
+  await gotoProjectOpen(page, projectUrl(DISPATCH_WIDGETS))
   await attach(page, testInfo, 'dispatch-pane')
 })
 
@@ -269,7 +279,7 @@ test(`A failed steps read on a cold project page: the selected run's pane says t
   // The 503 is installed before the first load, so the steps resource never holds data a failed reload could keep.
   await page.route(url => url.pathname === `/api/dispatch/projects/${DISPATCH_WIDGETS}/steps`,
     route => route.fulfill({ status: 503, json: { error: { code: 'STEPS_UNREADABLE', message: 'held for the test' } } }))
-  await page.goto(projectUrl(DISPATCH_WIDGETS))
+  await gotoProjectOpen(page, projectUrl(DISPATCH_WIDGETS))
   await run(page, 'ui-polish-002').click()
   const pane = page.getByTestId('dispatch-pane')
   await expect(pane).toHaveAttribute('data-run-id', 'ui-polish-002', { timeout: 30_000 })
@@ -283,7 +293,7 @@ test(`A failed steps read on a cold project page: the selected run's pane says t
 test(`A failed steps read: a run row with no served focus says its steps were not read, never "reading steps…" (${phase})`, async ({ page }) => {
   await page.route(url => url.pathname === `/api/dispatch/projects/${DISPATCH_WIDGETS_WT}/steps`,
     route => route.fulfill({ status: 503, json: { error: { code: 'STEPS_UNREADABLE', message: 'held for the test' } } }))
-  await page.goto(projectUrl(DISPATCH_WIDGETS_WT))
+  await gotoProjectOpen(page, projectUrl(DISPATCH_WIDGETS_WT))
   const dropped = run(page, RUN_WT_DROPPED)
   await expect(dropped.locator('.dispatch-run-2')).toContainText('steps not read', { timeout: 30_000 })
   await expect(dropped).toHaveAttribute('aria-label', /Steps not read\.$/)
@@ -303,6 +313,7 @@ test(`A failed overview read on a cold Projects page: the header says the reposi
 })
 
 test(`[scenario:dispatch-github] The GitHub cards group PRs and issues, name the match, fold long groups, say the merged scope, a head-null read is read, and a not-read project keeps local counts (${phase})`, async ({ page }, testInfo) => {
+  test.slow() // the features are opened on every project page it reads
   // In the worker phase only, serve Widgets' GitHub read with head null (an empty repository, Appendix A allows it): the card
   // must say the default branch has no commits, not "GitHub not read", and keep its PR and issue counts ([P35], V26). The
   // candidate server cannot produce this, as fixture mode never refreshes and the fixture file carries no head change.
@@ -313,7 +324,7 @@ test(`[scenario:dispatch-github] The GitHub cards group PRs and issues, name the
       await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) })
     })
   }
-  await page.goto(projectUrl(DISPATCH_WIDGETS))
+  await gotoProjectOpen(page, projectUrl(DISPATCH_WIDGETS))
   const prs = page.getByTestId('dispatch-gh-prs')
   await expect(prs).toContainText('showing the 20 most recently updated')
   await expect(prs).toContainText('Possibly related')
@@ -360,23 +371,51 @@ test(`[scenario:dispatch-github] The GitHub cards group PRs and issues, name the
     expect(await title.evaluate(el => el.getClientRects().length), `the heading is one line at ${width}px`).toBe(1)
   }
   await page.setViewportSize({ width: 1280, height: 900 })
-  // A not-read project: every GitHub card says so and shows no GitHub count, while the local sync and counts stay (V11).
-  await page.goto(projectUrl(DISPATCH_LOCAL))
-  await expect(page.getByTestId('dispatch-gh-prs')).toContainText('GitHub not read: not a GitHub remote')
-  await expect(page.getByTestId('dispatch-gh-issues')).toContainText('GitHub not read: not a GitHub remote')
+  // A project without a GitHub remote: its GitHub column is one line that says GitHub was not read and shows no GitHub count,
+  // while the local sync stays (V11); no pull-request or issue card is drawn for it.
+  await gotoProjectOpen(page, projectUrl(DISPATCH_LOCAL))
+  await expect(page.getByTestId('dispatch-github')).toContainText('GitHub not read: not a GitHub remote')
+  await expect(page.getByTestId('dispatch-gh-prs')).toHaveCount(0)
+  await expect(page.getByTestId('dispatch-gh-issues')).toHaveCount(0)
+  await expect(page.getByTestId('dispatch-github')).not.toContainText(/\d+ open/)
   await expect(page.getByTestId('dispatch-gh-local')).toContainText('GitHub not read')
   await expect(page.getByTestId('dispatch-gh-local')).toContainText('origin/main') // the local sync still shows
   await attach(page, testInfo, 'dispatch-github')
 })
 
+test(`A project without a GitHub remote keeps one body track with a run selected, however wide the body: no empty GitHub column beside the chart (${phase})`, async ({ page }) => {
+  await page.setViewportSize({ width: 1700, height: 900 })
+  await gotoProjectOpen(page, projectUrl(DISPATCH_LOCAL))
+  await run(page, 'sync-001').click()
+  await expect(page.getByTestId('dispatch-pane')).toBeVisible()
+  await expect(page.getByTestId('dispatch-project')).toHaveClass(/has-pane/)
+  const container = page.locator('.dispatch-body-container')
+  // Widen the window until the body's container reaches the three-column width (876 px), capped at 2560 px.
+  let width = 1700
+  let containerWidth = await container.evaluate(el => el.clientWidth)
+  while (containerWidth < 876 && width < 2560) {
+    width = Math.min(2560, width + 200)
+    await page.setViewportSize({ width, height: 900 })
+    containerWidth = await container.evaluate(el => el.clientWidth)
+  }
+  expect(containerWidth, `the body container is at least 876 px wide (window ${width} px)`).toBeGreaterThanOrEqual(876)
+  const body = page.locator('.dispatch-project-body')
+  await expect(body).toHaveClass(/dispatch-project-body-wide/)
+  const tracks = await body.evaluate(el => el.ownerDocument.defaultView!.getComputedStyle(el).gridTemplateColumns.split(' ').length)
+  expect(tracks, 'the body has a single grid track').toBe(1)
+  const bodyWidth = await body.evaluate(el => el.getBoundingClientRect().width)
+  const mainWidth = await page.locator('.dispatch-project-main').evaluate(el => el.getBoundingClientRect().width)
+  expect(Math.abs(mainWidth - bodyWidth), 'the main column fills the body width').toBeLessThanOrEqual(1)
+})
+
 test(`[scenario:dispatch-git-truth] The worktree shares its clone; the primary counts against origin with the naming split and the landings by value; no path leaks on every page (${phase})`, async ({ page }, testInfo) => {
   test.slow() // thirteen page loads come within a second of 30 s on a loaded 4-core host
-  await page.goto(projectUrl(DISPATCH_WIDGETS_WT))
+  await gotoProjectOpen(page, projectUrl(DISPATCH_WIDGETS_WT))
   await expect(page.getByTestId('dispatch-gh-local')).toContainText('shares its clone with Widgets')
   await expect(railRow(page, DISPATCH_WIDGETS_WT)).not.toContainText('unpushed')
   // The Also checked out as card names the other checkout and whether it is the same clone.
   await expect(page.getByTestId('dispatch-gh-others')).toContainText('same clone')
-  await page.goto(projectUrl(DISPATCH_WIDGETS))
+  await gotoProjectOpen(page, projectUrl(DISPATCH_WIDGETS))
   const local = page.getByTestId('dispatch-gh-local')
   await expect(local).toContainText('Counted against origin/main as this clone has it')
   await expect(local).toContainText('origin/main last updated here')
@@ -387,18 +426,19 @@ test(`[scenario:dispatch-git-truth] The worktree shares its clone; the primary c
   await expect(page.getByTestId('dispatch-landings')).toContainText('2 of 2 landings on local main')
   await expect(page.getByTestId('dispatch-landings')).toContainText('1 on origin')
   await expect(page.getByTestId('dispatch-landings')).toContainText('0 unknown')
-  await page.goto(projectUrl(DISPATCH_NOORIGIN))
+  await gotoProjectOpen(page, projectUrl(DISPATCH_NOORIGIN))
   await expect(page.getByTestId('dispatch-gh-local')).toContainText('not compared with origin')
   // renderedText passes on every seeded page and a workflow page (V21): no absolute path reaches the browser.
   for (const url of [PROJECTS, TRIAGE, projectUrl(DISPATCH_WIDGETS), projectUrl(DISPATCH_WIDGETS_WT), projectUrl(DISPATCH_NOORIGIN), projectUrl(DISPATCH_LOCAL), projectUrl(DISPATCH_TRIO), projectUrl(DISPATCH_BUSY), projectUrl(DISPATCH_UNREADABLE), `${projectUrl(DISPATCH_WIDGETS)}/workflows/ui-polish`]) {
     await page.goto(url)
     await renderedText(workspace(page))
   }
-  await page.goto(projectUrl(DISPATCH_WIDGETS))
+  await gotoProjectOpen(page, projectUrl(DISPATCH_WIDGETS))
   await attach(page, testInfo, 'dispatch-git-truth')
 })
 
 test(`[scenario:dispatch-phone] At 390 px the rail is a chip row, cards stack, the GitHub column stacks, the pane fills the screen, and every target is at least 44 px (${phase})`, async ({ page }, testInfo) => {
+  test.slow() // the features are opened on every project page it reads
   await page.setViewportSize({ width: 390, height: 844 })
   await page.goto(PROJECTS)
   const chips = page.getByTestId('dispatch-chips')
@@ -407,7 +447,7 @@ test(`[scenario:dispatch-phone] At 390 px the rail is a chip row, cards stack, t
   await expect(chips).toContainText('Triage')
   const noSideways = async () => expect(await page.evaluate('document.documentElement.scrollWidth - document.documentElement.clientWidth') as number).toBeLessThanOrEqual(0)
   await noSideways()
-  await page.goto(projectUrl(DISPATCH_WIDGETS))
+  await gotoProjectOpen(page, projectUrl(DISPATCH_WIDGETS))
   await noSideways()
   await run(page, 'ui-polish-002').click()
   const pane = page.getByTestId('dispatch-pane')
@@ -436,6 +476,7 @@ test(`[scenario:dispatch-phone] At 390 px the rail is a chip row, cards stack, t
 })
 
 test(`[scenario:dispatch-dock] Selecting a run docks the pane beside the chart without squeezing it or scrolling the page; the GitHub column count comes from the body's width (${phase})`, async ({ page }, testInfo) => {
+  test.slow() // the features are opened on every project page it reads
   // Where the GitHub column sits relative to the chart: beside it (its left edge is at or past the chart's right edge) or
   // under it (the body stacked to one column). V23 decides the count from the body's own width (a container query), so the
   // chart never drops under 480px while the column is beside it, whatever the shell's border and padding around the body.
@@ -446,7 +487,7 @@ test(`[scenario:dispatch-dock] Selecting a run docks the pane beside the chart w
   }
   for (const width of [1280, 1440, 1920]) {
     await page.setViewportSize({ width, height: 900 })
-    await page.goto(projectUrl(DISPATCH_WIDGETS))
+    await gotoProjectOpen(page, projectUrl(DISPATCH_WIDGETS))
     await page.evaluate('window.scrollTo(0, 0)')
     await run(page, 'ui-polish-002').click()
     await expect(page.getByTestId('dispatch-pane')).toBeVisible()
@@ -475,7 +516,7 @@ test(`[scenario:dispatch-dock] Selecting a run docks the pane beside the chart w
   // container query does not, because it measures the body, not the viewport.
   for (const width of [1600, 1680, 1720, 1760]) {
     await page.setViewportSize({ width, height: 900 })
-    await page.goto(projectUrl(DISPATCH_WIDGETS))
+    await gotoProjectOpen(page, projectUrl(DISPATCH_WIDGETS))
     await page.evaluate('window.scrollTo(0, 0)')
     await run(page, 'ui-polish-002').click()
     await expect(page.getByTestId('dispatch-pane')).toBeVisible()
@@ -486,9 +527,10 @@ test(`[scenario:dispatch-dock] Selecting a run docks the pane beside the chart w
 })
 
 test(`[scenario:dispatch-axis] Each stop glyph's centre lies within its phase label's column and no label is cut with an ellipsis, at 1440 and 1100 px (${phase})`, async ({ page }, testInfo) => {
+  test.slow() // the features are opened on every project page it reads
   for (const width of [1440, 1100]) {
     await page.setViewportSize({ width, height: 900 })
-    await page.goto(projectUrl(DISPATCH_WIDGETS))
+    await gotoProjectOpen(page, projectUrl(DISPATCH_WIDGETS))
     const axis = page.getByTestId('dispatch-axis')
     await expect(axis).toBeVisible()
     // No axis label is cut with an ellipsis character (narrow columns use the fixed short forms).
@@ -508,7 +550,8 @@ test(`[scenario:dispatch-axis] Each stop glyph's centre lies within its phase la
 })
 
 test(`[scenario:dispatch-sections] "Needs you and running" lists waiting and running runs before the chart; same-repo wording; a missing reflog says "update time not recorded" (${phase})`, async ({ page }, testInfo) => {
-  await page.goto(projectUrl(DISPATCH_BUSY))
+  test.slow()
+  await gotoProjectOpen(page, projectUrl(DISPATCH_BUSY))
   const needs = page.getByTestId('dispatch-needs')
   await expect(needs).toContainText('Needs you and running')
   await expect(needs.getByRole('link', { name: /ship-001/ })).toBeVisible()
@@ -529,7 +572,7 @@ test(`[scenario:dispatch-sections] "Needs you and running" lists waiting and run
   // lists its `broken` feature as an empty readable list, so the plain all-clear shows; the candidate server cannot read
   // broken-001 (its plan.json is missing), so that feature's run list fails and the section is qualified — the clear phrase
   // plus "1 feature cannot be read", never the plain all-clear (V25). Asserted per phase, not weakened to a shared substring.
-  await page.goto(projectUrl(DISPATCH_WIDGETS))
+  await gotoProjectOpen(page, projectUrl(DISPATCH_WIDGETS))
   if (phase === 'worker') {
     await expect(page.getByTestId('dispatch-needs-none')).toContainText('Nothing waits on you; nothing running')
   } else {
@@ -538,11 +581,11 @@ test(`[scenario:dispatch-sections] "Needs you and running" lists waiting and run
     await expect(page.getByTestId('dispatch-needs-none')).toHaveCount(0)
   }
   await expect(page.getByTestId('dispatch-same-repo')).toContainText('same repo as Widgets worktree')
-  await page.goto(projectUrl(DISPATCH_WIDGETS_WT))
+  await gotoProjectOpen(page, projectUrl(DISPATCH_WIDGETS_WT))
   await expect(page.getByTestId('dispatch-same-repo')).toContainText('same repo as Widgets')
   // Trio's trio-locked workflow cannot be listed ([P34]): the section never shows the plain all-clear and says one feature
   // cannot be read, rather than asserting nothing waits on the operator (V25).
-  await page.goto(projectUrl(DISPATCH_TRIO))
+  await gotoProjectOpen(page, projectUrl(DISPATCH_TRIO))
   await expect(page.getByTestId('dispatch-needs')).toContainText('1 feature cannot be read')
   await expect(page.getByTestId('dispatch-needs-none')).toHaveCount(0)
   // In the worker phase only, the run-list state reaches the page as loading or fully failed (route interception, V25, [L12]).
@@ -559,17 +602,18 @@ test(`[scenario:dispatch-sections] "Needs you and running" lists waiting and run
     // Failing every /runs request of one project: "Runs not read: <reason>" and no all-clear.
     const nooriginRuns = (u: URL) => /\/projects\/dispatch-noorigin\/workflows\/[^/]+\/runs$/.test(u.pathname)
     await page.route(nooriginRuns, async route => route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: { code: 'RUNS_UNREADABLE', message: 'the runs could not be read' } }) }))
-    await page.goto(projectUrl(DISPATCH_NOORIGIN))
+    await gotoProjectOpen(page, projectUrl(DISPATCH_NOORIGIN))
     await expect(page.getByTestId('dispatch-needs-failed')).toContainText('Runs not read:')
     await expect(page.getByTestId('dispatch-needs-none')).toHaveCount(0)
     await page.unroute(nooriginRuns)
   }
-  await page.goto(projectUrl(DISPATCH_WIDGETS))
+  await gotoProjectOpen(page, projectUrl(DISPATCH_WIDGETS))
   await attach(page, testInfo, 'dispatch-sections')
 })
 
 test(`[scenario:dispatch-ahead] The commits-ahead button lists the commits and the landings in the pane; Busy shows 50 and "and 2 more" (${phase})`, async ({ page }, testInfo) => {
-  await page.goto(projectUrl(DISPATCH_WIDGETS))
+  test.slow() // the features are opened on every project page it reads
+  await gotoProjectOpen(page, projectUrl(DISPATCH_WIDGETS))
   await page.getByTestId('dispatch-ahead-button').click()
   const pane = page.getByTestId('dispatch-pane')
   await expect(pane).toBeVisible()
@@ -592,7 +636,7 @@ test(`[scenario:dispatch-ahead] The commits-ahead button lists the commits and t
   await expect(pane).toHaveCount(0)
   await expect(page.getByTestId('dispatch-ahead-button')).toBeFocused()
   // Busy is seeded 52 commits ahead: it lists 50 and shows "and 2 more".
-  await page.goto(projectUrl(DISPATCH_BUSY))
+  await gotoProjectOpen(page, projectUrl(DISPATCH_BUSY))
   await page.getByTestId('dispatch-ahead-button').click()
   await expect(page.getByTestId('dispatch-ahead-commits').locator('li')).toHaveCount(50)
   await expect(page.getByTestId('dispatch-ahead-more')).toContainText('and 2 more')
@@ -600,10 +644,19 @@ test(`[scenario:dispatch-ahead] The commits-ahead button lists the commits and t
 })
 
 test(`[scenario:dispatch-folds] Each feature group has a "Steps of this definition" fold, and a group longer than five folds to "Show N more" (${phase})`, async ({ page }, testInfo) => {
-  await page.goto(projectUrl(DISPATCH_WIDGETS))
-  const def = page.getByTestId('dispatch-def').first()
+  test.slow() // the features are opened on every project page it reads
+  await gotoProjectOpen(page, projectUrl(DISPATCH_WIDGETS))
+  // One fold per distinct definition revision, above the chart and inside no feature; every feature's steps are reachable.
+  const folds = page.getByTestId('dispatch-defs').getByTestId('dispatch-def')
+  const revisions = await folds.evaluateAll(els => els.map(el => el.getAttribute('data-revision')))
+  expect(new Set(revisions).size, 'one fold per revision').toBe(revisions.length)
+  await expect(page.getByTestId('dispatch-features').getByTestId('dispatch-def')).toHaveCount(0)
+  const features = await page.getByTestId('dispatch-features').locator('li[data-workflow-id]').evaluateAll(els => els.map(el => el.getAttribute('data-workflow-id')))
+  for (const index of revisions.keys()) await folds.nth(index).locator('summary').click()
+  const named = (await folds.locator('.dispatch-def-users').allInnerTexts()).flatMap(text => text.split(', '))
+  for (const feature of features) expect(named, `${feature}'s steps are reachable from a fold`).toContain(feature)
+  const def = folds.first()
   await expect(def).toContainText('Steps of this definition')
-  await def.locator('summary').click()
   await expect(def.locator('.dispatch-def-list li').first()).toBeVisible()
   await expect(def).toContainText('Verify') // a step's phase
   // The "Newest from people" issue group is longer than five and folds, expanding in place (V8).

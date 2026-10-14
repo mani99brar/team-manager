@@ -10,17 +10,28 @@
 .sb-feature { flex: 1 1 260px; min-width: 0; margin: 0; color: var(--muted); font-size: 13.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .sb-def { color: var(--muted); font-size: 13px; white-space: nowrap; }
 .sb-def code { color: var(--fg); }
+.sb-branch { order: 3; flex: 0 1 auto; min-width: 0; max-width: 260px; color: var(--muted); font: 12.5px/1.3 var(--font-mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .sb-fresh { display: flex; align-items: center; gap: 8px; flex: none; }
 .workspace-projects .sb-other { display: inline-flex; align-items: center; min-height: 30px; padding: 0 12px; border: 1px solid var(--border-strong); border-radius: 999px; background: var(--surface-2); color: var(--fg); font-size: 13px; font-weight: 600; text-decoration: none; }
 .workspace-projects .sb-other:hover { border-color: var(--accent); color: var(--accent); }
-.sb-details { font-size: 13px; }
+.sb-details { order: 4; font-size: 13px; }
 .sb-details[open] { flex-basis: 100%; }
 .sb-details-body { padding: 6px 0 2px; display: grid; gap: 6px; }
 
 /* ---- Stage: the frame takes the window under the identity line; the stage pans and zooms over a dot grid that moves with it ---- */
-.sb-frame { position: relative; min-width: 0; display: flex; flex-direction: column; border: 1px solid var(--border); border-top: 0; border-radius: 0 0 var(--radius) var(--radius); overflow: hidden; background: var(--bg); }
-.sb-stage { position: relative; flex: 1; min-height: 0; overflow: hidden; cursor: grab; touch-action: none; user-select: none; -webkit-user-select: none; background-color: var(--bg);
+.sb-frame { position: relative; min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) auto; border: 1px solid var(--border); border-top: 0; border-radius: 0 0 var(--radius) var(--radius); overflow: hidden; background: var(--bg); }
+.sb-stage { position: relative; grid-column: 1; grid-row: 1; min-width: 0; min-height: 0; overflow: hidden; cursor: grab; touch-action: none; user-select: none; -webkit-user-select: none; background-color: var(--bg);
   background-image: radial-gradient(circle at 1px 1px, var(--grid) 1.2px, transparent 1.3px); background-size: var(--gs, 24px) var(--gs, 24px); background-position: var(--gx, 0) var(--gy, 0); }
+/* From a 1200 px run frame the live dock is its own 312 px column on the stage's left, open or folded; narrower it overlays the stage. */
+.sb-frame.dock-col { grid-template-columns: 312px minmax(0, 1fr); }
+.sb-frame.dock-col > .sb-stage { grid-column: 2; }
+.sb-frame.dock-col > .sb-live { grid-column: 1; grid-row: 1; position: relative; left: auto; top: auto; width: auto; max-height: 100%; align-self: start; border-width: 0 1px 1px 0; border-radius: 0 0 12px 0; box-shadow: none; }
+.sb-frame.dock-col > .sb-live .lv-bar { border-radius: 0; }
+/* The one-line Sessions cue directly under the stage: a link to the Sessions table, never wrapping on a desk. */
+.sb-cue { grid-column: 1 / -1; grid-row: 2; display: flex; align-items: center; min-height: 36px; max-height: 40px; box-sizing: border-box; padding: 0 14px; border-top: 1px solid var(--border); background: var(--surface); color: var(--fg); font-size: 13.5px; font-weight: 600; font-variant-numeric: tabular-nums; text-decoration: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sb-cue:hover { color: var(--accent); }
+.sb-cue:focus-visible { outline: 2px solid var(--focus); outline-offset: -3px; }
+.sb-viewport { position: absolute; inset: 0; overflow: hidden; }
 .sb-stage.dragging { cursor: grabbing; }
 .sb-stage:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
 .sb-world { position: absolute; left: 0; top: 0; transform-origin: 0 0; will-change: transform; }
@@ -56,13 +67,13 @@
 .n-last { flex: none; font-size: 12.5px; color: var(--muted); line-height: 16px; display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; border-top: 1px solid var(--border); padding-top: 6px; margin-top: auto; }
 .n-chip { display: none; }
 /* Detail levels: 0 chips (far), 1 standard, 2 full with the last event. --inv counters the zoom so a chip's text stays legible. */
-.sb-world[data-level="0"] .node { padding: calc(9px * var(--inv)) calc(10px * var(--inv)); gap: calc(3px * var(--inv)); justify-content: center; }
+.sb-world[data-level="0"] .node { padding: calc(8px * var(--inv)) calc(6px * var(--inv)); gap: calc(3px * var(--inv)); justify-content: center; }
 .sb-world[data-level="0"] .node .n-top, .sb-world[data-level="0"] .node .n-meta, .sb-world[data-level="0"] .node .n-last { display: none; }
 .sb-world[data-level="0"] .node .n-chip { display: flex; flex-direction: column; gap: calc(4px * var(--inv)); min-width: 0; }
-.n-chip .c1 { display: flex; align-items: center; gap: calc(6px * var(--inv)); font-weight: 700; font-size: calc(12.5px * var(--inv)); line-height: 1.15; min-width: 0; }
-.n-chip .c1 svg { flex: none; width: calc(14px * var(--inv)); height: calc(14px * var(--inv)); }
-.n-chip .c1 span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.n-chip .c2 { font-size: calc(11.5px * var(--inv)); color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-weight: 600; }
+.n-chip .c1 { display: flex; align-items: center; gap: calc(5px * var(--inv)); font-weight: 700; font-size: calc(11px * var(--inv)); line-height: 1.15; min-width: 0; }
+.n-chip .c1 svg { flex: none; width: calc(12px * var(--inv)); height: calc(12px * var(--inv)); }
+.n-chip .c1 span { min-width: 0; white-space: normal; overflow-wrap: anywhere; }
+.n-chip .c2 { font-size: calc(10px * var(--inv)); color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-weight: 600; }
 .sb-world[data-level="1"] .node .n-last { display: none; }
 /* At the standard level a long meta line may wrap: the card grows a little into the row gap rather than cutting its lane row. */
 .sb-world[data-level="1"] .node { gap: 5px; }
@@ -157,14 +168,17 @@
 
 /* ---- Live dock: top left, 312 px, the bar always, the body while open ---- */
 .sb-live { position: absolute; left: 16px; top: 12px; z-index: 3; width: min(312px, calc(100% - 32px)); background: var(--surface); border: 1px solid var(--border-strong); border-radius: 12px; box-shadow: var(--shadow-float); font-size: 13px; display: flex; flex-direction: column; max-height: calc(100% - 100px); overflow: hidden; cursor: auto; user-select: text; -webkit-user-select: text; }
-.lv-bar { display: flex; align-items: center; gap: 8px; min-height: 44px; padding: 0 6px 0 12px; border: 0; background: none; width: 100%; text-align: left; cursor: pointer; border-radius: 12px; color: var(--fg); font: inherit; }
+.lv-bar { flex: none; display: flex; align-items: center; gap: 8px; min-height: 44px; padding: 0 6px 0 12px; border: 0; background: none; width: 100%; text-align: left; cursor: pointer; border-radius: 12px; color: var(--fg); font: inherit; }
 .lv-bar:hover { background: var(--surface-2); }
 .lv-bar:focus-visible { outline: 2px solid var(--focus); outline-offset: -3px; }
 .lv-bar .g { flex: none; width: 16px; height: 16px; }
-.lv-now { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.lv-text { flex: 1; min-width: 0; display: flex; flex-wrap: wrap; column-gap: 0.3em; }
+.lv-now { min-width: 0; max-width: 100%; display: flex; flex-wrap: wrap; column-gap: 0.3em; }
+.lv-now .lv-label { min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lv-now .w { min-width: 0; overflow-wrap: anywhere; }
 .lv-now b { font-weight: 700; }
 .lv-now .w { color: var(--t); font-weight: 700; }
-.lv-since { color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.lv-since { min-width: 0; color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
 .lv-chev { flex: none; width: 32px; height: 32px; display: grid; place-items: center; color: var(--muted); }
 .lv-chev svg { width: 16px; height: 16px; transition: transform 0.18s ease-out; }
 .sb-live.collapsed .lv-chev svg { transform: rotate(180deg); }
@@ -200,7 +214,8 @@ button.lv-row:focus-visible { outline: 2px solid var(--focus); outline-offset: -
   .sb-idline { gap: 6px 12px; padding: 8px 12px; }
   .sb-feature { flex-basis: 100%; order: 5; }
   /* The definition chip folds away on a phone unless the definition changed since the run, which stays a warning. */
-  .sb-def:not([data-testid="definition-changed"]), .sb-fresh .live-status { display: none; }
+  .sb-def:not([data-testid="definition-changed"]), .sb-branch, .sb-fresh .live-status { display: none; }
+  .sb-cue { min-height: 44px; max-height: none; white-space: normal; padding: 8px 12px; }
   .sb-hint, .sb-level { display: none; }
   .sb-sheet { top: auto; left: 0; width: 100%; height: 78%; border-left: 0; border-top: 1px solid var(--border-strong); border-radius: 16px 16px 0 0; }
   @media (prefers-reduced-motion: no-preference) {

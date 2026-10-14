@@ -8,6 +8,7 @@ import { projectPathname, projectsPathname, triagePathname } from '../routes.ts'
 import { AppLink } from '../panels.tsx'
 import { TONE_LABEL, type Tone } from '../tone.ts'
 import { StateGlyph } from './common.tsx'
+import { compactTriage } from './derive.ts'
 
 export type RailRow = {
   projectId: string
@@ -46,7 +47,6 @@ function triageBadge(counts: { waits: number; paused: number } | null): string {
 }
 
 export function Rail({ rows, projectCount, triage, current, onNavigate }: Props) {
-  const needs = triage === null ? null : triage.waits + triage.paused
   const triageTone = triage === null ? '' : triage.waits > 0 ? 'tone-warn' : triage.paused > 0 ? 'tone-pause' : ''
   const home = (
     <>
@@ -90,7 +90,7 @@ export function Rail({ rows, projectCount, triage, current, onNavigate }: Props)
       </aside>
       <nav className="dispatch-chips" aria-label="Projects" data-testid="dispatch-chips">
         <AppLink href={projectsPathname()} onNavigate={onNavigate} className="dispatch-chip" current={current.kind === 'projects'}>All projects</AppLink>
-        <AppLink href={triagePathname()} onNavigate={onNavigate} className="dispatch-chip" current={current.kind === 'triage'}>Triage · {needs ?? '…'}</AppLink>
+        <AppLink href={triagePathname()} onNavigate={onNavigate} className="dispatch-chip" current={current.kind === 'triage'} data-testid="chip-triage">Triage · {compactTriage(triage)}</AppLink>
         {rows.map(row => (
           <AppLink key={row.projectId} href={projectPathname(row.projectId)} onNavigate={onNavigate} className={`dispatch-chip tone-${row.tone}`}
             current={current.kind !== 'projects' && current.kind !== 'triage' && current.projectId === row.projectId} data-project-id={row.projectId}>

@@ -7,6 +7,8 @@
  * as one path segment. Anything else is malformed rather than looked up. This domain is read-only and
  * separate from the Pi/Claude skill sources; nothing here names a filesystem path.
  */
+import { PHASES } from './dispatch/phases.ts'
+import { STATUS_FILTERS } from './runFilter.ts'
 
 /** Same pattern as the shared projects contract (`contracts/projects/v1.ts`). */
 export const PROJECT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/
@@ -119,4 +121,87 @@ export function parseProjectsPathname(pathname: string): ProjectsRoute | null {
   if (attemptsLiteral === undefined) return { level: 'run', projectId, workflowId, runId, nodeId, tab: 'run' }
   if (attemptsLiteral !== ATTEMPTS_SEGMENT || attempt === undefined || !ATTEMPT_PATTERN.test(attempt) || rest.length > 0) return null
   return { level: 'run', projectId, workflowId, runId, nodeId, tab: 'run', attempt: Number(attempt) }
+}
+
+// ---- A list's state in the URL's search -------------------------------------------------------------------------------
+
+/** The status ids, phase names and values a list's search may carry; anything else reads as that key's default. */
+const LIST_STATUSES = STATUS_FILTERS
+const LIST_PHASES = PHASES
+const LIST_DATES = ['today', '7d', '30d', 'all'] as const
+const LIST_SORTS = ['live', 'newest', 'oldest'] as const
+/** The feature page's loaded pages a URL may ask for. */
+export const MAX_LIST_PAGES = 20
+
+/**
+ * A run list's state as its URL carries it, on Projects pathnames only: the search words, the status toggles, the
+ * stopped-at phase, the date window (`any` is the default), the sort, Recent's grouping by project and its "Show older",
+ * and the feature page's loaded pages.
+ */
+export type ListSearch = {
+  q: string
+  status: readonly (typeof LIST_STATUSES)[number][]
+  phase: (typeof LIST_PHASES)[number] | null
+  date: (typeof LIST_DATES)[number] | 'any'
+  sort: (typeof LIST_SORTS)[number]
+  group: boolean
+  older: boolean
+  pages: number
+}
+
+export const DEFAULT_LIST_SEARCH: ListSearch = { q: '', status: [], phase: null, date: 'any', sort: 'live', group: false, older: false, pages: 1 }
+
+const oneOf = <T extends string>(values: readonly T[], value: string | null): T | null => (value !== null && (values as readonly string[]).includes(value) ? value as T : null)
+
+/** Reads a list's state from a URL search ("?q=…&status=failed"). An unknown key is dropped; a malformed value reads as its default. */
+export function parseListSearch(search: string): ListSearch {
+  const params = new URLSearchParams(search)
+  const statusText = params.get('status')
+  const statusIds = statusText === null ? [] : statusText.split(',')
+  const statusOk = statusIds.length > 0 && statusIds.every(id => oneOf(LIST_STATUSES, id) !== null)
+  const pagesText = params.get('pages')
+  const pages = pagesText !== null && /^[1-9][0-9]?$/.test(pagesText) && Number(pagesText) <= MAX_LIST_PAGES ? Number(pagesText) : 1
+  return {
+    q: params.get('q') ?? '',
+    // Each status once, in the bar's order.
+    status: statusOk ? LIST_STATUSES.filter(id => statusIds.includes(id)) : [],
+    phase: oneOf(LIST_PHASES, params.get('phase')),
+    date: oneOf(LIST_DATES, params.get('date')) ?? 'any',
+    sort: oneOf(LIST_SORTS, params.get('sort')) ?? 'live',
+    group: params.get('group') === 'project',
+    older: params.get('older') === '1',
+    pages,
+  }
+}
+
+/**
+ * Writes a list's state as a URL search, keys in the fixed order q, status, phase, date, sort, group, older, pages, and
+ * defaults never written: a list at its defaults has an empty search.
+ */
+export function listSearchString(state: ListSearch): string {
+  const params = new URLSearchParams()
+  if (state.q !== '') params.set('q', state.q)
+  if (state.status.length > 0) params.set('status', LIST_STATUSES.filter(id => state.status.includes(id)).join(','))
+  if (state.phase !== null) params.set('phase', state.phase)
+  if (state.date !== 'any') params.set('date', state.date)
+  if (state.sort !== 'live') params.set('sort', state.sort)
+  if (state.group) params.set('group', 'project')
+  if (state.older) params.set('older', '1')
+  if (state.pages > 1) params.set('pages', String(Math.min(MAX_LIST_PAGES, state.pages)))
+  const text = params.toString()
+  return text === '' ? '' : `?${text}`
+}
+
+/** Whether history keeps a pathname's search string: only Projects pathnames carry a list's state; every other write is pathname-only. */
+export function keepsListSearch(pathname: string): boolean {
+  return isProjectsPathname(pathname)
+}
+
+/**
+ * A Projects pathname in the form `routeToPathname` writes (a trailing slash or a needlessly encoded segment read the same),
+ * so a list's write matches the entry the browser opened; any other pathname is returned unchanged.
+ */
+export function canonicalPathname(pathname: string): string {
+  const route = parseProjectsPathname(pathname)
+  return route === null ? pathname : routeToPathname(route)
 }

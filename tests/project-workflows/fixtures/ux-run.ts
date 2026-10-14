@@ -43,6 +43,8 @@ export const RUN_FREEZE_INTERRUPTED = 'run-freeze-interrupted'
 export const RUN_CONTROLLER_INTERRUPTED = 'run-controller-interrupted'
 export const RUN_AWAITING_APPROVAL = 'run-awaiting-approval'
 export const RUN_PANE = 'run-pane'
+/** A finished run whose inputs record no source branch (the identity line reads "no branch recorded @ <sha>"). */
+export const RUN_NO_BRANCH = 'run-no-branch'
 
 /** The candidate gate's reason on both of lane ui's failed combined attempts. */
 export const CANDIDATE_FAILURE = 'project-workflows-browser: expected one screenshot for scenario run-now-banner, found none'
@@ -77,6 +79,8 @@ type Fixture = {
   next: string[]
   tasks: Task[]
   review?: RawReviewSection
+  /** The run's inputs record no source branch. */
+  noBranch?: boolean
 }
 
 const DAY = '2026-03-02'
@@ -322,7 +326,7 @@ function rawWorker(fixture: Fixture, lane: Lane, leak: string): RawWorkerInput {
 
 function inputsSection(fixture: Fixture, leak: string): RawInputsSection {
   return {
-    feature: 'Run page', policy_version: '1.2.0', base_commit: BASE_COMMIT, source_branch: `feature/${UX_RUN_WORKFLOW_ID}/${fixture.runId}`,
+    feature: 'Run page', policy_version: '1.2.0', base_commit: BASE_COMMIT, source_branch: fixture.noBranch ? null : `feature/${UX_RUN_WORKFLOW_ID}/${fixture.runId}`,
     mode: fixture.mode,
     automatic: fixture.mode === 'manual' ? null : {
       finish: 'verified-feature-branch', permission_mode: 'bypassPermissions', worker_timeout_seconds: 7200, review_timeout_seconds: 1800, reviewer_transport: 'native',
@@ -373,6 +377,9 @@ function detailOf(fixture: Fixture): RunDetail {
   }
   return detail
 }
+
+// The same failed run as `run-identical`, but its inputs record no source branch.
+FIXTURES.push({ ...FIXTURES[0]!, runId: RUN_NO_BRANCH, noBranch: true })
 
 const taskTexts = (fixture: Fixture, leak: string) => Object.fromEntries(Object.entries(inputsSection(fixture, leak).workers).map(([lane, worker]) => [lane, worker.task]))
 

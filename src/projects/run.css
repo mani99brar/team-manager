@@ -75,7 +75,8 @@
 .run-now-reason-row { display: flex; align-items: flex-start; gap: 4px 12px; flex-wrap: wrap; }
 .run-now-reason { margin: 0; flex: 1 1 480px; min-width: 0; overflow-wrap: anywhere; }
 .run-now-reason.is-clamped { display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-.run-now-more { min-height: 22px; padding: 0 8px; font-size: 0.75rem; }
+.run-now-more, .run-now-show { min-height: 22px; padding: 0 8px; font-size: 0.75rem; }
+.run-now-actions { margin: 4px 0 0; }
 .run-now-open { white-space: nowrap; font-size: 0.85rem; font-weight: 400; }
 
 /* The likely next step: label, numbered steps, one copyable command each, and the honesty caption. */
@@ -181,7 +182,7 @@
 
 /* ---- Phones and narrow windows ---- */
 @media (max-width: 760px) {
-  .command-copy, .run-now-more { min-height: 44px; min-width: 44px; }
+  .command-copy, .run-now-more, .run-now-show { min-height: 44px; min-width: 44px; }
   /* A command and its Copy button share a line; the command scrolls sideways inside its box, never the page. */
   .command-step-body { flex-wrap: nowrap; }
   .command-step-caption { display: none; }

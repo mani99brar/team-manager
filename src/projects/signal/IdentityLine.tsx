@@ -84,9 +84,14 @@ export function IdentityLine({ detail, inputs, onRetryInputs, current, freshness
       </p>
       <p className="sb-feature" title={title} data-testid="run-title">{title}</p>
       <span className="sb-def" data-testid={current === null ? 'pinned-definition' : definitionChanged ? 'definition-changed' : 'definition-current'}
-        title={definitionChanged ? `The workflow's current definition is revision ${shortRevision(current!.definition_revision)}; this run is shown against its own pinned graph.` : `${definition.name} · pinned definition revision`}>
-        definition <code>{shortRevision(definition.definition_revision)}</code>{current === null ? '' : definitionChanged ? ' · changed since' : ' · current'}
+        title={definitionChanged ? `The workflow's current definition is revision ${shortRevision(current!.definition_revision)}; this run is shown against its own pinned graph (revision ${shortRevision(definition.definition_revision)}).` : `${definition.name} · pinned definition revision ${shortRevision(definition.definition_revision)}`}>
+        {current === null ? 'pinned definition' : definitionChanged ? 'definition changed since' : 'definition current'}
       </span>
+      {data && (
+        <span className="sb-branch" data-testid="run-branch" title={`${data.source_branch ?? 'no branch recorded'} @ ${data.base_commit}`}>
+          {data.source_branch ?? 'no branch recorded'} @ {data.base_commit.slice(0, 7)}
+        </span>
+      )}
       <div className="sb-fresh">
         <LiveStatus status={summary.status} meta={freshness} now={clock} />
         <TimeZoneToggle />

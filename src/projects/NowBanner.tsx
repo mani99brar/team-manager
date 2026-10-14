@@ -53,7 +53,7 @@ type Props = {
   /** The focus step's page, for its "Open" link; null when there is no focus. */
   focusHref: string | null
   onNavigate: (pathname: string) => void
-  /** When given, the "Open" affordance centres the focus step on the run stage instead of leaving the page. */
+  /** When given (in the live dock), "Show in graph" sits beside "Open" and centres the focus step on the run stage. */
   onOpenFocus?: (nodeId: string) => void
 }
 
@@ -79,7 +79,10 @@ export function NowBanner({ now: exported, clock, focusHref, onNavigate, onOpenF
   const href = now.focus && focusHref ? focusHref.replace(/[^/]+$/, encodeURIComponent(now.focus.node_id)) : null
   const focusId = now.focus?.node_id ?? null
   const open = now.focus && href
-    ? <AppLink href={href} onNavigate={onOpenFocus && focusId !== null ? () => onOpenFocus(focusId) : onNavigate} className="run-now-open" data-testid="now-open">Open {now.focus.label} ›</AppLink>
+    ? <AppLink href={href} onNavigate={onNavigate} className="run-now-open" data-testid="now-open">Open {now.focus.label} ›</AppLink>
+    : null
+  const show = open && onOpenFocus && focusId !== null
+    ? <button type="button" className="button button-small run-now-show" data-testid="now-show-in-graph" onClick={() => onOpenFocus(focusId)}>Show in graph</button>
     : null
   return (
     <section className={`run-now run-now-${now.tone}`} data-testid="run-now" data-situation={now.situation} aria-labelledby="run-now-title">
@@ -89,7 +92,8 @@ export function NowBanner({ now: exported, clock, focusHref, onNavigate, onOpenF
         <span><RichText text={withoutGlyph(now.headline, now.glyph)} now={clock} /></span>
         {now.reason === null && open}
       </p>
-      {now.reason !== null && <Reason after={open}><RichText text={now.reason} now={clock} /></Reason>}
+      {now.reason === null && show && <p className="run-now-actions">{show}</p>}
+      {now.reason !== null && <Reason after={<>{open}{show}</>}><RichText text={now.reason} now={clock} /></Reason>}
       <CommandBlock next={now.next} />
     </section>
   )
