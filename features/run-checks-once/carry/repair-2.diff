@@ -1,0 +1,355 @@
+diff --git a/docs/handoff/run-checks-once.md b/docs/handoff/run-checks-once.md
+index 38cd64c..0206c97 100644
+--- a/docs/handoff/run-checks-once.md
++++ b/docs/handoff/run-checks-once.md
+@@ -7,7 +7,9 @@ On the combined candidate each distinct non-browser check command now runs once,
+ - **New module `workflow/shared_checks.py`**:
+   - `planned` (the execution order of PRD 4) and `run_shared` (the shared worktree, setup once, each argv once at the largest timeout, `git status` after each execution, `record.json`);
+   - `cited_record` and `gate_run_checks` (what `recheck_packet` does with a citing packet);
+-  - `run_check_gates`, the attribution (`runner`, `rerun_argv`, `rerun`, `statuses`, `attribute_check`, `decide`);
++  - `run_check_gates`, the attribution (`runner`, `rerun_argv`, `rerun`, `statuses`, `attribute_check`, `decide`). `statuses` reads the loader's errors (`loader_errors`): an id is *not applicable* only when the error says it is absent (`absent`: no module of a dotted prefix, no attribute of a part); a module that fails to import has failed;
++  - `gate_run_checks` keeps a memory-killed run check transient only when no other run check failed for real; beside a real failure the real one is attributed and the kill only listed, as `repair.transient_packet` reads lane checks;
++  - `slow_run_checks`: the lane checks' slow note (C27) for run checks, on a `candidate` event `Run checks on <commit>; slow: ...`;
+   - `SharedCandidate`, the candidate step's hook: lockstep, the shared execution and its event, then `finish` once every lane's own checks passed;
+   - `brief_lines` (the repair brief of an attributed run check), and the folder helpers `clean` uses.
+ - **`workflow/checks.py`**:
+@@ -28,10 +30,10 @@ On the combined candidate each distinct non-browser check command now runs once,
+   - `packet_evidence` and `failing_checks` include the copied `run-check-<i>.log` and `brief_lines`.
+ - **`workflow/automatic.py`**: one narrow edit ([L1]). `fix_decision` imports `unattributed_block` and returns None when the single blocked candidate packet carries the unattributed marker. That is two lines: the import, and the existing `len(found) != 1` condition.
+ - **`workflow/run_tests.py`**: `--tests ID [ID ...]`, with the same output format. An unknown id gives `FAIL <id> (0 tests)` and `    WORKFLOW: no test named <id>: <why>`. `--tests` with `start_dir` is refused.
+-- **`workflow/run_report.py`**: `failing_ids`, the failing-test parser. It returns method ids, and a class id only for a class with no method-level failure line. `failures` also reads run_tests' indented headers.
++- **`workflow/run_report.py`**: `failing_ids`, the failing-test parser. It returns method ids, and a class id only for a class with no method-level failure line. A module plain unittest failed to import comes back by its name, never as the loader's `unittest.loader._FailedTest.<name>` pseudo-id. `failures` also reads run_tests' indented headers.
+ - **`workflow/clean.py`**: a passed shared attempt's worktree and caches are pruned, and a failed one is kept whole. Passed means every declaring check's gate passed on each execution (`execution_passed`: exit 0, clean tree, each declarer's own timeout, test counts for a test kind), not the exit code alone. Each failed run check's reruns sit under `attribution/<policy index>/<target>/`. A leftover attribution worktree is pruned. Records, attributions and logs are never removed.
+ - **Tests**:
+-  - `workflow/test_run_checks.py` is new: 27 tests, named in the completion's Proof table;
++  - `workflow/test_run_checks.py` is new: 30 tests, named in the completion's Proof table;
+   - existing tests changed only where lockstep, the new event, the shared worktree or the new lint note changes what they pin:
+     - `test_lanes.py` (2 assertions), `test_repair.py` (4) and `test_portable.py` (1);
+     - `test_pipeline.py` (a mock's signature and one event expectation);
+@@ -52,7 +54,7 @@ Candidate dedupe benefits every policy at once: the first controller run after t
+ - **TMPDIR** ([L3]). It is one private `lane_tmpdir()` per shared attempt, outside the run (Unix socket paths), stored in the record as packets store theirs. It is not inside the shared attempt folder.
+ - **Ignored outputs are shared** ([L3]). Ignored outputs of an earlier shared command (a build's `dist/`, a cache) are visible to the later ones in the same worktree, as they always were within one lane's worktree. Between lanes they are now visible too.
+ - **Dirty-tree blame** (challenge note 2). A check that changes a tracked file blocks the lanes that declared it and every later execution. The first lane in declared order is no longer blamed.
+-- **One extra event** on node `candidate`: `Shared checks: <k> commands for <m> lane checks on <commit>`.
++- **One extra event** on node `candidate`: `Shared checks: <k> commands for <m> lane checks on <commit>`. On 1.5.0 a slow run check adds `Run checks on <commit>; slow: ...` there.
+ 
+ Worker-phase load does not drop yet. Lane checks still run on every lane snapshot. Load only drops once a policy moves the full suite into `run_checks` and gives its lanes targeted checks (Deferred: /cook's feature-rules).
+ 
+diff --git a/workflow/RUNBOOK.md b/workflow/RUNBOOK.md
+index 506ea48..d1d749e 100644
+--- a/workflow/RUNBOOK.md
++++ b/workflow/RUNBOOK.md
+@@ -728,7 +728,7 @@ Feature requirements are supplied per feature; the gates are reusable. The polic
+ - The evidence sidecar binds the policy SHA-256 (canonical JSON: sorted keys, no whitespace, literal UTF-8), run id, lane, attempt and output commit; each check points to one entry of the worker result, whose command is `shlex.join(argv)` run in the backend-owned worktree.
+ - The **worker phase** verifies one lane's snapshot in isolation: its `build` and `browser` checks run and are recorded but do not gate (`gate.deferred_checks`), because another lane may be changing what they compile against; `unit`, `contract` and `integration` gate in both phases. The **candidate phase** runs every lane's checks on the combined revision and gates on all of them (a one-lane run without a browser check reuses its worker packet, as above).
+ - **Each check runs once on the candidate** (features/run-checks-once, every policy version). Two lane checks share one execution only when the phase is `candidate`, they are of the same candidate attempt and commit, their argv lists are identical and neither is a `browser` check. The shared execution runs in the attempt's one shared verification worktree (`shared-checks/<g>/<attempt>/worktree`) after the policy `setup` ran once there, in the environment every lane's own attempt would have had (`checks.check_env`: nothing in it names a lane, one private TMPDIR per shared attempt outside the run), at the largest timeout of the checks that declare it. Order: lanes in declared order, each lane's non-browser checks in policy order, then `run_checks`, each argv once. Each lane still gates under its own id, kind and timeout: a lane whose timeout the execution exceeded is blocked for the timeout alone (`<id>: execution exceeded approved timeout`; alone it would have been killed at its own timeout, with `exit 124` reasons too). Counts are parsed once. `git status --porcelain` runs after each execution: the lanes and run checks that declared an execution after which the tree was no longer clean, and every later one, are blocked with `Verification modified the tested source revision`. Ignored outputs of an earlier command (a build's `dist/`, caches) stay visible to the later ones, as in a lane's own worktree. Browser checks are never shared: they run in the lane's own candidate worktree with their own setup, so a citing packet has exactly two cwds. The record (`record.json`) is reused for a rerun of the same attempt; a new attempt (a retry or a repair) runs it again once. One event on `candidate` before the lanes says `Shared checks: <k> commands for <m> lane checks on <commit>` (`; run checks: <r>` on 1.5.0). A failing shared lane check blocks the first declaring lane in declared order, as before.
+-- **Run checks** (policy 1.5.0 `run_checks`: `{id, kind, argv, timeout_seconds, scenarios: []}`, never `browser`, ids distinct from every lane check id, argvs distinct) run once per candidate attempt in the shared worktree, never in the worker phase, also beside a reused one-lane packet. They gate like lane checks (exit 0; test kinds need counts with passed ≥ 1 and failed = 0) but never satisfy a lane's `required_check_kinds`. A lane's own checks are gated first; only when every lane's own checks passed does a failed run check decide the gate. A memory kill makes every lane's packet transient (rerun free). Any other failure is **attributed**: its failing test ids (workflow.run_tests or unittest output; none parse for another runner, which then reruns whole as one id) are rerun one at a time, each in a fresh worktree with setup and capped at the run check's timeout, on the candidate (ids that pass are *did not reproduce*), then only if any reproduced on the base (*pre-existing at base*), then only if any remain on each lane snapshot: an id failing on exactly one snapshot is that lane's; one failing on several or none goes to the one lane owning its test file (*owner-attributed*), else it is unattributed. A missing test there is *not applicable*. If every attributed id names one lane and none is unattributed, that lane is blocked (`run check <id> failed: <n> test(s) attributed to <lane>: <ids>`) and the others pass; otherwise every lane is blocked with the unattributed marker and no repair starts. `attribution.json` keeps each id's outcome per target and the rerun logs; one event on `candidate` says `Run check <id> failed; <outcome>`. A policy author moves the full suite into `run_checks` and gives the lanes targeted checks; `launch` notes each command two lanes declare.
++- **Run checks** (policy 1.5.0 `run_checks`: `{id, kind, argv, timeout_seconds, scenarios: []}`, never `browser`, ids distinct from every lane check id, argvs distinct) run once per candidate attempt in the shared worktree, never in the worker phase, also beside a reused one-lane packet. They gate like lane checks (exit 0; test kinds need counts with passed ≥ 1 and failed = 0) but never satisfy a lane's `required_check_kinds`. A lane's own checks are gated first; only when every lane's own checks passed does a failed run check decide the gate. A memory kill makes every lane's packet transient (rerun free), unless another run check failed for real beside it: then, as for lane checks, the attempt is a real failure, the real one is attributed and the kill is only listed (its reasons after the attribution's, and `transient_checks`). A run check over 60% of its own timeout gets the lane checks' slow note on a `candidate` event: `Run checks on <commit>; slow: full took 1500 s of its 1800 s timeout (83%)`. Any other failure is **attributed**: its failing test ids (workflow.run_tests or unittest output, a module that failed to import by its module name; none parse for another runner, which then reruns whole as one id) are rerun one at a time, each in a fresh worktree with setup and capped at the run check's timeout, on the candidate (ids that pass are *did not reproduce*), then only if any reproduced on the base (*pre-existing at base*), then only if any remain on each lane snapshot: an id failing on exactly one snapshot is that lane's; one failing on several or none goes to the one lane owning its test file (*owner-attributed*), else it is unattributed. A missing test there (no such module, class or method) is *not applicable*; a module that fails to import has failed. If every attributed id names one lane and none is unattributed, that lane is blocked (`run check <id> failed: <n> test(s) attributed to <lane>: <ids>`) and the others pass; otherwise every lane is blocked with the unattributed marker and no repair starts. `attribution.json` keeps each id's outcome per target and the rerun logs; one event on `candidate` says `Run check <id> failed; <outcome>`. A policy author moves the full suite into `run_checks` and gives the lanes targeted checks; `launch` notes each command two lanes declare.
+ - The timeline says what each gate saw. A passing worker gate names each deferred check with its exit code: `Required tests and artifacts passed; recorded for the candidate gate: build (exit 1), browser (exit 0)`. A lane's candidate check keeps its event `Combined revision <sha>` (`; worker checks reused from <packet> ...` when it reused the worker packet); when it blocks, a second event on the same node gives the gate's reasons (`Candidate gate blocked on attempt <n>: <reasons>`). A check that passes on attempt N after attempt N-1 failed on the same revision says so: `passed on attempt N after attempt N-1 failed` in the verify event, or `Candidate gate passed on attempt N after attempt N-1 failed` as the candidate's second event. A lane repair's new revision starts over.
+ - One exception: the evidence of a passed scenario test (a duplicated `[scenario:<id>]` title, a missing, misnamed or duplicated `screenshot:<id>`, a screenshot outside the output directory) is the lane's own work whatever another lane changes, so it gates in the worker phase too, prefixed with the check id (the packet's `scenario_errors`). The browser check's exit status, failing tests, Playwright's global errors and a report that was never written stay deferred.
+ - Artifact paths resolve through a backend-owned registry, constrained to its root and hash-checked. PNG header checks are format sanity only; screenshots are for the reviewers to examine.
+diff --git a/workflow/run_report.py b/workflow/run_report.py
+index 9882199..f69e454 100644
+--- a/workflow/run_report.py
++++ b/workflow/run_report.py
+@@ -75,6 +75,7 @@ RUN_TESTS_INDENT = "    "
+ RUN_TESTS_CLASS = re.compile(r"^FAIL (\S+) \(\d+ tests?\)$")
+ # `FAIL: test_x (module.Class.test_x)`, with an optional subtest suffix; before Python 3.11 the parentheses held the class only.
+ UNITTEST_ID = re.compile(r"^(?:FAIL|ERROR|UNEXPECTED SUCCESS): (\S+) \(([^)\s]+)\)")
++LOADER_FAILURE = "unittest.loader._FailedTest"  # The class unittest gives a name it failed to import or find.
+ 
+ 
+ def unittest_lines(text: str) -> list[tuple[str, int]]:
+@@ -89,7 +90,8 @@ def failing_ids(text: str) -> list[str]:
+     Plain unittest (`FAIL:`/`ERROR:` headers at column 0) and workflow.run_tests (the same headers indented under a
+     `FAIL <module.Class> (N tests)` line). A method id wherever a header names one; a class's id only for a failed
+     class with no method-level header (it crashed, failed to import or failed in setUpClass), so a class with passing
+-    and failing methods gives only its failing methods. An unknown `--tests` id comes back as given.
++    and failing methods gives only its failing methods. A module the loader failed to import gives the name it tried
++    (never the loader's `unittest.loader._FailedTest` pseudo-id). An unknown `--tests` id comes back as given.
+     """
+     found, current, covered = [], None, set()
+ 
+@@ -109,6 +111,10 @@ def failing_ids(text: str) -> list[str]:
+         if not match:
+             continue
+         name, inside = match[1], match[2]
++        if inside == f"{LOADER_FAILURE}.{name}":
++            add(name)  # A module or name the loader could not load: `ERROR: pkg.test_x (unittest.loader._FailedTest.pkg.test_x)`.
++            covered.add(current)
++            continue
+         if name in {"setUpClass", "tearDownClass", "setUpModule", "tearDownModule"}:
+             if current:
+                 continue  # The class line already names it.
+diff --git a/workflow/shared_checks.py b/workflow/shared_checks.py
+index 296b42b..0e7041e 100644
+--- a/workflow/shared_checks.py
++++ b/workflow/shared_checks.py
+@@ -18,7 +18,8 @@ lockstep while a run has shared records (decisions [L2]): the step first raises
+ highest, so one attempt has one record and every packet of it cites that record.
+ 
+ **Run checks** gate once every lane's own checks passed (SharedCandidate.finish). A memory-killed run check makes every
+-lane's packet transient (repair.transient_packet). Any other failure is attributed (attribute): its failing test ids are
++lane's packet transient (repair.transient_packet) unless another run check failed for real beside it: then the kill is
++only listed, as for lane checks. Any other failure is attributed (attribute): its failing test ids are
+ rerun one target at a time on the candidate, the base and each lane snapshot, and the outcome blocks one lane, or every
+ lane with an `unattributed` marker that the fix loop never repairs (repair.unattributed_block).
+ """
+@@ -33,7 +34,7 @@ from pathlib import Path
+ 
+ from .checks import check_env, execute, memory_killed, now, prune_attempt, remove_tree, remove_worktree, text_test_counts
+ from .sessions import git, read_json, save_json
+-from .verification import owns, policy_digest
++from .verification import SLOW_SHARE, owns, policy_digest
+ from .worktrees import git_worktree
+ 
+ SHARED_DIR = "shared-checks"
+@@ -249,10 +250,28 @@ def run_check_gates(policy: dict, record: dict) -> list[dict]:
+     return gates
+ 
+ 
++def slow_run_checks(policy: dict, record: dict) -> list[str]:
++    """Each run check whose execution took more than SLOW_SHARE of its own timeout, as verification.slow_checks names a
++    lane check (C27; PRD 6.2): `full took 1500 s of its 1800 s timeout (83%)`."""
++    named = []
++    for gate in run_check_gates(policy, record):
++        if gate["execution"] is None:
++            continue
++        execution, timeout = record["executions"][gate["execution"]], gate["timeout_seconds"]
++        try:
++            seconds = (datetime.fromisoformat(execution["finished_at"]) - datetime.fromisoformat(execution["started_at"])).total_seconds()
++        except (KeyError, TypeError, ValueError):
++            continue
++        if seconds > SLOW_SHARE * timeout:
++            named.append(f"{gate['id']} took {seconds:.0f} s of its {timeout} s timeout ({round(100 * seconds / timeout)}%)")
++    return named
++
++
+ def gate_run_checks(packet: dict, policy: dict, run: Path, record: dict, run_checks: bool = True) -> dict:
+     """A citing packet's run-check gate (PRD 6.3), reproduced from the record and its attribution, never read back from
+-    the packet: nothing when every run check passed (or `run_checks` is False); every lane blocked as transient when one
+-    was killed for memory; else the attribution's lane blocked, or every lane, marked `unattributed`. A packet that
++    the packet: nothing when every run check passed (or `run_checks` is False); every lane blocked as transient when each
++    failed one was killed for memory; else the attribution of the ones that failed for real blocks its lane, or every
++    lane, marked `unattributed`, with any kill only listed (result.transient_checks and its reasons). A packet that
+     recorded an attribution's digest must find it unchanged."""
+     saved = packet.pop(MARKER, None)
+     ids = [check["id"] for check in policy.get("run_checks", [])]
+@@ -265,28 +284,38 @@ def gate_run_checks(packet: dict, policy: dict, run: Path, record: dict, run_che
+     if not failed:
+         return packet
+     killed = [gate for gate in failed if gate["transient"]]
++    real = [gate for gate in failed if not gate["transient"]]
+     attribution = None
+     if killed:
++        result["transient_checks"] = transient + [gate["id"] for gate in killed]
++    if not real:
+         # A memory kill takes the transient path first and gets no attribution reruns (PRD 7.1): every lane reruns free.
+         reasons = [reason for gate in killed for reason in gate["reasons"]]
+         marker = {"kind": "transient", "lane": None, "checks": [gate["id"] for gate in killed], "attribution": None}
+-        result["transient_checks"] = transient + marker["checks"]
+     else:
++        # A real failure beside a kill makes the attempt a real failure, as for lane checks (repair.transient_packet):
++        # the real ones are attributed, and the kill is only listed after them.
++        listed_kills = [reason for gate in killed for reason in gate["reasons"]]
+         path = (run / packet["shared_record"]["path"]).parent / ATTRIBUTION
+         if not path.is_file():
+-            reasons = [f"run check {gate['id']} failed; not attributed" for gate in failed]
+-            marker = {"kind": "unattributed", "lane": None, "checks": [gate["id"] for gate in failed], "attribution": None}
++            reasons = [f"run check {gate['id']} failed; not attributed" for gate in real] + listed_kills
++            marker = {"kind": "unattributed", "lane": None, "checks": [gate["id"] for gate in real], "attribution": None}
+         else:
+             attribution = {"path": str(path.resolve().relative_to(run.resolve())), "sha256": digest(path)}
+             if isinstance(saved, dict) and saved.get("attribution") not in (None, attribution):
+                 raise ValueError(f"Run-check attribution {attribution['path']} changed after it was recorded")
+             recorded = read_json(path)
+-            if recorded.get("record") != packet["shared_record"] or [item["id"] for item in recorded["checks"]] != [gate["id"] for gate in failed]:
++            if recorded.get("record") != packet["shared_record"] or [item["id"] for item in recorded["checks"]] != [gate["id"] for gate in real]:
+                 raise ValueError(f"Run-check attribution {attribution['path']} is not of the failed run checks of {packet['shared_record']['path']}")
+             lane, reasons = decide(recorded)
+             if lane is not None and lane != packet["expected"]["node_id"]:
++                if killed:
++                    result.pop("transient_checks", None)
++                    if transient:
++                        result["transient_checks"] = transient
+                 return packet  # Attributed to another lane: this lane's packet passes on its own checks.
+-            marker = {"kind": "attributed" if lane else "unattributed", "lane": lane, "checks": [gate["id"] for gate in failed],
++            reasons += listed_kills
++            marker = {"kind": "attributed" if lane else "unattributed", "lane": lane, "checks": [gate["id"] for gate in real],
+                       "attribution": attribution}
+     packet["gate"]["reasons"].extend(reasons)
+     packet["gate"]["status"] = "blocked"
+@@ -316,30 +345,55 @@ def rerun_argv(argv: list[str], ids: list[str], mode: tuple[str, int] | None, un
+     return [*argv[:index], "-m", "unittest", *ids]
+ 
+ 
+-def missing_ids(text: str) -> list[str]:
+-    """Ids the loader found no test for: run_tests' `WORKFLOW: no test named <id>` lines and unittest's _FailedTest names."""
++def loader_errors(text: str) -> list[tuple[str, str]]:
++    """Each name the loader could not load, with why: run_tests' `WORKFLOW: no test named <id>: <why>` lines and plain
++    unittest's `ERROR: <name> (unittest.loader._FailedTest.<name>)` blocks, up to the next rule."""
+     import re
++    from .run_report import LOADER_FAILURE, UNITTEST_ID, UNITTEST_RULE, unittest_lines
+     from .run_tests import NO_TEST
+-    found = re.findall(rf"^\s*{re.escape(NO_TEST)} (\S+?):", text, re.MULTILINE)
+-    found += re.findall(r"\(unittest\.loader\._FailedTest\.([^)\s]+)\)", text)
++    found = re.findall(rf"^\s*{re.escape(NO_TEST)} (\S+?): (.*)$", text, re.MULTILINE)
++    lines = [line for line, _ in unittest_lines(text)]
++    for index, line in enumerate(lines):
++        match = UNITTEST_ID.match(line)
++        if match and match[2] == f"{LOADER_FAILURE}.{match[1]}":
++            block = []
++            for following in lines[index + 2:]:  # Past the rule under the header.
++                if UNITTEST_RULE.match(following):
++                    break
++                block.append(following)
++            found.append((match[1], "\n".join(block)))
+     return found
+ 
+ 
++def absent(test_id: str, why: str) -> bool:
++    """Whether a loader error says the id names no test at that commit (PRD 7.2: `not applicable`): no module of one of
++    its dotted prefixes, no attribute of one of its parts, or no test at all. Any other error (a module of it that fails
++    to import, or one it imports that is missing) is the id failing."""
++    import re
++    parts = test_id.split(".")
++    prefixes = {".".join(parts[:size]) for size in range(1, len(parts) + 1)}
++    return (any(name in prefixes for name in re.findall(r"No module named '([^']+)'", why))
++            or any(name in parts[1:] for name in re.findall(r"has no attribute '([^']+)'", why)) or "it names no test" in why)
++
++
+ def statuses(ids: list[str], text: str, code: int, check: dict, mode) -> dict:
+-    """Each id's outcome in one rerun's log: `failed`, `passed` or `not applicable` (no such test there: PRD 7.2). The
+-    whole-check form ([G4]) gates the run again: exit 0, and for a test kind passing counts."""
++    """Each id's outcome in one rerun's log: `failed`, `passed` or `not applicable` (no such test there: PRD 7.2). A
++    loader error naming the id is `not applicable` only when it says the id is absent (absent): a module that fails to
++    import has failed. The whole-check form ([G4]) gates the run again: exit 0, and for a test kind passing counts."""
+     from .run_report import failing_ids
+     if mode is None:
+         tests = text_test_counts(text)
+         bad = code != 0 or (check["kind"] in TEST_KINDS and (tests is None or tests["passed"] < 1 or tests["failed"] > 0))
+         return {test_id: "failed" if bad else "passed" for test_id in ids}
+-    missing = missing_ids(text)
+-    failing = [item for item in failing_ids(text) if not item.startswith("unittest.loader._FailedTest") and item not in missing]
++    loader = loader_errors(text)
++    failing = [item for item in failing_ids(text) if item not in {name for name, _ in loader}]
+     result = {}
+     for test_id in ids:
+-        if any(test_id == name or test_id.startswith(name + ".") or test_id.endswith("." + name) or f".{name}." in test_id for name in missing):
++        errors = [why for name, why in loader
++                  if test_id == name or test_id.startswith(name + ".") or test_id.endswith("." + name) or f".{name}." in test_id]
++        if errors and all(absent(test_id, why) for why in errors):
+             result[test_id] = "not applicable"
+-        elif any(item == test_id or item.startswith(test_id + ".") or test_id.startswith(item + ".") for item in failing):
++        elif errors or any(item == test_id or item.startswith(test_id + ".") or test_id.startswith(item + ".") for item in failing):
+             result[test_id] = "failed"
+         else:
+             result[test_id] = "passed"
+@@ -548,22 +602,27 @@ class SharedCandidate:
+         return target
+ 
+     def finish(self) -> None:
+-        """Once every lane's own checks passed: gate the run checks. A failure is attributed (or transient), every lane's
++        """Once every lane's own checks passed: name each slow run check (slow_run_checks), then gate the run checks. A
++        failure is attributed (or transient), every lane's
+         packet is written again with its run-check gate, the `candidate` and blocked `candidate_<lane>` events say why,
+         and the step raises."""
+         if self.record is None:
+             return
+         runtime = self.runtime
+         directory, policy = runtime.directory, runtime.policy
++        slow = slow_run_checks(policy, self.record)
++        if slow:  # The lane checks' slow note (C27), on the candidate's own event: a run check belongs to no lane.
++            runtime.event("candidate", "running", f"Run checks on {self.commit}; slow: {', '.join(slow)}")
+         failed = [gate for gate in run_check_gates(policy, self.record) if gate["reasons"]]
+         if not failed:
+             return
+         killed = [gate for gate in failed if gate["transient"]]
+-        if killed:
+-            for gate in killed:
+-                runtime.event("candidate", "blocked", f"Run check {gate['id']} failed; killed for memory: transient, rerun without attribution")
+-        else:
+-            attribution = self.attribution(failed)
++        real = [gate for gate in failed if not gate["transient"]]
++        for gate in killed:
++            runtime.event("candidate", "blocked", f"Run check {gate['id']} failed; killed for memory: "
++                          + ("transient, rerun without attribution" if not real else "listed beside the real failure, not attributed"))
++        if real:
++            attribution = self.attribution(real)
+             for check in attribution["checks"]:
+                 lane, _, text = check_outcome(check)
+                 runtime.event("candidate", "blocked", f"Run check {check['id']} failed; {text.lstrip(':, ')}")
+diff --git a/workflow/test_run_checks.py b/workflow/test_run_checks.py
+index 6c02082..e9405fe 100644
+--- a/workflow/test_run_checks.py
++++ b/workflow/test_run_checks.py
+@@ -27,7 +27,7 @@ from .clean import passed_attempts
+ from .pipeline import ExportRuntime, build_pipeline, digest_file, export_run, graph_config
+ from .run_report import failing_ids, failures
+ from .sessions import git, prepare, read_json, save_json
+-from .shared_checks import ATTRIBUTION, MARKER, RECORD
++from .shared_checks import ATTRIBUTION, MARKER, RECORD, statuses
+ from .test_browser_rules import FAKE_PLAYWRIGHT
+ from .test_pipeline import FakeSessions, OfflinePipeline, by_operator, isolate_registry, stub_claude_cli
+ from .verification import CONTRACTS, policy_digest, policy_lint, validate_policy
+@@ -617,6 +617,35 @@ class Attribution(Fixture):
+         self.assertIn(("controller", "running", "candidate/a killed under memory pressure: transient, rerun without spending an attempt"), self.events())
+         self.assertFalse([start for start in self.sessions.starts if start.startswith("repair")])
+ 
++    def test_a_memory_kill_beside_a_real_run_check_failure_makes_the_attempt_a_real_failure(self):
++        """PRD 6.2: as for lane checks (repair.transient_packet), the real failure is attributed and the kill only listed."""
++        self.base()
++        value = self.run_policy(run_check=[PY, str(self.fake), "oom", "kill"], kind="build")
++        value["run_checks"].append(check("second", [PY, str(self.fake), "second", "fail-if=a.txt:bad"], "build"))
++        self.start(value, {"a": ("a.txt", "bad"), "b": ("b.txt", "b1")})
++        self.assertRegex(str(self.freeze()), "Combined candidate failed a checks")
++        a, b = self.packet("a"), self.packet("b")
++        self.assertEqual(a["gate"]["reasons"], ["run check second failed: 1 test(s) attributed to a: second", "full: exit -9"])
++        self.assertEqual((a[MARKER]["kind"], a[MARKER]["lane"], a[MARKER]["checks"], a["result"]["transient_checks"]),
++                         ("attributed", "a", ["second"], ["full"]))
++        self.assertEqual((b["gate"]["status"], "transient_checks" in b["result"]), ("passed", False))
++        self.assertEqual([item["id"] for item in self.attribution()["checks"]], ["second"])
++        self.assertEqual(len(self.rows("oom")), 1)  # The kill gets no attribution rerun.
++        self.assertFalse(repair.transient_packet(self.packet_path("a")))
++        self.assertIn(("candidate", "blocked", "Run check full failed; killed for memory: listed beside the real failure, not attributed"), self.events())
++        self.assertIn(("candidate", "blocked", "Run check second failed; 1 test(s) attributed to a: second"), self.events())
++        self.assertEqual(fix_decision(self.runtime, self.state()), ("a", "candidate"))
++
++    def test_a_slow_run_check_is_named_on_the_candidate_event(self):
++        """PRD 6.2, C27: a run check over 60% of its own timeout is named as a lane check is."""
++        self.base()
++        value = self.run_policy(run_check=[PY, str(self.fake), "slow", "sleep=2.5"], kind="build")
++        value["run_checks"][0]["timeout_seconds"] = 4
++        self.start(value, {"a": ("a.txt", "a1"), "b": ("b.txt", "b1")})
++        self.assertIsNone(self.freeze())
++        [note] = [message for node, status, message in self.events() if node == "candidate" and "slow:" in message]
++        self.assertRegex(note, rf"^Run checks on {self.candidate_commit()}; slow: full took \d s of its 4 s timeout \((6[3-9]|[7-9]\d|100)%\)$")
++
+     def test_one_lane_with_an_unattributed_failure_retries_to_controller_blocked_without_a_repair(self):
+         """PRD 11.8 h, [L1], [G5]; challenge note 4: the identical-failure stop ends it after attempt 2."""
+         self.base({"workflow/test_base.py": TEST_BASE})
+@@ -848,5 +877,24 @@ class RunTestsSelection(unittest.TestCase):
+         self.assertIn(("FAIL: test_bad (pkg.test_m.C.test_bad)", "AssertionError: 1 != 2"), failures(plain.stderr))
+ 
+ 
++    def test_a_module_that_fails_to_import_is_a_failing_id_that_reproduces(self):
++        """PRD 8.2 and 7.3 a: plain unittest names an unimportable module by its loader pseudo-id; the parser gives the
++        module, and a rerun of it fails, while a module or attribute absent at a commit is not applicable."""
++        (self.root / "pkg/test_broken.py").write_text("import unittest\nimport no_such_dependency\n\n\nclass B(unittest.TestCase):\n"
++                                                      "    def test_b(self):\n        pass\n")
++        environment = {key: value for key, value in os.environ.items() if key != "PYTHONSAFEPATH"}
++        discover = subprocess.run([PY, "-m", "unittest", "discover", "-s", "pkg", "-t", "."], cwd=self.root, capture_output=True, text=True, timeout=60, env=environment)
++        self.assertIn("ERROR: pkg.test_broken (unittest.loader._FailedTest.pkg.test_broken)", discover.stderr)
++        self.assertIn("pkg.test_broken", failing_ids(discover.stderr))
++        self.assertFalse([item for item in failing_ids(discover.stderr) if item.startswith("unittest.loader")])
++        ids = ["pkg.test_broken", "pkg.test_absent.X.test_x", "pkg.test_m.C.test_none", "pkg.test_m.C.test_ok"]
++        plain = subprocess.run([PY, "-m", "unittest", *ids], cwd=self.root, capture_output=True, text=True, timeout=60, env=environment)
++        expected = {"pkg.test_broken": "failed", "pkg.test_absent.X.test_x": "not applicable", "pkg.test_m.C.test_none": "not applicable",
++                    "pkg.test_m.C.test_ok": "passed"}
++        self.assertEqual(statuses(ids, plain.stderr, plain.returncode, {"kind": "unit"}, ("unittest", 1)), expected)
++        selected = self.run_tests("--tests", *ids)
++        self.assertEqual(statuses(ids, selected.stdout, selected.returncode, {"kind": "unit"}, ("run_tests", 1)), expected)
++
++
+ if __name__ == "__main__":
+     unittest.main()

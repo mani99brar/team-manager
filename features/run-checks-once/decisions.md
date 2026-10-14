@@ -55,9 +55,35 @@ Every worker and reviewer prompt includes this file. The Operator decisions are 
   - the `contract.test.ts` change is one new `it` block placed apart from the existing version assertions; an existing line changes only where its assertion would otherwise fail against the widened rules.
   (panel: jev:claude; run-checks-once-001 challenge attempt 1, P2 1-6)
 
+- [L4] **Carry repair-2** (run-checks-once-002, follow-up of 001). This supersedes nothing and adds to the engine task's Acceptance.
+  - Repair-2's uncommitted fix of 001's review blockers is committed as `features/run-checks-once/carry/repair-2.diff` (355 lines: `shared_checks.py`, `run_report.py`, `test_run_checks.py`, `RUNBOOK.md`, the handoff doc). After the restore from f62e844, apply it first with `git apply features/run-checks-once/carry/repair-2.diff`, byte for byte, resolving conflicts only.
+  - Acceptance: its three tests pass:
+    - `test_a_memory_kill_beside_a_real_run_check_failure_makes_the_attempt_a_real_failure`;
+    - `test_a_module_that_fails_to_import_is_a_failing_id_that_reproduces`;
+    - `test_a_slow_run_check_is_named_on_the_candidate_event`.
+  - Plus one new test: a lane that attribution clears passes, and the kill is dropped from its packet.
+  - Touches PRD §6.2, §7.3 a, §8.2 and §11.8 i. (panel: agree; 001 controller_blocked, triage groups A, B, C)
+- [L5] **A slow note on blocked attempts too.** This closes the remaining gap in triage C. When a lane's own check blocks before `finish()`, a run check over SLOW_SHARE still gets its slow note on the candidate event, as lane checks do. Acceptance: a test with a failing lane check and a slow run check asserts the note. Touches PRD §6.2. (panel: agree; triage C)
+- [L6] **Run-only logs and missing citations are tamper failures.** This extends the PRD §11.5 tamper rules.
+  - `cited_record`/`recheck_packet` verify that every run check's log in the record exists and matches its `log_sha256`, not only the lane's own argvs (triage D).
+  - On a policy with non-empty `run_checks`, a candidate packet without `shared_record` fails `recheck_packet` and `validate_bundle`, on both the reused (C28) and the regular path (triage E). Worker packets stay valid without a candidate citation.
+  - Acceptance: one test deletes or alters a run-only log and expects recheck to fail. One test removes `shared_record` from a 1.5.0 candidate packet and expects both checks to fail. The 1.4.0 fixtures are unchanged.
+  - Touches PRD §6.3, §11.5 and §11.11. (panel: agree; lane review round 2 P1s 1-2, triage D, E)
+- [L7] **An interrupted attribution rerun passes no id.** This extends [G4] and PRD §7.3.
+  - When a rerun exits on timeout (124) or a kill, every id without a failure header is recorded `not run`, never `passed`. Incomplete evidence never clears a lane and never establishes an attribution: `not run` ids count as not applicable for the lane choice, and the reason names them.
+  - Acceptance: a test under the run_tests runner with ids [A, B], where A fails and the rerun is killed before B, asserts that B is `not run`, not `passed`, and that no lane is chosen on B.
+  - Touches PRD §7.3 and §11.8 i. (panel: agree; GPT panel f3, triage G)
+- [L8] **A known limit, not fixed: browser lanes and cited build outputs** (triage F, PLAUSIBLE only; no committed md-manager policy needs it). The handoff doc and the RUNBOOK equivalence section state that a browser lane's worktree runs only its own `setup`. Ignored outputs of cited non-browser checks (for example a build's `dist/`) are therefore absent there, and a policy that needs them lists the build in the browser lane's `setup`. No test. (panel: agree; GPT panel f1)
+- [L9] **Verification hygiene for 002.**
+  - Before your full-suite run, run `npm ci` in your worktree. Repair-2's full suite failed only because `node_modules` was missing when it started.
+  - Never start a full suite while another `workflow.run_tests --jobs` runs on the host ([G7]).
+  - The review needs fresh verification; repair-2's environmental diagnosis does not establish readiness. (panel: agree)
+
 ## Deferred
 
 - Showing run-level checks and the shared record in the viewer: a later Sonnet follow-up, after review-panel-registry lands, owned by server/ and src/.
 - Teaching /cook's feature-rules to write `run_checks` and targeted lane checks. This is outside this repository, and it starts once ctl runs policy 1.5.0.
 - Attributing a failing *shared lane check* (not a run check) to the lane that caused it. It keeps today's first-declaring-lane rule.
 - A machine-wide slot for heavy Python suites, like the browser queue.
+- The browser-lane build-output limit of [L8].
+- Triage backlog from run 001, not carried: K and L (beyond [L4]'s tests), and M (a viewer change, under the first Deferred item).

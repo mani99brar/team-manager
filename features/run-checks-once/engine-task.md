@@ -8,6 +8,7 @@ Spec: `features/run-checks-once/prd.md`. Binding decisions: `features/run-checks
 
 ## Context
 
+- **Follow-up run 002 ([L4]-[L9]).** Your prompt starts with the restore of your owned paths from 001's reviewed candidate `f62e844`, which already meets items 1-14 below as 001 delivered them. Then apply `features/run-checks-once/carry/repair-2.diff` ([L4]), and fix [L5]-[L7] and [L8]'s docs. Run 001's review blockers and their triage are summarised in decisions.md [L4]-[L8].
 - **Candidate gate** (`workflow/pipeline.py`):
   - `candidate()` :711-785 combines the snapshots, then loops over the lanes. Each lane gets its own `verify_revision(phase="candidate")`, worktree and `npm ci`, and the first blocked lane raises (:763-765). It then writes `review-bundle.json` (:769-784).
   - `reusable_packet` :698-709 is C28: one lane, attempt 1, no repair, no browser check.
@@ -93,6 +94,14 @@ Each item of PRD §11 is proved by a named test:
 13. **Docs:** the RUNBOOK sections, the README setup and files, and contracts/workflow/README (PRD §10).
 14. **The handoff doc** `docs/handoff/run-checks-once.md` (with the [L2] and [L3] notes): what changed, file by file; how a policy author moves the full suite into `run_checks` (one example policy at 1.5.0); what is left (decisions.md Deferred).
 
+15. **Run 002 follow-up:**
+    - [L4]: the carry diff is applied, its three tests pass, and the new attribution-clears test passes;
+    - [L5]: the slow note on a blocked attempt;
+    - [L6]: run-only log tamper and missing-citation refusals;
+    - [L7]: an interrupted rerun records `not run`;
+    - [L8]: the known limit stated in the handoff doc and RUNBOOK;
+    - [L9]: `npm ci` before the full suite.
+
 The worker's Proof table names a test for each item.
 
 ## Stop
@@ -105,4 +114,4 @@ Stop and report `blocked`, with what you found, when:
 
 ## Changes after launch
 
-Changes after launch are `[L<n>]` bullets in `decisions.md`, and they win over this task: [L1]-[L3] (challenge attempt 1).
+Changes after launch are `[L<n>]` bullets in `decisions.md`, and they win over this task: [L1]-[L3] (challenge attempt 1) and [L4]-[L9] (follow-up run 002).
