@@ -130,6 +130,12 @@ Design challenge attempt 1 (3 P1, 7 P2) on run review-panel-registry-001. The bu
 
   Run 002's candidate failure was a load timeout on that unchanged test: the suite ran 907 s against about 380 s normally, and the same timeout hit 6 earlier verifications. It was not a product defect: 123 of 124 browser tests passed, and seats, judge and `JudgedCandidateTests` passed on the merged tree. Every required gate runs again, including `JudgedCandidateTests` on the merged tree. Host-capacity admission (`cook.py reserve` and preflight) is checked before launch. No policy, check or feature.json change.
 
+- [L11] (panel: agree, follow-up, run 003 blocked; decisions/005-controller_blocked) Follow-up run `review-panel-registry-004` follows run 003 and restores every lane from candidate `f05855e` with `--restore-from`, plus the viewer's [L10] timeout line in `controls.spec.ts` (the viewer redoes it). It supersedes [L10]'s "no policy change" clause and changes nothing in the specification. Seats, judge and viewer carry no code items, and the viewer's lane-review P1 is refuted (the same claim as run 002's, triage 005 V1).
+  - **The one policy.json change:** `timeout_seconds` becomes 3600, the policy cap, for `seats-workflow-unit` and `judge-workflow-unit`. The argv keeps `--jobs 4`. No other check, lane or feature.json change.
+  - **Launch condition:** host-capacity admission (`cook.py reserve` and preflight) passes first. The launch waits while another cook's test suite (a run-checks-once repair, verify or candidate) is running or the 1-minute load is above about 5. If run-checks-once enters a fix round, the launch waits for that round's suite to end; its independent review does not delay the launch.
+  - Every required gate runs again, including `JudgedCandidateTests` on the merged tree.
+  - **Why:** both run-003 timeouts were environmental. Nothing had failed at the kill (1279/1304 and 1119/1324 tests done), and the code is byte-identical to run 002's verified tree.
+
 Not changed:
 - The Muse entry's `env.pass: []` stands. The session ran the challenge's cheap experiment, and the login works with an environment built from nothing (`decisions/001-challenge_paused/extra.md`).
 - The seats lane's effort stays medium, because feature.json is frozen after prepare.

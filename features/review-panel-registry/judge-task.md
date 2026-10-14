@@ -8,7 +8,7 @@ Spec: `features/review-panel-registry/prd.md` sections 7.2-7.6 and 9, plus Appen
 
 ## Context
 
-- **Follow-up run 003 ([L10]): first restore the run-002 candidate's version of your owned paths**, then check that nothing differs; the last command prints nothing once restored:
+- **Follow-up run 004 ([L11]; restore as in [L10]): first restore the run-002 candidate's version of your owned paths**, then check that nothing differs; the last command prints nothing once restored:
   `git restore --source=f05855efff1a5712cbc4b440c328f09900c2a5e0 --staged --worktree -- workflow/judge.py workflow/test_judge.py workflow/automatic.py workflow/test_automatic.py workflow/pipeline.py workflow/sessions.py workflow/test_sessions.py workflow/test_export.py workflow/test_accept.py workflow/testdata/judge workflow/prompts/judge.md workflow/RUNBOOK.md docs/handoff/review-panel-judge.md`
   `git diff --stat f05855efff1a5712cbc4b440c328f09900c2a5e0 -- workflow/judge.py workflow/test_judge.py workflow/automatic.py workflow/test_automatic.py workflow/pipeline.py workflow/sessions.py workflow/test_sessions.py workflow/test_export.py workflow/test_accept.py workflow/testdata/judge workflow/prompts/judge.md workflow/RUNBOOK.md docs/handoff/review-panel-judge.md`
 - **Review step** (`workflow/automatic.py`):
@@ -48,7 +48,7 @@ Spec: `features/review-panel-registry/prd.md` sections 7.2-7.6 and 9, plus Appen
 
 Your checks (`/home/agentops/dev/md-manager/.venv/bin/python -m workflow.run_tests --jobs 4` and `npm run test:contracts`) pass. PRD section 10 items 5, 6, 7, 8 and 9 (review.json and the verdict), plus the `judge` reserved-id item of 10.4, are each proved by named tests:
 
-0. **Run 003 ([L10]):** restore from the run-002 candidate `f05855e`. `git diff --stat f05855e -- <your owned paths>` stays empty, and you change nothing; your code already meets the items below. Run your checks and hand off.
+0. **Run 004 ([L11]):** restore from the run-002 candidate `f05855e`. `git diff --stat f05855e -- <your owned paths>` stays empty, and you change nothing; your code already meets the items below. Run your checks and hand off.
 1. **Wait for everything** (both reviewer transports, fake clock): on a judged run, a first block does not decide.
    - Every built-in reviewer is awaited to its verdict or deadline, then `panel.settle`, then the judge.
    - A failed or late built-in reviewer is recorded and the judge still runs.

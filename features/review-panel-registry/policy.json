@@ -57,7 +57,7 @@
             "--jobs",
             "4"
           ],
-          "timeout_seconds": 1500,
+          "timeout_seconds": 3600,
           "scenarios": []
         },
         {
@@ -106,7 +106,7 @@
             "--jobs",
             "4"
           ],
-          "timeout_seconds": 1500,
+          "timeout_seconds": 3600,
           "scenarios": []
         },
         {
