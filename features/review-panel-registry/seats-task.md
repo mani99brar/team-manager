@@ -34,12 +34,19 @@ Spec: `features/review-panel-registry/prd.md` sections 4, 5, 6, 7.1, 7.2 (settle
 
 Your checks (`/home/agentops/dev/md-manager/.venv/bin/python -m workflow.run_tests --jobs 4` and `npm run test:contracts`) pass. PRD section 10 items 1, 2, 3, 4, 9 (for the panel record and export) and 10 are each proved by named tests in your files:
 
-0. **Run 005 ([L12]):** restore from the run-004 candidate `9245e1e`, then fix B1 in `workflow/panel.py` only, as [L12] specifies:
-   - A per-seat watchdog armed at `start_seat`.
-   - A deadline check in `_wait_seats` before `_reap_seat`, which records `timed_out` with no findings.
-   - The timer is cancelled on reap and on stop.
+0. **Run 005 ([L12], [L13]):** restore from the run-004 candidate `9245e1e`. Then fix B1 in `workflow/panel.py` only, as [L13] specifies:
+   - A per-seat watchdog armed at `start_seat` through a patchable timer factory.
+   - The callback returns when the seat has already exited or has a result. Otherwise it sets `job.expired` before its first `killpg`, then SIGTERMs, then SIGKILLs after the grace. It touches nothing else.
+   - Before the reap, only `job.expired` makes a seat `timed_out`. An exited seat without `expired` keeps its result, whatever the clock says. The clock check applies only to seats still running.
+   - The timer is cancelled in `_reap_seat` and `stop_seat`.
 
-   A named test in `workflow/test_panel.py`: a `cli` seat that outlives its cap while no settle runs ends `timed_out` with its process group gone. A seat that finishes in time keeps its result. Also correct `docs/handoff/review-panel-seats.md:79-81` to say "panel answer" (G8). Nothing else differs from `9245e1e`.
+   Named tests in `workflow/test_panel.py`, each under 5 s:
+   - `test_completed_seat_survives_late_settle`;
+   - `test_watchdog_expires_without_settle` (deterministic, 20 passes in a row under `--jobs 4`);
+   - `test_reaped_seat_watchdog_is_inert`;
+   - a test that stopping a seat cancels its timer.
+
+   Also correct `docs/handoff/review-panel-seats.md:79-81` to say "panel answer" (G8). Nothing else differs from `9245e1e`.
 1. `reviewers.load` accepts `examples/reviewers.example.json` and rejects each bad input listed in PRD 10.1, with the path in the error. A missing file, an unreadable file and invalid JSON are refused with the path.
 2. `reviewers.resolve`, with injected `which` and `run`:
    - An absent named seat → `ValueError`.
