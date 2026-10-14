@@ -1,0 +1,67 @@
+{
+  "version": "2.10.0",
+  "name": "UX critique fixes, stage C (features/ux-critique-fixes-c/prd.md): nothing the operator reads under 13 px (14 px under 720 px, uppercase labels 11 px), a skills home that opens expanded with the root Playwright suite gated on the candidate, GitHub's state said once and chart counts that say what they count (lane polish); one request per poll for the rail, the cards and Triage, Triage's all-time All runs view, the project's Claude spend served, reuse evidence and redacted contradictory results served, a stale task error read against next, OOMPolicy=continue, and run controls that retry every failed check and relaunch a dead lane through the controller's CLI (lane server)",
+  "branch_prefix": "feature/ux-critique-fixes-c",
+  "prd": "features/ux-critique-fixes-c/prd.md",
+  "policy": "policy.json",
+  "workers": [
+    {
+      "node_id": "polish",
+      "task": "polish-task.md",
+      "model": "claude-sonnet-5-5",
+      "effort": "medium",
+      "skills": [
+        "impeccable"
+      ],
+      "lane_review": {
+        "reviewers": [
+          {
+            "transport": "pi",
+            "model": "openai-codex/gpt-6.1-sol"
+          }
+        ],
+        "rounds": 1,
+        "timeout_minutes": 15
+      }
+    },
+    {
+      "node_id": "server",
+      "task": "server-task.md",
+      "model": "claude-opus-5-5",
+      "effort": "medium",
+      "lane_review": {
+        "reviewers": [
+          {
+            "transport": "pi",
+            "model": "openai-codex/gpt-6.1-sol"
+          }
+        ],
+        "rounds": 1,
+        "timeout_minutes": 15
+      }
+    }
+  ],
+  "reviewers": [
+    {
+      "reviewer_id": "general",
+      "prompt": "builtin:general"
+    },
+    {
+      "reviewer_id": "coverage",
+      "prompt": "builtin:coverage"
+    }
+  ],
+  "challenge": true,
+  "critique": {
+    "lanes": [
+      "polish"
+    ],
+    "skills": [
+      "impeccable"
+    ],
+    "max_budget_usd": 20,
+    "timeout_minutes": 60
+  },
+  "critical": false,
+  "tryout": false
+}
