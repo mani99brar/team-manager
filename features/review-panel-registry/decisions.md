@@ -125,6 +125,11 @@ Design challenge attempt 1 (3 P1, 7 P2) on run review-panel-registry-001. The bu
 
   Run 001's seats check failure was environmental (one test's 90 s timeout under browser-queue contention; 1300 of 1301 passed). Seats and judge carry no code items. Their verification, and seats' first lane review, run again. No policy or check change.
 
+- [L10] (panel: agree, follow-up, run 002 blocked; decisions/004-controller_blocked) Follow-up run `review-panel-registry-003` follows run 002 and restores every lane from the kept candidate `f05855e` (`refs/workflow/7944df79a4611cc5/candidate`) with `--restore-from`. It supersedes [L9]'s run-001 snapshot restore lines and changes nothing in the specification. Seats and judge carry no code items: they restore and verify again. The viewer lane carries one item, in its owned `tests/project-workflows`:
+  - **viewer, the flaky gate test:** in `controls.spec.ts`, the `[scenario:controls-unavailable]` test calls `test.setTimeout(90_000)` as its first line, as `home-sections` does at `revamp-lists.spec.ts:89`. No product code, fixture or assertion changes, and the test must still fail on a missing Controls button. Acceptance: the full Playwright suite passes at the viewer verify and at the candidate gate (PRD 10.11 unchanged).
+
+  Run 002's candidate failure was a load timeout on that unchanged test: the suite ran 907 s against about 380 s normally, and the same timeout hit 6 earlier verifications. It was not a product defect: 123 of 124 browser tests passed, and seats, judge and `JudgedCandidateTests` passed on the merged tree. Every required gate runs again, including `JudgedCandidateTests` on the merged tree. Host-capacity admission (`cook.py reserve` and preflight) is checked before launch. No policy, check or feature.json change.
+
 Not changed:
 - The Muse entry's `env.pass: []` stands. The session ran the challenge's cheap experiment, and the login works with an environment built from nothing (`decisions/001-challenge_paused/extra.md`).
 - The seats lane's effort stays medium, because feature.json is frozen after prepare.
@@ -145,4 +150,11 @@ Not changed:
   - T2 (P2): `server/projects.ts:2279` should pass seat `model` and `served_model` through `redactPaths`, as `cli_version` is.
   - T4 (P2): a print-transport judge that is interrupted cannot resume (`automatic.py:1966-1970`); print never resumed before either, and these runs never use print ([G25]).
   - T5 (P2): resume forgets which built-in reviewers failed (`automatic.py:1072`), a narrow provenance window.
+- From run 002's lane review (triage 004; all confirmed P2 that fail safe):
+  - A: `workflow/panel.py:1649-1663` `stop_seat` never SIGKILLs the process group when the leader exits on SIGTERM within the grace; the fix is `_kill_group(job)` after the leader's wait.
+  - D: `workflow/pipeline.py:170` `JUDGED_GATES` includes `critique` unconditionally, so an undeclared built-in reviewer named `critique` gates approval.
+  - E: `workflow/judge.py:44` the citation rule rejects root-level extensionless paths such as `Makefile:8`, so such refuted rulings record as confirmed.
+  - F: `workflow/judge.py:482` a whitespace-only `requirement` reaches review.json and is rejected there instead of taking the judge fallback.
+
+  Run 001's T2, T4 and T5 stay deferred.
 - Test isolation: the workflow tests wait on the host-wide browser queue (`~/.config/md-manager/browser-queue`), so lane suites contend with live Playwright checks. This was run 001's seats timeout. It goes to a learning, not this cook.
