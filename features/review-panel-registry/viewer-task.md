@@ -14,6 +14,9 @@ Spec: `features/review-panel-registry/prd.md` sections 7.4, 7.7 and 8, plus Appe
 
 ## Context
 
+- **Follow-up run 002 ([L9]): first restore this lane's run-001 snapshot**, then check that nothing differs; the last command prints nothing once restored:
+  `git restore --source=499ae068a28e1d238df95e0ab6b2599c7768ebc0 --staged --worktree -- server contracts/projects src/projects tests/unit tests/project-workflows docs/handoff/review-panel-viewer.md`
+  `git diff --stat 499ae068a28e1d238df95e0ab6b2599c7768ebc0 -- server contracts/projects src/projects tests/unit tests/project-workflows docs/handoff/review-panel-viewer.md`
 - **Literal records:** `features/review-panel-registry/examples/`. These are `panel-judged.example.json` (record 1.1.0, judged, blocked by J1), `panel-fallback.example.json` (judge timed out, a seat `auth_required`, Argon `unavailable`), `review-judged.example.json` and `reviewers.example.json`. Load them as literals in your contract and unit tests, and seed the browser runs from them.
 - **Panel contract today:** `contracts/projects/v1.ts:754-838` (`PANEL_TRANSPORTS` :767, provider :781, finding :794, entry :808, results `contract_version '1.9.0'` :834) and `validatePanelResults` :1198. The review validator is `validateReviewResult` :1067-1091 (strict `reviewFindingSchema` :204, `reviewerEntrySchema` :221). Generated JSON comes from `npm run contracts:export`.
 - **Server:** `server/projects.ts:1317` (the panels route) and :2218 (`resolvePanelRecord`, live `<run>/panel.json` first, then the export's `panels` section). The review sections are `z.strictObject` (`server/projects.ts:188-238`). Sessions: `server/sessions.ts:160/258/823` (`panel` node, `panel_provider` rows).
@@ -38,6 +41,7 @@ Spec: `features/review-panel-registry/prd.md` sections 7.4, 7.7 and 8, plus Appe
 
 Your checks (build, lint, `npm run test:contracts`, `npm run test:unit` and the Playwright suite) pass, with these named tests and scenarios:
 
+0. **Run 002 ([L9]):** restore from your run-001 snapshot `499ae06`, then fix T1. Every review round's judge keeps its Sessions row, with its session id, resume command and cost. Earlier rounds come from the archived `review.round-<k>.json` and `panel.round-<k>.json`, and today `server/sessions.ts:778` skips the `judge` entry. A named server test seeds a judged run with one fix round and asserts that both rounds' judge rows render. Change nothing else from the snapshot.
 1. **Contracts:**
    - The zod schemas accept every example in `features/review-panel-registry/examples/` that they cover.
    - They reject a 1.1.0 record with transport `foo`, a seat status outside PRD 8's list, and a judge ruling outside `confirmed|refuted|deferred`.

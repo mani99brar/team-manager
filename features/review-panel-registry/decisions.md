@@ -120,6 +120,11 @@ Design challenge attempt 1 (3 P1, 7 P2) on run review-panel-registry-001. The bu
 
   It skips, with the reason "seats ports absent (lane worktree)", only when `panel.settle` or `panel.record_judge` is missing. It therefore runs at candidate verification, where every lane's suite runs on the merged tree. Adds to PRD 10.5-10.8.
 
+- [L9] (panel: fallback:narrowest-scope, run 001 blocked; decisions/003-controller_blocked) Follow-up run `review-panel-registry-002` follows run 001. There is no candidate yet, so each lane restores its own run-001 snapshot of its owned paths: seats `3abe03d`, judge `bbd0deb`, viewer `499ae06`. The exact lines are in each task's Context. Supersedes nothing in the specification; it adds one item:
+  - **viewer, T1 (confirmed P1):** in `server/sessions.ts` (the archived-round loop at :745/:778 skips `JUDGE_REVIEWER_ID`; `panelRows`/`judgedPanelRows` at :826/:871 read only the current round), every review round's judge keeps its Sessions row, with its session id, resume command and cost. Earlier rounds' judge records come from the archived round files (`review.round-<k>.json` and `panel.round-<k>.json`). A server test seeds a judged run with one fix round and asserts that both rounds' judge rows render (PRD 8; `docs/PRD_RUN_SESSIONS.md` "every session of a run is listed").
+
+  Run 001's seats check failure was environmental (one test's 90 s timeout under browser-queue contention; 1300 of 1301 passed). Seats and judge carry no code items. Their verification, and seats' first lane review, run again. No policy or check change.
+
 Not changed:
 - The Muse entry's `env.pass: []` stands. The session ran the challenge's cheap experiment, and the login works with an environment built from nothing (`decisions/001-challenge_paused/extra.md`).
 - The seats lane's effort stays medium, because feature.json is frozen after prepare.
@@ -136,3 +141,8 @@ Not changed:
 - Seat and judge costs in `costs.py` / `status` cost lines.
 - A read-only `workflow reviewers check` command.
 - Step 2 (`challenge-panel`, [G16]) and step 3 (/multi-review and idea review read the list) ([O4]).
+- From run 001's lane review (panel decision 003; deferred by the narrowest-scope fallback):
+  - T2 (P2): `server/projects.ts:2279` should pass seat `model` and `served_model` through `redactPaths`, as `cli_version` is.
+  - T4 (P2): a print-transport judge that is interrupted cannot resume (`automatic.py:1966-1970`); print never resumed before either, and these runs never use print ([G25]).
+  - T5 (P2): resume forgets which built-in reviewers failed (`automatic.py:1072`), a narrow provenance window.
+- Test isolation: the workflow tests wait on the host-wide browser queue (`~/.config/md-manager/browser-queue`), so lane suites contend with live Playwright checks. This was run 001's seats timeout. It goes to a learning, not this cook.
