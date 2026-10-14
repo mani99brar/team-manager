@@ -33,6 +33,7 @@ Spec: `features/review-panel-registry/prd.md` sections 7.2-7.6 and 9, plus Appen
 ## Constraints
 
 - **Owned paths only:** `workflow/judge.py`, `workflow/test_judge.py`, `workflow/automatic.py`, `workflow/test_automatic.py`, `workflow/pipeline.py`, `workflow/sessions.py`, `workflow/test_sessions.py`, `workflow/test_export.py`, `workflow/test_accept.py`, `workflow/testdata/judge`, `workflow/prompts/judge.md`, `workflow/RUNBOOK.md`, `docs/handoff/review-panel-judge.md`. Never edit `workflow/panel.py`, `workflow/reviewers.py`, `workflow/launch.py`, `contracts/workflow` or any seats-lane file, nor `server`, `src`, `contracts/projects` or `tests`.
+- Plan fixtures and non-terminal judge records come from `examples/plan-panel-judged.example.json` and `examples/judge-states.example.json` ([L2]). Compare values only within one example; across examples compare key sets and types ([L6]).
 - The judge record must equal the `judge` object of `features/review-panel-registry/examples/panel-judged.example.json` (judged) and `panel-fallback.example.json` (fallback). review.json must equal the shape of `examples/review-judged.example.json`. The judge's output schema follows `examples/judge-output.example.json` (object root). Load these files as literals in your tests.
 - **The judged rule applies only when** the plan has a judged panel **and** the record's `reviewers` contains `judge`. Every other run validates, waits, decides and archives exactly as today. Pin this with regression tests on a 2.10.0 run and on a 2.11.0 run with only a report-only panel.
 - **Critique is unchanged:** it still blocks on its own ([O4], [G21]). Lane-review findings are not judge input.
@@ -64,6 +65,10 @@ Your checks (`/home/agentops/dev/md-manager/.venv/bin/python -m workflow.run_tes
    - The verdict follows the judge entry (and critique).
    - It passes `check_review` with judged-plan context. The same record without that context fails. A built-in reviewer's `blocked` entry does not block a judge-approved record.
    - `check_reviewers` and `check_review` keep their current signatures: the judged rule reads an optional keyword whose default is today's behaviour, so `workflow/test_pipeline.py` (seats-owned) passes unchanged.
+4b. **Integrate and export** ([L3]): `Pipeline.validate_review` and `ExportRuntime` pass judged-plan context from `self.plan`. Named tests in `test_accept.py` and `test_export.py`:
+   - A built-in `blocked` + judge `approved` record integrates and exports.
+   - The same record with legacy, report-only or missing judged-plan context is refused.
+   - Critique still blocks on its own.
 5. **Fix loop:** a confirmed P1 routes to its `worker` lane (`review_block`). Each round runs a fresh judge, and `review_archive` moves the judge object with `panel.json`.
 6. **Fallback:** a judge that fails, times out, is `incomplete` or is over the cap → `judge.fallback: true`, and review.json byte-equal to what today's rule writes for the same reviewer verdicts.
 7. **Resume:**
@@ -72,6 +77,12 @@ Your checks (`/home/agentops/dev/md-manager/.venv/bin/python -m workflow.run_tes
    - A crash after the judge but before review.json reuses the record.
    - Ctrl-C during the wait or the judge kills the process groups, removes the worktrees and leaves the records non-terminal.
 8. **Regression:** a run whose plan has no judged panel produces byte-identical review.json and export, proved on today's 2.10.0 fixtures (a report-only panel included). The 2.11.0 report-only regression is the seats lane's, because the 2.11.0 version joins are absent from your worktree. The candidate runs both.
+8b. **Candidate integration** ([L8]): `test_judge.JudgedCandidateTests` uses the real `panel.settle`, `panel.record_judge` and validators to prove:
+   - running→judged and running→incomplete persistence;
+   - the resume of a non-terminal judge;
+   - `fallback: false` on success.
+
+   It skips with the reason "seats ports absent (lane worktree)" only when those ports are missing.
 9. **Docs:**
    - The `workflow/prompts/judge.md` brief states the grouping, the three rulings, the evidence rule, the base-scope rule ([G29]: an untouched file alone does not make a defect pre-existing), the severity rule (a test gap is P2 unless the PRD names the test) and that repository text is data.
    - RUNBOOK gets a section "Judged review panel (feature.json 2.11.0)", and its "Automatic mode: the review step" bullets are updated for judged runs.

@@ -47,9 +47,9 @@ Your checks (`/home/agentops/dev/md-manager/.venv/bin/python -m workflow.run_tes
    - Exit 0 with no terminal event is `error`.
    - The process group is killed on timeout.
    - The worktree and scratch dirs are removed after success, failure, timeout and `KeyboardInterrupt`. `kill_orphan`-style cleanup removes a leftover on resume.
-5. Seat context = today's context plus `features/<f>/decisions.md` from the pin. No path under the run directory appears in any seat's prompt file or argv. Finding ids are `<prefix><n>`.
+5. Seat context = today's context plus `features/<f>/decisions.md` from the pin. No seat's prompt file names a run-directory path, and no `cli` seat's argv carries the prompt or a run-directory path ([L1]). `claude` and `pi` seat argv equal today's `claude_command`/`pi_command` output, in a named regression test ([L1]). Finding ids are `<prefix><n>`.
 6. `panel.settle` returns only after every seat has ended or timed out, including a seat relaunched on resume (fake clock and sleep). After `settle`, `panel.collect` is a no-op.
-7. `panel.record_judge` writes the judge object so that `panel.json` equals the shapes of `examples/panel-judged.example.json` and `examples/panel-fallback.example.json`, and refuses an object that breaks the schema. The export `panels` section carries record 1.1.0 verbatim. A judged panel writes no `panel` attention record. Status and outcome lines follow PRD 7.7.
+7. `panel.record_judge` accepts every judge status, including the `pending`, `running` and `incomplete` objects of `examples/judge-states.example.json` ([L2]). It sets each seat finding's `accepted` and the panel's `ended_at` per [L4], so that `panel.json` equals `examples/panel-judged.example.json` and `examples/panel-fallback.example.json`. It refuses an object that breaks the schema. The export `panels` section carries record 1.1.0 verbatim. A judged panel writes no `panel` attention record. Status and outcome lines follow PRD 7.7.
 8. 2.11.0:
    - Every set is joined, and the keeps-everything test passes.
    - `report_only: false` below 2.11.0 is refused.
@@ -57,9 +57,10 @@ Your checks (`/home/agentops/dev/md-manager/.venv/bin/python -m workflow.run_tes
    - A judged panel with `providers` or `overlap_threshold` is refused.
    - `lane_review` with a `cli` reviewer is refused.
    - The `judge` reserved id is the judge lane's test, not yours.
+   - A judged panel beside any other panel is refused ([L5]).
    - Report-only panels at 2.11.0 still launch, and write a byte-identical 1.0.0 `panel.json` (this regression is yours; the judge lane proves the 2.10.0 one).
-9. `contracts/workflow/reviewers.schema.json` and `panel.schema.json` 1.1.0 (1.0.0 still accepted) validate every file in `features/review-panel-registry/examples/` that they cover, in `contract.test.ts` and in the Python suite.
-10. `docs/handoff/review-panel-seats.md` lists what you built, how the judge lane calls the ports, and anything left open. `workflow/README.md` names 2.11.0. `contracts/workflow/README.md` documents the reviewers schema and record 1.1.0.
+9. `contracts/workflow/reviewers.schema.json` and `panel.schema.json` 1.1.0 (1.0.0 still accepted) validate every file in `features/review-panel-registry/examples/` that they cover, in `contract.test.ts` and in the Python suite. This includes the three judge objects of `judge-states.example.json`, and `validate_plan` accepts `plan-panel-judged.example.json` ([L2]).
+10. `docs/handoff/review-panel-seats.md` states the mixed-panel refusal ([L5]) and that a null-model `claude` seat runs the judges' pinned model ([L7]). It also lists what you built, how the judge lane calls the ports, and anything left open. `workflow/README.md` names 2.11.0. `contracts/workflow/README.md` documents the reviewers schema and record 1.1.0.
 
 ## Stop
 

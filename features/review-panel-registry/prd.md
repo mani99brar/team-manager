@@ -27,7 +27,7 @@ Non-goals (closed list; a test or review must reject anything here):
 - No new CLI command. No change to how workers, repairs, critique or the attack pass run.
 - No EXPORT_VERSION bump: the panel record carries its own version (1.1.0) inside the existing `panels` export section.
 - No new cost role in `costs.py`: seat and judge costs live in `panel.json` only, as 2.6.0 panel costs do.
-- The controller never opens a credential file, never puts a prompt or a credential in argv, and never reads `~/.claude/channels/*/.env`, `*/notify.env` or `~/.config/pi/*.env`.
+- The controller never opens a credential file, never puts a credential in any argv or a prompt in a `cli` seat's argv (`claude`/`pi` seat argv stay today's, [L1]), and never reads `~/.claude/channels/*/.env`, `*/notify.env` or `~/.config/pi/*.env`.
 - Writing the shared list file under `~/.local/share/agent-memory/` is not a lane's job (outside every owned path); the cook copies the example there at finish ([G23]).
 
 ## 4. The reviewer list
@@ -41,7 +41,7 @@ Non-goals (closed list; a test or review must reject anything here):
 `{version: "1.0.0", reviewers: [entry, ...]}`, 1-16 entries, no other keys. Entry keys (closed):
 - `name`: `^[a-z][a-z0-9-]{0,31}$`, unique. `prefix`: `^[A-Z]$`, unique.
 - `transport`: `claude` | `pi` | `cli`.
-- `model`: string or null (null only for `claude`: Claude Code's default model). `pi` needs `provider/id`.
+- `model`: string or null (null only for `claude`; in step 1 a null-model claude seat runs the judges' pinned `--model`, [L7]). `pi` needs `provider/id`.
 - `effort`: null or `low|medium|high|xhigh|max` (`claude` only; others must be null).
 - `credential`: `"cli-login"`, or `{"file": "<path>", "env": "<NAME>"}` ([G2], [G14]): the controller checks only that the path exists (`os.stat`), never opens it, and passes the expanded path to the seat process in env `<NAME>`. `<NAME>` must match `^[A-Z][A-Z0-9_]{0,63}$`.
 - `cap`: `{timeout_minutes: 1..60 (default 15), budget_usd?: 0.5..50}`; `budget_usd` only for `claude` (it becomes `--max-budget-usd`, default 5) ([G11], [G12]).
@@ -91,7 +91,7 @@ Entry `cli` block (closed keys; example in Appendix A):
 
 - `2.11.0` joins **every** exact-match version set and the schema enum: `launch.py` (all four sets incl. `LANE_REVIEW_VERSIONS`), `guardrails.py`, `sidecar.py`, `attack.py`, `critique.py`, `panel.py`, `contracts/workflow/feature.schema.json`, `contracts/workflow/contract.test.ts`, `workflow/skills/workflow-grill/SKILL.md`. A keeps-everything test launches a 2.11.0 feature declaring `prd`, `sidecar`, `attack`, `critical`, a report-only panel, per-lane `model`/`effort`/`skills`, `critique` and `lane_review` and asserts each is accepted.
 - New judged panel form, allowed only at 2.11.0 (closed keys): `{id, stage: "review", report_only: false, seats?: [name, 1-16], prompt?: "builtin:review" | path, requirements?: [path], judge?: {timeout_minutes: 5..60 (default 30), budget_usd: 1..50 (default 15)}}`. No `providers`, no `overlap_threshold`, no `budget_usd` at the panel level.
-- At most one judged panel per feature. A judged panel with `stage: challenge` is refused (step 2). `report_only: false` below 2.11.0 is refused. Report-only panels keep their 2.6.0 form at 2.11.0.
+- At most one judged panel per feature, and in step 1 no other panel beside it ([L5]). A judged panel with `stage: challenge` is refused (step 2). `report_only: false` below 2.11.0 is refused. Report-only panels keep their 2.6.0 form at 2.11.0.
 - The reviewer id `judge` is reserved in `sessions.py` (`validate_reviewer_id`, beside the reserved node ids) for every feature; no existing feature declares it. A feature declaring a reviewer `judge` is refused at launch and prepare.
 
 ## 7. The judged review step
@@ -115,14 +115,14 @@ On a run whose plan has a judged panel, the review step starts the built-in revi
   - Every input finding id appears in exactly one ruling's `sources`; a missing, duplicated or unknown id makes the judge `incomplete` → fallback (7.5) ([G32]).
   - A `refuted` ruling with empty or uncited `evidence` (no `path:line`) is recorded as `confirmed` at the highest severity among its sources.
   - Each ruling gets `id` `J<n>` in output order and a `worker`: the lane whose `owned_paths` own its `file` (`verification.owns`), else `none`; a ruling with no file → `none`.
-- **Record:** the judge object of `panel.json` 1.1.0 (Appendix A), written through `panel.record_judge`; statuses `pending → running → judged | failed | timed_out | incomplete`.
+- **Record:** the judge object of `panel.json` 1.1.0 (Appendix A), written through `panel.record_judge`; statuses `pending → running → judged | failed | timed_out | incomplete`. Non-terminal shapes: `examples/judge-states.example.json` ([L2]). `record_judge` sets each seat finding's `accepted` and the panel's `ended_at` per [L4].
 
 ### 7.4 Verdict and review.json (judged)
 - review.json keeps its closed key set. Its `reviewers` list is the declared built-in reviewers, then `judge` (then `critique` when declared, as today). Built-in entries keep their own verdicts for the record. The `judge` entry's verdict is `blocked` when any `confirmed` ruling is P0/P1, else `approved`; its `accepted_at` is the judge's end.
 - `findings` holds the `confirmed` rulings only, each `reviewer: "judge"`, `worker` from 7.3, `requirement` when given, `disposition: "open"`, `message` = `[J<n> from <source ids>] <title> (<file>:<line>): <detail>`; plus critique's findings as today. Refuted and deferred rulings live only in `panel.json`.
 - The review's verdict = the judge entry's verdict, combined with critique's as today (critique still blocks on its own, [O4]). Built-in entries' verdicts do not gate a judged record.
 - Validators on both sides gain this judged rule, applied only when the record's `reviewers` contains `judge` **and** the caller passes judged-plan context: `pipeline.check_reviewers`/`check_review` keep their current signatures and take an optional keyword (default: today's behaviour), so every existing caller and `workflow/test_pipeline.py` pass unchanged; the viewer's `validateReviewResult` itself takes the judged-plan context (server-only gating is not enough). Every other record is validated exactly as today. `examples/review-judged.example.json` passes both with judged-plan context; the same record fails both with legacy, report-only or missing plan context.
-- The fix loop, the repair brief and `accept` read review.json as today; the one-lane rule now sees the judge's `worker`.
+- The fix loop, the repair brief and `accept` read review.json as today, with the judged context from the plan: `Pipeline.validate_review` (integrate) and `ExportRuntime` pass it ([L3]). The one-lane rule now sees the judge's `worker`.
 
 ### 7.5 Judge failure ([G10])
 Judge `failed`, `timed_out` or `incomplete`, or input over the cap → `judge.fallback: true` with the error, and review.json is written **exactly as today's rule** writes it (built-in reviewers only, unanimous, any built-in P0/P1 blocks; critique as today); panel findings stay recorded unjudged in `panel.json`. Example: `examples/panel-fallback.example.json`.
@@ -188,6 +188,10 @@ Examples (literal; both engine lanes' Python tests and the viewer's TypeScript t
 - `examples/panel-fallback.example.json`: panel record 1.1.0 after a judge timeout (fallback).
 - `examples/judge-output.example.json`: the judge job's raw output (before ids and lanes are added).
 - `examples/review-judged.example.json`: the judged review.json.
+- `examples/judge-states.example.json`: the `pending`, `running` and `incomplete` judge objects ([L2]).
+- `examples/plan-panel-judged.example.json`: the pinned `plan.panels[0]` of a judged panel naming claude, gpt, muse and argon ([L2]).
+
+Candidate-level test ([L8]): `test_judge.JudgedCandidateTests` runs the real ports and skips only where they are absent.
 
 Functions (owner lane in brackets; signatures fixed, the other lane mocks them):
 - [seats] `reviewers.load(path: Path | None = None, env=os.environ) -> dict`: reads and validates the list (`WORKFLOW_REVIEWERS_FILE`, else the default path); raises `ValueError(<path>: <first error>)`.

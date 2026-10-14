@@ -81,7 +81,47 @@ Answers to the grill questions this file left open, by the panel (each points to
 
 ## Changes after launch
 
-None yet.
+Design challenge attempt 1 (3 P1, 7 P2) on run review-panel-registry-001. The bullets below are Claude's revise text plus GPT's concrete additions; they win over the task files and the PRD.
+
+- [L1] (panel: fallback:revise-merged, challenge 1; decisions/001-challenge_paused) Supersedes the PRD 3 non-goal "never puts a prompt ... in argv", seats Constraints' "no prompt ... in any argv" and seats Acceptance 5's argv clause, but only where they cover `claude`/`pi` seats; [G14] and [G19] stand. The rule:
+  - No seat's prompt file (brief or context) names a run-directory path or carries another reviewer's findings.
+  - No `cli` seat's argv carries the prompt or a run-directory path.
+  - `claude` and `pi` seat argv equal today's `claude_command`/`pi_command` output: claude keeps its RUN_SIBLINGS Read denies, pi keeps the brief as its positional argument.
+  - No argv anywhere carries a credential or a credential-derived value.
+
+  Seats lane: a named regression test asserts that claude and pi seat argv equal today's builders; Acceptance 4's argv and prompt assertions stay cli-only. Touches seats Constraints, Acceptance 4-5, PRD 3 and 10.3.
+- [L2] (panel: fallback:revise-merged, challenge 1; decisions/001-challenge_paused) New frozen literals, added to PRD 7.3 and Appendix A:
+  - `examples/judge-states.example.json` holds the `pending`, `running` and `incomplete` judge objects.
+    - `pending` and `running` have `ended_at` null, `cost_usd` null, `rulings` [] and `fallback` false; `running` has its inputs filled.
+    - `incomplete` is terminal, with `ended_at`, an `error`, `rulings` [] and `fallback` true. Malformed raw rulings never enter `rulings`.
+  - `examples/plan-panel-judged.example.json` is the pinned `plan.panels[0]` of a judged panel whose feature names the seats claude, gpt, muse and argon. Every default is filled: the resolved `seats`, `reviewers_file` (label, sha256) and `judge` (model, effort, timeout_minutes, budget_usd, input_cap_bytes).
+
+  `panel.record_judge` accepts every PRD 7.3 status. Per lane:
+  - Seats: `panel.schema.json` 1.1.0 accepts the three judge objects and `validate_plan` accepts the plan item, with named tests (also in contract.test.ts).
+  - Judge: builds its plan fixtures and its non-terminal records from these literals; its `create=True` mocks use exactly these shapes.
+  - Viewer: zod accepts the three objects, and a `running` judge renders as "judging".
+- [L3] (panel: fallback:revise-merged, challenge 1; decisions/001-challenge_paused) Extends [G26] and judge Acceptance 4. `Pipeline.validate_review` (what `integrate` calls) and `ExportRuntime` pass judged-plan context from `self.plan` to `check_review`/`check_reviewers`. Named tests in `workflow/test_accept.py` and `workflow/test_export.py`:
+  - A judged run whose built-in entry is `blocked` and whose judge entry is `approved` integrates and exports.
+  - The same record with legacy, report-only or missing judged-plan context is refused.
+  - Critique keeps its own blocking.
+  - Non-judged outputs stay byte-identical.
+
+  Amends PRD 7.4: accept reads review.json "as today, with the judged context from the plan".
+- [L4] (panel: fallback:revise-merged, challenge 1; decisions/001-challenge_paused) `panel.record_judge` sets each seat finding's `accepted` to true exactly when its id is a source of a `confirmed` ruling in a `judged` record; it is false otherwise, and all false on fallback. It also sets the panel's `ended_at` to the judge's `ended_at`. Named test: feeding `panel-judged.example.json`'s judge object reproduces that example's findings and `ended_at`; the fallback example likewise. Adds to PRD 7.3 and seats Acceptance 7.
+- [L5] (panel: fallback:revise-merged, challenge 1; decisions/001-challenge_paused) In step 1 a feature that declares a judged panel beside any other panel is refused at launch, with a named test and a line in `docs/handoff/review-panel-seats.md`. The schemas and the viewer zod pin only the pure judged 1.1.0 record and the 1.0.0 record. Adds to PRD 6 and seats Acceptance 8.
+- [L6] (panel: fallback:revise-merged, challenge 1; decisions/001-challenge_paused) Judge tests compare values only within one example. Across `judge-output`, `panel-judged` and `review-judged` they compare key sets and types only; `test_judge.py` has no cross-example value equality. The session does not edit the examples' messages. Judge Acceptance 3-4.
+- [L7] (panel: fallback:revise-merged, challenge 1; decisions/001-challenge_paused) In step 1 a `claude` seat with `model: null` runs the judges' pinned `--model`. The seats handoff and PRD 4.2 say so; [G5]'s "Claude Code's default model" becomes a later config change. The viewer handoff records one manual check of `claude --resume <id>` for a print job whose cwd was removed, saying whether it resumes; the sessions row keeps the scenario's wording either way.
+- [L8] (panel: fallback:revise-merged, challenge 1; decisions/001-challenge_paused) GPT's addition: a candidate-level integration test. The judge lane adds `test_judge.JudgedCandidateTests`, which uses the real `panel.settle`, `panel.record_judge` and validators (no mocks of these ports) to prove:
+  - running→judged and running→incomplete persistence, with `panel.json` validating at each write;
+  - the resume of a non-terminal judge;
+  - that a successful judging writes `fallback: false` and the judged review.json.
+
+  It skips, with the reason "seats ports absent (lane worktree)", only when `panel.settle` or `panel.record_judge` is missing. It therefore runs at candidate verification, where every lane's suite runs on the merged tree. Adds to PRD 10.5-10.8.
+
+Not changed:
+- The Muse entry's `env.pass: []` stands. The session ran the challenge's cheap experiment, and the login works with an environment built from nothing (`decisions/001-challenge_paused/extra.md`).
+- The seats lane's effort stays medium, because feature.json is frozen after prepare.
+- The sequential-lane alternative is not taken; [L2]'s literals carry the cross-lane shapes instead.
 
 ## Deferred
 
