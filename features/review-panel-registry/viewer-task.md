@@ -14,9 +14,8 @@ Spec: `features/review-panel-registry/prd.md` sections 7.4, 7.7 and 8, plus Appe
 
 ## Context
 
-- **Follow-up run 006 ([L14]): first restore your lane's run-005 snapshot of your owned paths**, then check that nothing differs; the last command prints nothing once restored:
-  `git restore --source=a03821237992c845d924dedee9f853ffc8f6c2a2 --staged --worktree -- server contracts/projects src/projects tests/unit tests/project-workflows docs/handoff/review-panel-viewer.md`
-  `git diff --stat a03821237992c845d924dedee9f853ffc8f6c2a2 -- server contracts/projects src/projects tests/unit tests/project-workflows docs/handoff/review-panel-viewer.md`
+- **Follow-up run 007 ([L15]): the controller restores your owned paths from candidate `d362133`** (`--restore-from`). Before you change anything, check that nothing differs; this prints nothing:
+  `git diff --stat d362133faa947620d7a434f417b008c8537c8393 -- server contracts/projects src/projects tests/unit tests/project-workflows docs/handoff/review-panel-viewer.md`
 - **Literal records:** `features/review-panel-registry/examples/`. These are `panel-judged.example.json` (record 1.1.0, judged, blocked by J1), `panel-fallback.example.json` (judge timed out, a seat `auth_required`, Argon `unavailable`), `review-judged.example.json` and `reviewers.example.json`. Load them as literals in your contract and unit tests, and seed the browser runs from them.
 - **Panel contract today:** `contracts/projects/v1.ts:754-838` (`PANEL_TRANSPORTS` :767, provider :781, finding :794, entry :808, results `contract_version '1.9.0'` :834) and `validatePanelResults` :1198. The review validator is `validateReviewResult` :1067-1091 (strict `reviewFindingSchema` :204, `reviewerEntrySchema` :221). Generated JSON comes from `npm run contracts:export`.
 - **Server:** `server/projects.ts:1317` (the panels route) and :2218 (`resolvePanelRecord`, live `<run>/panel.json` first, then the export's `panels` section). The review sections are `z.strictObject` (`server/projects.ts:188-238`). Sessions: `server/sessions.ts:160/258/823` (`panel` node, `panel_provider` rows).
@@ -41,7 +40,7 @@ Spec: `features/review-panel-registry/prd.md` sections 7.4, 7.7 and 8, plus Appe
 
 Your checks (build, lint, `npm run test:contracts`, `npm run test:unit` and the Playwright suite) pass, with these named tests and scenarios:
 
-0. **Run 006 ([L14]):** restore your run-005 snapshot `a038212`. `git diff --stat a038212 -- <your owned paths>` stays empty, and you change nothing; your code already meets the items below, including the run-005 fix. Run your checks and hand off.
+0. **Run 007 ([L15]):** your owned paths start at candidate `d362133`. `git diff --stat d362133 -- <your owned paths>` stays empty, and you change nothing; your code already meets the items below. Run your checks and hand off.
 1. **Contracts:**
    - The zod schemas accept every example in `features/review-panel-registry/examples/` that they cover.
    - They reject a 1.1.0 record with transport `foo`, a seat status outside PRD 8's list, and a judge ruling outside `confirmed|refuted|deferred`.
