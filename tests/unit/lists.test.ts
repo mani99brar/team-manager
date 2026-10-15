@@ -666,6 +666,13 @@ describe('a running latest run whose controller has read not_running for 15 s ne
     assert.deepEqual(rowTime(run, NOW + 3_600_000, cls), time)
     assert.equal(rowTime(run, NOW).kind, 'live')
   })
+  test('its summary says the controller is not running; a served interrupt keeps "the controller stopped"', () => {
+    const moved = running('r', '2026-03-20T10:00:00Z')
+    assert.match(rowSummary(moved, new Map(), 'interrupted'), /controller is not running/)
+    const served = running('s', '2026-03-20T10:00:00Z', { kind: 'interrupted', node_id: 'handoff', since: '2026-03-20T10:30:00Z' })
+    assert.match(rowSummary(served, new Map(), 'interrupted'), /the controller stopped/)
+    assert.doesNotMatch(rowSummary(served, new Map(), 'interrupted'), /not running/)
+  })
 })
 
 describe('a row\'s time: dates and days for a stopped run, a span only while it runs (M14)', () => {

@@ -44,7 +44,7 @@ const contextOf = (row: Row, project = true) => {
 const namesOf = (row: Row) => contextOf(row).filter((name): name is string => Boolean(name)).join(' · ')
 const hrefOf = (row: Row) => runPathname(row.project.project_id, row.workflow.workflow_id, row.run.run_id)
 
-/** What a Needs-you card's chip says waits, in words beside its colour. */
+/** What a Needs-you card's chip says waits, in words beside its colour; a run moved there unserved (D32) says "controller not running". */
 const WAITING_LABEL: Record<NeedKind, string> = {
   question: 'question waits', pane: 'pane needs you', approval: 'approval waits', decision: 'decision waits', interrupted: 'run interrupted',
 }
@@ -64,7 +64,7 @@ function NeedsCard({ row, kind, now, onNavigate }: { row: Row; kind: NeedKind; n
         <span className="home-card-head">
           <span className="home-card-id">{run.run_id}</span>
           <span className="visually-hidden">Waiting on you: </span>
-          <Chip tone="warn">{WAITING_LABEL[kind]}</Chip>
+          <Chip tone="warn">{kind === 'interrupted' && run.activity?.attention?.kind !== 'interrupted' ? 'controller not running' : WAITING_LABEL[kind]}</Chip>
           <StatusBadge status={run.status} accepted={Boolean(run.accepted)} />
         </span>
         <span className="home-card-context">{namesOf(row)}</span>

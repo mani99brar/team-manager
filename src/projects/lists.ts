@@ -338,7 +338,12 @@ export function rowSummary(run: Pick<RunSummary, 'status' | 'activity' | 'accept
   const kind = needs
   const node = activity.attention?.node_id ?? null
   if (kind === 'decision') return `${node === null ? 'Design challenge' : labels.get(node) ?? 'Design challenge'} paused · your decision waits`
-  if (kind === 'interrupted') return `Interrupted at ${activity.focus?.label ?? (node === null ? 'a step' : labels.get(node) ?? node)} · the controller stopped`
+  if (kind === 'interrupted') {
+    const at = activity.focus?.label ?? (node === null ? 'a step' : labels.get(node) ?? node)
+    // Served no interrupt, the list moved it (D32): its controller reads not running while its sessions may still run.
+    if (activity.attention?.kind !== 'interrupted') return `Interrupted at ${at}: the controller is not running; sessions keep running`
+    return `Interrupted at ${at} · the controller stopped`
+  }
   if (kind === 'question') return `${who(node)} asked a question · deadline paused`
   if (kind === 'pane') return `${who(node)} needs attention in its pane`
   if (kind === 'approval') return `${node === null ? 'A step' : labels.get(node) ?? node} awaits your decision`
