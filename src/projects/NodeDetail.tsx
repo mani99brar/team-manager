@@ -1,7 +1,7 @@
 import { useCallback, useMemo, type ReactNode } from 'react'
 import { attemptResultUris, type Now, type Timeline } from '../../contracts/projects/triage.ts'
 import { fetchReviewResult, isBlockingFinding, paths, scopedResultPath, scopedReviewPath, type AttackResult, type PanelResults, type RunDetail, type RunInputs, type RunScope, type Sessions, type SidecarLedger, type WorkerResult, type WorkflowEvent } from './api.ts'
-import { decisionsForNode, isProjectedSessionNode, laneReviewerRowsOf, laneReviewOf, reviewerRowOf, sessionsForNode } from './sessions/model.ts'
+import { decisionsForNode, isProjectedSessionNode, laneReviewerRowsOf, laneReviewOf, PANEL_NODE_ID, panelMeaning, reviewerRowOf, sessionsForNode } from './sessions/model.ts'
 import { LaneReviewBody, NightShiftBlock, PanelSessions, ReviewerNodeBody, SessionBlock } from './sessions/Sessions.tsx'
 import { ReviewerFindings } from './ReviewDetail.tsx'
 import { ChallengeHeadline } from './Challenge.tsx'
@@ -228,6 +228,11 @@ export function NodeDetail({ scope, detail, definition, node, attempt, events, o
     timeline, nodeId: node.node_id, attempt: isLatest ? null : shownAttempt, events: nodeEvents, latest,
     error: headerStatus === 'failed' ? resultData?.error?.message ?? failure : null,
   })
+  // PRD 3.2: a failed or timed-out panel is a `succeeded` node (report-only); its header says the panel failed, from the
+  // panels route's record, rather than "This step completed.", and says so as well when that record did not load.
+  const meaning = node.node_id === PANEL_NODE_ID && isLatest && headerStatus === 'succeeded' && (panels.status === 'ready' || panels.status === 'error')
+    ? panelMeaning(panels.status === 'ready' ? panels.data : null) : null
+  const sessionsMissing = sessions.status === 'loading' || sessions.status === 'idle' ? 'Loading the run\'s sessions…' : 'No session of this run is recorded.'
   // A live or failed verification counts its attempts against the cap, which a repair restarts (5.3).
   const cap = recordedInputs?.max_verification_attempts ?? null
   const revision = (isVerify || isCandidate) && recorded && timeline !== null && cap !== null && (headerStatus === 'running' || headerStatus === 'failed')
@@ -297,6 +302,7 @@ export function NodeDetail({ scope, detail, definition, node, attempt, events, o
         attemptHref={attemptHref}
         verdict={verdict}
         next={next}
+        meaning={meaning}
         onNavigate={onNavigate}
       />
 
@@ -392,19 +398,20 @@ export function NodeDetail({ scope, detail, definition, node, attempt, events, o
           />
         ) : isProjectedSession ? (
           // Run-sessions: a projected node is a session of the review (a reviewer, the panel) or of a verify step (a lane review).
-          sessionsData === null ? (
-            <NodeSection sectionKey="session" title="Session" testId="session-section">
-              <p className="projects-muted" data-testid="session-not-recorded">{sessions.status === 'loading' || sessions.status === 'idle' ? 'Loading the run\'s sessions…' : 'No session of this run is recorded.'}</p>
-            </NodeSection>
-          ) : node.node_id === 'panel' ? (
+          // The panel's own record (its review-stage panels, its error) comes from the panels route: it shows without the sessions.
+          node.node_id === PANEL_NODE_ID ? (
             <>
               <NodeSection sectionKey="panel" title="Panel" testId="panel-section">
-                <ProviderPanelBody record={panels} onRetry={onRetryPanels} />
+                <ProviderPanelBody record={panels} onRetry={onRetryPanels} stage="review" />
               </NodeSection>
               <NodeSection sectionKey="provider-sessions" title="Provider sessions" testId="panel-sessions-section">
-                <PanelSessions sessions={sessionsData} />
+                {sessionsData === null ? <p className="projects-muted" data-testid="session-not-recorded">{sessionsMissing}</p> : <PanelSessions sessions={sessionsData} />}
               </NodeSection>
             </>
+          ) : sessionsData === null ? (
+            <NodeSection sectionKey="session" title="Session" testId="session-section">
+              <p className="projects-muted" data-testid="session-not-recorded">{sessionsMissing}</p>
+            </NodeSection>
           ) : node.node_id.startsWith('lane-review-') ? (
             <NodeSection sectionKey="lane-review" title="Lane review" testId="lane-review-section">
               {laneReviewOf(sessionsData, node.node_id)

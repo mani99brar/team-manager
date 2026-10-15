@@ -333,15 +333,38 @@ const ADVISORY_NODE_IDS: ReadonlySet<string | null> = new Set([SIDECAR_NODE_ID, 
 /**
  * A run-sessions projected stage node (`reviewer-<id>`, `panel`, `lane-review-<lane>-<n>`): a card for a session beside the
  * review gate or a verify step, advisory like the sidecar and the attack pass ([G3]). It never takes the focus, the Now
- * banner or the run's state word, and its events never speak for the run.
+ * banner or the run's state word, and its events never speak for the run. The id shape alone does not make a node one: see
+ * `projectedSessionNodeIds`.
  */
 export function isProjectedSessionNode(nodeId: string | null): boolean {
   return nodeId === 'panel' || (typeof nodeId === 'string' && (nodeId.startsWith('reviewer-') || nodeId.startsWith('lane-review-')))
 }
 
-/** Whether a node id is advisory: the fixed advisory nodes or a projected session node. */
-function isAdvisoryNode(nodeId: string | null): boolean {
-  return ADVISORY_NODE_IDS.has(nodeId) || isProjectedSessionNode(nodeId)
+const PROJECTED = new WeakMap<RunDetail, ReadonlySet<string>>()
+
+/**
+ * The projected session nodes the run detail joined (PRD 4): a node of the projected id shape and kind `review` with the edges
+ * the projection gives it, a reviewer or panel node that `review` depends on, a lane-review node `lane-review-<lane>-<n>` that
+ * depends on its `verify_<lane>` alone. A pinned step that only shares the id shape (the projection refuses to join a node
+ * beside it) is an ordinary step: it can be the focus.
+ */
+export function projectedSessionNodeIds(detail: RunDetail): ReadonlySet<string> {
+  const cached = PROJECTED.get(detail)
+  if (cached) return cached
+  const gate = new Set(detail.definition.nodes.find(node => node.node_id === 'review')?.depends_on ?? [])
+  const laneReview = (nodeId: string, dependsOn: readonly string[]) => {
+    const prefix = dependsOn.length === 1 && dependsOn[0].startsWith('verify_') ? `lane-review-${dependsOn[0].slice('verify_'.length)}-` : null
+    return prefix !== null && nodeId.startsWith(prefix) && /^\d+$/.test(nodeId.slice(prefix.length))
+  }
+  const ids = new Set(detail.definition.nodes.filter(node => node.kind === 'review' && isProjectedSessionNode(node.node_id)
+    && (node.node_id.startsWith('lane-review-') ? laneReview(node.node_id, node.depends_on) : gate.has(node.node_id))).map(node => node.node_id))
+  PROJECTED.set(detail, ids)
+  return ids
+}
+
+/** Whether a node is advisory: the fixed advisory nodes or a projected session node the run detail joined. */
+function isAdvisoryNode(detail: RunDetail, nodeId: string | null): boolean {
+  return ADVISORY_NODE_IDS.has(nodeId) || (nodeId !== null && projectedSessionNodeIds(detail).has(nodeId))
 }
 
 // ---- Small helpers ------------------------------------------------------------------------------------------------
@@ -787,7 +810,7 @@ function computeTimeline(run: RunData): Timeline {
 
   // Rule 10: the run spans creation to the last non-controller activity (events, the verdict, stop receipts), never `updated_at`.
   const moments: { at: string; source: InstantSource; controller: boolean; pid: boolean; text: string }[] = [
-    ...rows.filter(row => !isAdvisoryNode(row.node))
+    ...rows.filter(row => !isAdvisoryNode(run.detail, row.node))
       .map(row => ({ at: row.event.occurred_at, source: 'event' as const, controller: row.node === null || row.marker !== null, pid: row.marker === 'controller_start', text: row.text })),
     ...(inputs?.workers ?? []).flatMap(worker => worker.stop?.confirmed_at
       ? [{ at: worker.stop.confirmed_at, source: 'receipt' as const, controller: false, pid: false, text: `${worker.node_id} stopped (stop receipt)` }] : []),
@@ -891,7 +914,7 @@ function buildMarkers(run: RunData, rows: Row[]): Marker[] {
 
 /** Rule 6: silences over two minutes, classified by the row before them and the spans they fall inside (never the sidecar's). */
 function buildGaps(run: RunData, rows: Row[], allSpans: Span[]): Gap[] {
-  const spans = allSpans.filter(span => !isAdvisoryNode(span.node_id))
+  const spans = allSpans.filter(span => !isAdvisoryNode(run.detail, span.node_id))
   const moments = [
     ...rows.map(row => ({ at: row.event.occurred_at, row })),
     ...spans.flatMap(span => [span.start, span.end]
@@ -989,6 +1012,7 @@ function focusOf(detail: RunDetail, rows: readonly Row[]): Focus | null {
   const depth = depths(detail)
   const since = (nodeId: string) => statusRows(rows, nodeId).at(-1)?.event.occurred_at ?? repairOf(detail, nodeId)?.recorded_at ?? null
   const repairIds = new Set(repairsOf(detail).map(repair => repair.node_id))
+  const projected = projectedSessionNodeIds(detail)
   // A running repair session is the run's focus: the steps it re-enters read running beside it and come second.
   const runningRepair = detail.snapshot.nodes.filter(node => repairIds.has(node.node_id) && node.status === 'running')
   if (runningRepair.length) {
@@ -1000,7 +1024,7 @@ function focusOf(detail: RunDetail, rows: readonly Row[]): Focus | null {
     || detail.snapshot.nodes.some(node => !repairIds.has(node.node_id) && (node.status === 'running' || node.status === 'awaiting_approval'))
   const pick = (wanted: readonly NodeStatus[], skip: string | null = null) => {
     const matches = detail.snapshot.nodes.filter(node => wanted.includes(node.status) && node.node_id !== skip && node.node_id !== ATTACK_NODE_ID
-      && !isProjectedSessionNode(node.node_id)
+      && !projected.has(node.node_id)
       && !(hideBlockedRepairs && repairIds.has(node.node_id)))
     if (!matches.length) return null
     // Parallel lanes share a column: the tie goes to the latest event.
@@ -1008,7 +1032,7 @@ function focusOf(detail: RunDetail, rows: readonly Row[]): Focus | null {
     return tied.reduce((best, node) => ms(since(node.node_id) ?? '') > ms(since(best.node_id) ?? '') ? node : best)
   }
   // The sidecar runs beside the lanes for the whole work phase: it is the running focus only when nothing else runs.
-  const othersRun = detail.snapshot.nodes.some(node => node.status === 'running' && !isAdvisoryNode(node.node_id))
+  const othersRun = detail.snapshot.nodes.some(node => node.status === 'running' && !isAdvisoryNode(detail, node.node_id))
   let node = pick(['failed', 'paused', 'awaiting_approval']) ?? pick(['running'], othersRun ? SIDECAR_NODE_ID : null)
   // The attack pass runs beside the review inside the review step (docs/PRD_ATTACK_PASS.md 4.6). When it runs on alone after
   // the review decided — approved, so the review node reads `succeeded` (a blocked review reads `failed` and is already the
@@ -1030,7 +1054,7 @@ function scopeStart(detail: RunDetail, rows: readonly Row[], focus: Focus | null
   if (!focus) return 0
   const running = statusRows(rows, focus.node_id).filter(row => row.status === 'running').at(-1)
   if (running) return running.event.sequence
-  const parents = (detail.definition.nodes.find(node => node.node_id === focus.node_id)?.depends_on ?? []).filter(parent => !isAdvisoryNode(parent))
+  const parents = (detail.definition.nodes.find(node => node.node_id === focus.node_id)?.depends_on ?? []).filter(parent => !isAdvisoryNode(detail, parent))
   return rows.filter(row => row.node !== null && parents.includes(row.node) && row.status !== null && row.marker === null).at(-1)?.event.sequence ?? 0
 }
 
@@ -1092,7 +1116,7 @@ export function deriveAttention(run: RunData & { activity?: ServedActivity | nul
   // The sidecar's rows (an escalation included) wait on nobody: no new attention kind (docs/PRD_REVIEW_SIDECAR.md 4.6).
   // An accepted run (L12) waits on nobody.
   if (acceptedOf(run.detail)) return { top: null, nodes: new Map() }
-  const rows = classify(run.detail, run.events.filter(event => !isAdvisoryNode(event.node_id)))
+  const rows = classify(run.detail, run.events.filter(event => !isAdvisoryNode(run.detail, event.node_id)))
   const found = new Map<string, Attention>()
   for (const item of waitingQuestions(run, rows)) {
     const node = `launch_${item.lane}`
@@ -1667,7 +1691,7 @@ function reviewBlockedNow(context: Context): Draft | null {
 function runningNow(context: Context): Draft | null {
   // Also a step re-entered while it still reads failed (a live span), and the focus a resumed controller re-entered (5 b).
   const resumed = interruptionNote(context)?.resumed ?? null
-  const running = context.run.detail.snapshot.nodes.filter(node => !isAdvisoryNode(node.node_id) && (node.status === 'running' || context.timeline.byNode.get(node.node_id)?.at(-1)?.live))
+  const running = context.run.detail.snapshot.nodes.filter(node => !isAdvisoryNode(context.run.detail, node.node_id) && (node.status === 'running' || context.timeline.byNode.get(node.node_id)?.at(-1)?.live))
   if (!running.length && !resumed && context.status !== 'running') return null
   // The attack pass runs on inside the review step after the review decided (focusOf keeps the review): the review stays the
   // current step, so the banner names it, never "between steps" and never the report-only attack node (PRD_ATTACK_PASS 4.6).

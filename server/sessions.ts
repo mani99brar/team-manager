@@ -638,16 +638,18 @@ async function workerRows(input: SessionsInput): Promise<SessionRow[]> {
     const cost = costFileSchema.safeParse(await readJson(input.directory, [`${lane}.cost.json`]))
     if (!interactive.success && !cost.success) continue
     const receipt = interactive.success ? interactive.data : null
-    const costFile = cost.success ? cost.data : null
+    // A cost file of another session (an earlier launch of this lane, beside a relaunch's receipt) is not this session's.
+    const costFile = cost.success && !(receipt?.session_id && cost.data.session_id && receipt.session_id !== cost.data.session_id) ? cost.data : null
     const sessionId = sessionIdOf(receipt?.session_id ?? costFile?.session_id)
     const costUsd = nonNeg(costFile?.cost_usd)
     const completion = completionSchema.safeParse(await readJson(input.directory, [`${lane}.completion.json`]))
     const stop = stopSchema.safeParse(await readJson(input.directory, [`${lane}.stop.json`]))
+    const status = workerStatus(receipt, completion.success ? completion.data : null, stop.success ? stop.data : null)
     rows.push(row({
       key: `worker:${lane}`, role: 'worker', label: `Worker · ${lane}`, node_id: launchNode, lane,
-      model: receipt?.requested?.model ?? costFile?.models?.[0] ?? null,
-      status: workerStatus(receipt, completion.success ? completion.data : null, stop.success ? stop.data : null),
-      started_at: iso(receipt?.launch_requested_at), ended_at: iso(costFile?.recorded_at),
+      model: receipt?.requested?.model ?? costFile?.models?.[0] ?? null, status,
+      // A cost is recorded while the session runs: its time is when it was recorded, not when the session ended.
+      started_at: iso(receipt?.launch_requested_at), ended_at: status === 'running' ? null : iso(costFile?.recorded_at),
       duration_seconds: duration(costFile?.duration_ms), cost_usd: costUsd, cost_kind: costKind(costUsd, false), session_id: sessionId,
       resume: await composeResume(sessionId, receipt?.worktree ?? null, input.resume),
     }))
@@ -740,28 +742,32 @@ async function reviewerCost(input: SessionsInput, id: string, round: number, lat
 }
 
 /**
- * How many archived review rounds the run directory holds: the largest k for which every `review.round-1..k.json` exists
- * (the controller archives rounds in order). Bounded by the files listed, so a stray `review.round-99999999.json` neither
- * loops the request nor labels the running round ([L12] 3).
+ * The archived review rounds the run directory holds, ascending: the `review.round-<k>.json` files that exist ([L12] 3). The
+ * controller numbers a round after every round in `review-rounds.json`, and a restored round's file went back to
+ * `review.json`, so a round can be missing: with the fix loop's rounds recorded, a listed k counts when the loop names it;
+ * without them, the run of k from 1 without a gap. Bounded by the files listed, so a stray `review.round-99999999.json`
+ * neither loops the request nor labels the running round.
  */
-async function archivedRoundCount(input: SessionsInput): Promise<number> {
+async function archivedRounds(input: SessionsInput): Promise<number[]> {
   const listed = numbered(await listFiles(input.directory, []), 'review.round', '.json')
-  let count = 0
+  const recorded = new Set((input.fixLoop?.review_rounds ?? []).map(round => round.round))
+  if (recorded.size > 0) return listed.filter(k => recorded.has(k))
+  const rounds: number[] = []
   for (const k of listed) {
-    if (k !== count + 1) break
-    count = k
+    if (k !== rounds.length + 1) break
+    rounds.push(k)
   }
-  return count
+  return rounds
 }
 
 async function reviewerRows(input: SessionsInput): Promise<SessionRow[]> {
   const rows: SessionRow[] = []
   const projected = new Set(projectedReviewerIds(input.nodes))
   const nodeOf = (id: string) => projected.has(id) ? reviewerNodeId(id) : input.definition.nodes.some(node => node.node_id === 'review') ? 'review' : null
-  const archived = await archivedRoundCount(input)
+  const archived = await archivedRounds(input)
   // The latest round: the export's decided reviewers, or (while a round runs and the section is null) the launched plan reviewers.
   const decided = input.review !== null
-  const round = decided ? input.review!.round ?? input.review!.attempt : archived + 1
+  const round = decided ? input.review!.round ?? input.review!.attempt : (archived.at(-1) ?? 0) + 1
   const ids = decided ? input.review!.reviewers.map(entry => entry.reviewer_id) : drawnReviewerIds(input.nodes)
   for (const id of ids) {
     const entry = decided ? input.review!.reviewers.find(candidate => candidate.reviewer_id === id) ?? null : null
@@ -791,7 +797,7 @@ async function reviewerRows(input: SessionsInput): Promise<SessionRow[]> {
     }))
   }
   // Earlier rounds: each archived `review.round-<k>.json` names every reviewer's verdict and findings for that round.
-  for (let k = 1; k <= Math.min(archived, round - 1); k += 1) {
+  for (const k of archived.filter(n => n < round)) {
     const parsed = archivedRoundSchema.safeParse(await readJson(input.directory, [`review.round-${k}.json`]))
     if (!parsed.success) continue
     for (const previous of parsed.data.reviewers ?? []) {

@@ -78,11 +78,18 @@ test(`[scenario:sessions-stage] On the seeded sessions run, the stage shows 'Rev
   for (const id of await nowCards.evaluateAll(cards => cards.map(item => item.getAttribute('data-graph-node')))) expect(PROJECTED).not.toContain(id)
   const banner = await page.getByTestId('run-now').innerText()
   for (const label of ['Reviewer ·', 'Lane review ·']) expect(banner).not.toContain(label)
-  // The sheet of a reviewer card reads its session facts, never "the run waits elsewhere".
+  // Each projected card names its own executor; the node page's header repeats the same phrase (sessions-reviewer).
+  for (const [id, phrase] of [['reviewer-general', 'one reviewer'], ['panel', 'a multi-provider panel'], ['lane-review-server-1', 'one lane reviewer']] as const) {
+    await expect(card(page, id)).toHaveAttribute('aria-label', new RegExp(`, executed by ${phrase}(, |$)`))
+  }
+  // The sheet of a reviewer card reads its session facts, never "the run waits elsewhere"; it points at the step page's
+  // resume command instead of saying there is nothing to type.
   await openStepSheet(page, 'reviewer-general')
   await expect(stepSheet(page).getByTestId('sheet-facts')).toContainText(durationText(2400)!)
   await expect(stepSheet(page).getByTestId('sheet-facts')).toContainText('claude-opus-5-5')
   await expect(stepSheet(page).getByTestId('sheet-session-note')).toContainText('not a step the run waits at')
+  await expect(stepSheet(page).getByTestId('sheet-session-note')).toContainText('Its resume command, when it has one, is on the step page.')
+  await expect(stepSheet(page).getByTestId('sheet-session-note')).not.toContainText('nothing to type')
   await stepSheet(page).getByRole('button', { name: 'Close step details' }).click()
   await attach(page, testInfo, 'sessions-stage')
 
@@ -99,6 +106,9 @@ test(`[scenario:sessions-stage] On the seeded sessions run, the stage shows 'Rev
 
 test(`[scenario:sessions-lane-review] The 'Lane review · server · round 1' page lists its reviewer (transport, model, status, duration, cost), every finding with severity, file:line, title and detail, the snapshot's short sha and 'Fix round started: repair 1' linking to repair-1; the viewer round says the engine's no-fix words; each card says the same in short form (${phase})`, async ({ page }, testInfo) => {
   await page.goto(nodePage(RUN_SESSIONS, 'lane-review-server-1'))
+  // The header names the lane reviewer and points at the result below, never "This step completed." beside its P1.
+  await expect(page.getByTestId('node-executor')).toHaveText('one lane reviewer')
+  await expect(page.getByTestId('node-status-meaning')).toHaveText('The lane review finished; its result is below.')
   const server = page.getByTestId('lane-review-body')
   const reviewer = server.getByTestId('lane-reviewer')
   await expect(reviewer).toHaveCount(1)
@@ -141,6 +151,10 @@ async function expectSessionFacts(page: Page, row: SessionRow) {
 
 test(`[scenario:sessions-reviewer] The 'Reviewer · general' page shows its session block and resume command (the ~/ form on the exposed project in the worker phase, the bare form with "run it in the session's worktree" on the unexposed one), its verdict and only its own findings, its earlier round's verdict; coverage says late blocked; the critique page shows its session and findings; no absolute path (${phase})`, async ({ page }, testInfo) => {
   await page.goto(nodePage(RUN_SESSIONS, 'reviewer-general'))
+  // The header names the reviewer as its stage card does and leads with its (blocked) verdict, never "This step completed."
+  // ([scenario:reviewer-verdict] below checks the lead in full).
+  await expect(page.getByTestId('node-executor')).toHaveText('one reviewer')
+  await expect(page.getByTestId('node-status-meaning')).toHaveText('Blocked · round 2 · 2 open P1 · session succeeded')
   const body = page.getByTestId('reviewer-body')
   await expect(body.getByTestId('reviewer-verdict')).toContainText('blocked')
   await expect(body.getByTestId('reviewer-verdict')).toContainText('round 2')
@@ -468,9 +482,12 @@ test(`[scenario:sessions-phone] At 390 px the reviewer, panel and lane-review ca
     const rowBox = (await rows.nth(i).boundingBox())!
     expect(rowBox.width).toBeGreaterThan(sectionBox.width - 4)
   }
+  // Every Claude row's resume command stays behind its Show command toggle, so the list stays one short block per row.
+  await expect(section.getByTestId('session-resume-toggle')).toHaveCount(PAYLOAD.sessions.filter(row => row.resume).length)
+  await expect(section.getByTestId('session-resume-command')).toHaveCount(0)
   const minHeight = async (scope: ReturnType<Page['locator']>) => {
     await expect(scope.first()).toBeVisible()
-    const controls = scope.locator('a, button')
+    const controls = scope.locator('a:visible, button:visible, summary:visible')
     const count = await controls.count()
     expect(count).toBeGreaterThan(0)
     for (let i = 0; i < count; i += 1) {

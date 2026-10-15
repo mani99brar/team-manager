@@ -10,7 +10,7 @@ import assert from 'node:assert/strict'
 import type { NightShiftDecision, SessionRow, Sessions } from '../../contracts/projects/sessions.ts'
 import {
   aggregateCostText, costText, decisionsForNode, durationText, fixRoundShort, fixRoundText, groupSessions, jevText, laneResultText,
-  nightShiftCountText, nightShiftNodes, outcomeText, providerText, resumeText, RESUME_NOTE, reviewerRoundsOf, reviewerTone, sessionsForNode,
+  nightShiftCountText, nightShiftNodes, outcomeText, panelMeaning, providerText, resumeText, RESUME_NOTE, reviewerRoundsOf, reviewerTone, sessionsForNode,
   sessionsCueText, spentText, stageCardOf, totalsText,
 } from '../../src/projects/sessions/model.ts'
 import { stageExecutor } from '../../src/projects/signal/executor.ts'
@@ -40,8 +40,8 @@ test('stageCardOf: the panel card aggregates its providers; costs stay apart', (
   assert.deepEqual([panel.word, panel.tone, panel.openP01, panel.cost], ['reviewed', 'ok', 1, '$1.10 reported by Claude · $0.20 covered'])
   assert.deepEqual(panel.models, ['openai-codex/gpt-6-sol', 'claude'])
   assert.equal(panel.did, '2 of 2 providers answered; 1 open P0/P1.')
-  // Until the panel record has loaded there is no card: the stage keeps the node's served status, never a provider-derived word.
-  assert.equal(stageCardOf(PAYLOAD, 'panel'), null)
+  // Until the panel record has loaded the card says "not recorded" in the neutral tone, never a provider-derived word.
+  assert.equal(stageCardOf(PAYLOAD, 'panel')!.word, 'not recorded')
 })
 
 type PanelEntry = (typeof PANEL)['panels'][number]
@@ -77,6 +77,46 @@ test('panelCard: open P0/P1 counts the findings the panel accepted, once each, n
   const card = stageCardOf(twoRaised, 'panel', record)!
   assert.equal(card.openP01, 1)
   assert.equal(card.did, '2 of 2 providers answered; 1 open P0/P1.')
+})
+
+test('panelCard: when the panels route fails or has not answered, the card never claims the node\'s served succeeded (run-sessions-006 review B)', () => {
+  // The panel node's served status is `succeeded` for a failed panel too (PRD 3.2), so an unread record reads not recorded.
+  const detail = injectSessionNodes(runDetails[RUN_SESSIONS]!)
+  assert.equal(detail.snapshot.nodes.find(node => node.node_id === 'panel')!.status, 'succeeded')
+  const nodes = stageNodes({ detail, rows: [], timeline: null, events: [], inputs: null, review: null, attention: null, reviewRound: null, sessions: PAYLOAD, panels: null }, formatSpan)
+  const node = nodes.find(entry => entry.id === 'panel')!
+  assert.deepEqual([node.status, node.word, node.tone, node.openFindings, node.cost], ['succeeded', 'not recorded', 'idle', null, 'cost not recorded'])
+  assert.equal(node.did, 'The panel record has not loaded, so its state is not recorded.')
+  for (const sessions of [PAYLOAD, null]) {
+    const card = stageCardOf(sessions, 'panel', null)!
+    assert.notEqual(card.word, 'succeeded')
+    assert.deepEqual([card.word, card.tone], ['not recorded', 'idle'])
+  }
+})
+
+test('panelCard: the Panel card reads the review-stage panels only, never the design challenge\'s (run-sessions-006 review D)', () => {
+  // The panel-challenge shape: a challenge-stage panel that succeeded (two providers answered, one accepted P1) beside the
+  // review stage's pending panel. The card is the review panel's: not started, no providers answered, no open P0/P1.
+  const challenge = { ...PANEL.panels[0]!, id: 'challenge-panel', stage: 'challenge' as const, status: 'succeeded' as const, providers: [provider('a/x', 'ok'), provider('b/y', 'ok')], findings: [finding('f1', 'P1', true, ['a/x', 'b/y'])] }
+  const review = { ...PANEL.panels[0]!, status: 'pending' as const, started_at: null, ended_at: null, providers: [provider('a/x', 'pending'), provider('b/y', 'pending')], findings: [] }
+  const card = stageCardOf(PAYLOAD, 'panel', { panels: [challenge, review] })!
+  assert.deepEqual([card.word, card.tone, card.openP01, card.did, card.startedAt], ['not started', 'idle', null, 'Not started.', null])
+  // Once the review panel ran, the counts are its own: 1 of 2 answered, 0 open (the challenge's accepted P1 is not counted).
+  const ran = { ...review, status: 'succeeded' as const, started_at: PANEL.panels[0]!.started_at, ended_at: PANEL.panels[0]!.ended_at, providers: [provider('c/z', 'ok'), provider('d/w', 'timed_out')] }
+  const after = stageCardOf(PAYLOAD, 'panel', { panels: [challenge, ran] })!
+  assert.deepEqual([after.word, after.openP01, after.did, after.models], ['reviewed', 0, '1 of 2 providers answered; 0 open P0/P1.', ['c/z', 'd/w']])
+  // A failed challenge panel does not turn the review card red; a record with no review-stage panel reads not recorded.
+  assert.equal(stageCardOf(PAYLOAD, 'panel', { panels: [{ ...challenge, status: 'failed' }, ran] })!.word, 'reviewed')
+  assert.deepEqual([stageCardOf(PAYLOAD, 'panel', { panels: [challenge] })!.word, stageCardOf(PAYLOAD, 'panel', { panels: [challenge] })!.tone], ['not recorded', 'idle'])
+})
+
+test('panelMeaning: a failed or timed-out review panel says so on its succeeded node page; a succeeded one keeps the header wording (run-sessions-006 review C)', () => {
+  for (const [status, word] of [['failed', 'failed'], ['timed_out', 'timed out']] as const) {
+    assert.equal(panelMeaning(panelRecord(status, [provider('a/x', 'error')])), `The panel ${word} (report-only; the run's verdict is unchanged). Its error is below.`)
+  }
+  assert.equal(panelMeaning(panelRecord('succeeded', [provider('a/x', 'ok')])), null)
+  assert.equal(panelMeaning({ panels: [{ ...PANEL.panels[0]!, stage: 'challenge', status: 'failed' }] }), null)
+  assert.equal(panelMeaning(null), 'The panel record did not load, so whether the panel failed is not recorded.')
 })
 
 test('stageCardOf: a lane-review card says its fix round in short form, its result and cost', () => {
