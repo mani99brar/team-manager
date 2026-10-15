@@ -8,8 +8,8 @@ Spec: `features/review-panel-registry/prd.md` sections 7.2-7.6 and 9, plus Appen
 
 ## Context
 
-- **Follow-up run 007 ([L15]): the controller restores your owned paths from candidate `d362133`** (`--restore-from`). Before you change anything, check that nothing differs; this prints nothing:
-  `git diff --stat d362133faa947620d7a434f417b008c8537c8393 -- workflow/judge.py workflow/test_judge.py workflow/automatic.py workflow/test_automatic.py workflow/pipeline.py workflow/sessions.py workflow/test_sessions.py workflow/test_export.py workflow/test_accept.py workflow/testdata/judge workflow/prompts/judge.md workflow/RUNBOOK.md docs/handoff/review-panel-judge.md`
+- **Follow-up run 008 ([L16]): the controller restores your owned paths from candidate `207c037`** (`--restore-from`). Before you change anything, check that nothing differs; this prints nothing:
+  `git diff --stat 207c037d00c12718462a310d8493e77be52a0036 -- workflow/judge.py workflow/test_judge.py workflow/automatic.py workflow/test_automatic.py workflow/pipeline.py workflow/sessions.py workflow/test_sessions.py workflow/test_export.py workflow/test_accept.py workflow/testdata/judge workflow/prompts/judge.md workflow/RUNBOOK.md docs/handoff/review-panel-judge.md`
 - **Review step** (`workflow/automatic.py`):
   - Reviewers come from `plan_reviewers` (`sessions.py:72`). `review_prompt` is at :779.
   - Native: `_review_native` :1486, `_accept_native` :1603 and `wait_reviews` :991. The first accepted block decides; the others get a 10-min grace (:925).
@@ -47,7 +47,7 @@ Spec: `features/review-panel-registry/prd.md` sections 7.2-7.6 and 9, plus Appen
 
 Your checks (`/home/agentops/dev/md-manager/.venv/bin/python -m workflow.run_tests --jobs 4` and `npm run test:contracts`) pass. PRD section 10 items 5, 6, 7, 8 and 9 (review.json and the verdict), plus the `judge` reserved-id item of 10.4, are each proved by named tests:
 
-0. **Run 007 ([L15]):** your owned paths start at candidate `d362133` (it holds [L14]'s timeout change). `git diff --stat d362133 -- <your owned paths>` stays empty, and you change nothing; your code already meets the items below. Run your checks and hand off.
+0. **Run 008 ([L16]):** your owned paths start at candidate `207c037` (it holds [L14]'s timeout change). `git diff --stat 207c037 -- <your owned paths>` stays empty, and you change nothing; your code already meets the items below. Run your checks and hand off.
 1. **Wait for everything** (both reviewer transports, fake clock): on a judged run, a first block does not decide.
    - Every built-in reviewer is awaited to its verdict or deadline, then `panel.settle`, then the judge.
    - A failed or late built-in reviewer is recorded and the judge still runs.
