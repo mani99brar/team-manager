@@ -1120,6 +1120,7 @@ class Scheduling(SidecarRun):
         self.now = 1400.0  # Inside the pass timeout, and a lane completed: nothing starts while the pass runs.
         for _ in range(3):
             scheduler.tick([], {"ui": {}}, False)
+        self.wait_logged(1)
         time.sleep(0.2)
         self.assertEqual(len(self.job_calls()), 1)
         release.write_text("")

@@ -174,7 +174,7 @@ test('feature file 2.0.0 declares every lane with its task file; 2.1.0 adds the 
     rejectReviewed(`reviewer id ${JSON.stringify(bad)}`, value => { value.reviewers[0].reviewer_id = bad })
   }
   assert.equal(readJson('./feature.schema.json').properties.reviewers.items.properties.reviewer_id.pattern, readJson('./feature.schema.json').properties.workers.items.properties.node_id.pattern)
-  assert.deepEqual(readJson('./feature.schema.json').properties.version.enum, ['2.0.0', '2.1.0', '2.2.0', '2.3.0', '2.4.0', '2.5.0', '2.6.0', '2.7.0', '2.8.0', '2.9.0', '2.10.0'])
+  assert.deepEqual(readJson('./feature.schema.json').properties.version.enum, ['2.0.0', '2.1.0', '2.2.0', '2.3.0', '2.4.0', '2.5.0', '2.6.0', '2.7.0', '2.8.0', '2.9.0', '2.10.0', '2.11.0'])
   // 2.5.0 adds the optional attack pass: false, or an object with 1 to 3 angles and optional bounds (workflow/attack.py refuses it on an earlier version).
   feature.parse({ ...structuredClone(reviewed), version: '2.5.0', attack: { angles: ['auth-funds'], requirements: ['docs/security/requirements.md'] } })
   feature.parse({ ...structuredClone(reviewed), version: '2.5.0', attack: false })
@@ -450,4 +450,85 @@ test('registry-entry: the golden entry a live launch writes parses with the serv
   // The server schema is strict: the golden shape is exact, not merely tolerated.
   assert.throws(() => validateProjectsConfig({ version: 1, projects: [{ ...entry, extra: true }] }))
   assert.throws(() => validateProjectsConfig({ version: 1, projects: [{ ...entry, repository: 'relative/path' }] }))
+})
+
+test('judged review panel (features/review-panel-registry): feature 2.11.0, reviewer list 1.0.0, panel record 1.1.0 beside 1.0.0', () => {
+  const examplesDir = '../../features/review-panel-registry/examples/'
+  const example = (name: string) => readJson(`${examplesDir}${name}.example.json`)
+  const prd = readFileSync(new URL('../../features/review-panel-registry/prd.md', import.meta.url), 'utf8')
+  // The PRD's Appendix B literals ([L2]), each the fenced JSON block after its marker.
+  const literal = (marker: string) => JSON.parse(prd.split(`<!-- literal: ${marker} -->`)[1].match(/```json\n([\s\S]*?)\n```/)![1])
+
+  // feature.json 2.11.0: the committed example, both default prompt forms, and the judged panel's closed keys.
+  const feature = handWritten('feature')
+  const committed = readJson('./examples/feature.2.11.0.json')
+  assert.equal(committed.version, '2.11.0')
+  feature.parse(committed)
+  const judged = committed.panels[0]
+  feature.parse({ ...committed, panels: [{ id: 'review', stage: 'review', report_only: false }] })
+  feature.parse({ ...committed, panels: [{ ...judged, prompt: 'builtin:review' }] })
+  for (const bad of [{ ...judged, providers: [{ transport: 'claude' }] }, { ...judged, overlap_threshold: 2 }, { ...judged, budget_usd: 5 },
+    { ...judged, stage: 'challenge' }, { ...judged, seats: [] }, { ...judged, seats: ['claude', 'claude'] }, { ...judged, seats: [{ name: 'muse' }] },
+    { ...judged, judge: { timeout_minutes: 4 } }, { ...judged, judge: { model: 'claude-opus-5-5' } }, { ...judged, reviewers_file: { label: 'x', sha256: 'y' } }]) {
+    assert.equal(feature.safeParse({ ...committed, panels: [bad] }).success, false, JSON.stringify(bad))
+  }
+
+  // The shared reviewer list: the shipped example, and the schema half of its refusals (the loader adds the cross-field rules).
+  const reviewers = handWritten('reviewers')
+  const listing = example('reviewers')
+  reviewers.parse(listing)
+  assert.deepEqual(listing.reviewers.map((entry: { name: string }) => entry.name), ['claude', 'gpt', 'muse', 'argon'])
+  const rejectList = (label: string, mutate: (value: typeof listing) => void) => {
+    const value = structuredClone(listing)
+    mutate(value)
+    assert.equal(reviewers.safeParse(value).success, false, label)
+  }
+  rejectList('unknown key', value => { value.reviewers[0].extra = 1 })
+  rejectList('unknown transport', value => { value.reviewers[0].transport = 'codex' })
+  rejectList('bad prefix', value => { value.reviewers[0].prefix = 'CC' })
+  rejectList('bad credential env name', value => { value.reviewers[2].credential = { file: '/x', env: 'muse_login' } })
+  rejectList('lower-case env.set name', value => { value.reviewers[2].cli.env.set.lower = 'x' })
+  rejectList('timeout over 60', value => { value.reviewers[2].cap.timeout_minutes = 61 })
+  rejectList('no entries', value => { value.reviewers = [] })
+  rejectList('unknown prompt_via', value => { value.reviewers[2].cli.prompt_via = 'argv' })
+  reviewers.parse({ ...structuredClone(listing), reviewers: [{ ...structuredClone(listing.reviewers[2]), credential: { file: '~/.config/muse/login.json', env: 'MUSE_LOGIN_FILE' } }] })
+
+  // The pinned plan.panels[0] of PRD Appendix B: every seat is a list entry plus status/error/bin/cli_version.
+  const plan = literal('plan-panel-judged')
+  assert.deepEqual(Object.keys(plan).sort(), ['id', 'judge', 'pi_bin', 'prd_label', 'prompt', 'report_only', 'requirement_docs', 'requirements', 'reviewers_file', 'seats', 'stage'])
+  assert.equal(plan.report_only, false)
+  assert.deepEqual(plan.judge, { model: 'claude-opus-5-5', effort: 'high', timeout_minutes: 30, budget_usd: 15, input_cap_bytes: 600000 })
+  reviewers.parse({ version: '1.0.0', reviewers: plan.seats.map(({ status, error, bin, cli_version, ...entry }: Record<string, unknown>) => {
+    assert.ok(status === 'pending' || status === 'unavailable')
+    assert.ok(error === null || typeof error === 'string')
+    assert.ok(bin === null || typeof bin === 'string')
+    assert.ok(cli_version === null || typeof cli_version === 'string')
+    return entry
+  }) })
+
+  // panel.json 1.1.0: both examples and the three judge states validate; 1.0.0 still does (the multi-provider block above).
+  const panel = handWritten('panel')
+  const judgedRecord = example('panel-judged')
+  panel.parse(judgedRecord)
+  panel.parse(example('panel-fallback'))
+  const states = literal('judge-states')
+  assert.deepEqual(Object.keys(states), ['pending', 'running', 'incomplete'])
+  for (const state of Object.values(states)) panel.parse({ ...structuredClone(judgedRecord), panels: [{ ...structuredClone(judgedRecord.panels[0]), judge: state }] })
+  const rejectRecord = (label: string, mutate: (value: typeof judgedRecord) => void) => {
+    const value = structuredClone(judgedRecord)
+    mutate(value)
+    assert.equal(panel.safeParse(value).success, false, label)
+  }
+  rejectRecord('no judge', value => { delete value.panels[0].judge })
+  rejectRecord('judged with fallback', value => { value.panels[0].judge.fallback = true })
+  rejectRecord('running with an end', value => { value.panels[0].judge.status = 'running'; value.panels[0].judge.rulings = [] })
+  rejectRecord('fallback with rulings', value => { value.panels[0].judge.status = 'timed_out'; value.panels[0].judge.fallback = true })
+  rejectRecord('unknown seat transport', value => { value.panels[0].providers[2].transport = 'codex' })
+  rejectRecord('unknown seat status', value => { value.panels[0].providers[0].status = 'succeeded' })
+  rejectRecord('a second panel', value => { value.panels.push(structuredClone(value.panels[0])) })
+  rejectRecord('a 1.0.0 overlap threshold', value => { value.panels[0].overlap_threshold = 2 })
+  rejectRecord('a finding id not <prefix><n>', value => { value.panels[0].findings[0].id = 'f1' })
+  rejectRecord('a ruling id not J<n>', value => { value.panels[0].judge.rulings[0].id = 'R1' })
+  rejectRecord('version 1.2.0', value => { value.version = '1.2.0' })
+  rejectRecord('a 1.1.0 panel under version 1.0.0', value => { value.version = '1.0.0' })
 })

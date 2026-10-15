@@ -1,0 +1,64 @@
+#!/usr/bin/env python3
+"""A stand-in `muse` for the judged panel's cli tests (never the real CLI). It prints captured-shape `muse exec --json` output:
+JSONL events whose `payload_type` is `run.model.configured` (`payload.model_id`, the served model) and `run.terminal.completed`
+(`payload.text`, the answer), `usage` null, exit 0 even when a tool failed (probe of 2026-10-14). Its behaviour comes from
+`control.json` beside this file (its environment is built from nothing, so no variable can carry it), and it records what it saw
+(argv, cwd, environment, stdin) in `seen-<n>.json` there."""
+import json
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+argv = sys.argv[1:]
+if argv == ["--version"]:
+    print((json.loads((HERE / "control.json").read_text()) if (HERE / "control.json").exists() else {}).get("version", "Muse Code 1.4.7 (1.4.7-R6101.1)"))
+    sys.exit(int((json.loads((HERE / "control.json").read_text()) if (HERE / "control.json").exists() else {}).get("version_exit", 0)))
+spec = json.loads((HERE / "control.json").read_text()) if (HERE / "control.json").exists() else {}
+spec = spec.get("muse", spec)
+stdin_target = os.readlink("/proc/self/fd/0")
+stdin_text = "" if stdin_target == "/dev/null" else sys.stdin.read()
+prompt_file = argv[argv.index("--prompt-file") + 1] if "--prompt-file" in argv else None
+seen = {"argv": argv, "cwd": os.getcwd(), "env": dict(os.environ), "stdin": stdin_target, "stdin_text": stdin_text,
+        "prompt": Path(prompt_file).read_text() if prompt_file else None, "pgid": os.getpgid(0), "pid": os.getpid()}
+number = len(list(HERE.glob("seen-*.json"))) + 1
+(HERE / f"seen-{number}.json").write_text(json.dumps(seen))
+if spec.get("write"):
+    Path("SEAT-WROTE-THIS.txt").write_text("a seat's write stays in its throwaway worktree\n")
+
+
+def event(payload_type, payload, seq=[0]):
+    seq[0] += 1
+    sys.stdout.write(json.dumps({"seq": seq[0], "ts": "2026-10-14T09:12:%02dZ" % seq[0], "run_id": "r-fake", "payload_type": payload_type,
+                                 "payload": payload, "usage": None}) + "\n")
+    sys.stdout.flush()
+
+
+mode = spec.get("mode", "ok")
+if mode == "hang":
+    child = subprocess.Popen(["sleep", "3600"])  # Same process group: the group kill must take it too.
+    (HERE / "grandchild.pid").write_text(str(child.pid))
+    time.sleep(3600)
+if mode == "spawn":
+    child = subprocess.Popen(["sleep", "3600"])  # Left behind in its group when the seat itself answers and exits.
+    (HERE / "grandchild.pid").write_text(str(child.pid))
+if mode == "auth":
+    sys.stderr.write("Error: Not logged in (run `muse login`)\n")
+    sys.exit(1)
+event("run.started", {"workspace": spec.get("workspace_echo", "")})
+event("run.model.configured", {"model_id": spec.get("served", "muse-wonder-1.0"), "reasoning_effort": "high"})
+event("tool.call.failed", {"tool": "shell", "error": "bwrap: setting up uid map: Permission denied"})
+if mode == "quota":
+    sys.stderr.write("Error: usage limit reached for your plan (tier_limit); try again later\n")
+    sys.exit(0)
+if mode == "no_terminal":
+    sys.exit(0)
+text = spec.get("text")
+if text is None:
+    text = json.dumps({"findings": spec.get("findings", [])})
+if mode == "fenced":
+    text = "```json\n" + text + "\n```"
+event("run.terminal.completed", {"text": text, "stop_reason": "end_turn"})
+sys.exit(int(spec.get("exit", 0)))

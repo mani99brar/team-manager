@@ -47,7 +47,7 @@ from .sessions import popen_claude, read_json, role_flags, save_json, terminate
 
 CRITIQUE = "critique"
 CRITIQUE_VERSION = "2.9.0"  # The feature version that may declare `critique`.
-CRITIQUE_VERSIONS = frozenset({CRITIQUE_VERSION, "2.10.0"})  # 2.10.0 (per-lane reviewer) keeps the critique; a set the next bump must join (version-gates-are-sets-add-a-keeps-everything-test).
+CRITIQUE_VERSIONS = frozenset({CRITIQUE_VERSION, "2.10.0", "2.11.0"})  # 2.10.0 (per-lane reviewer) and 2.11.0 (judged panel) keep the critique; a set the next bump must join (version-gates-are-sets-add-a-keeps-everything-test).
 BUILTIN_BRIEF = Path(__file__).resolve().parent / "prompts" / "reviewers" / "critique.md"
 
 DEFAULTS = {"skills": ["impeccable"], "max_budget_usd": 15, "timeout_minutes": 45}
