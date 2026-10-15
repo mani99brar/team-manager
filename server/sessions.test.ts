@@ -4,8 +4,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { validateSessions, type Sessions } from '../contracts/projects/sessions.ts'
-import { deriveNow } from '../contracts/projects/triage.ts'
-import type { PanelResults, WorkflowDefinition } from '../contracts/projects/v1.ts'
+import { deriveFocus, deriveNow } from '../contracts/projects/triage.ts'
+import type { PanelResults, RunDetail, WorkflowDefinition } from '../contracts/projects/v1.ts'
 import { createApp } from './app.ts'
 import { nightShiftDir } from './nightShift.ts'
 import { redactText, RunStore } from './projects.ts'
@@ -238,7 +238,8 @@ async function withEnv(run: (env: Env) => Promise<void>, options: { exposed?: bo
 
 test('sessions: every role of PRD 4 becomes rows from its own files, with both totals', async () => {
   await withEnv(async ({ runsRoot, sessions }) => {
-    await seedFull(runsRoot(), 'full')
+    const runDir = await seedFull(runsRoot(), 'full')
+    await writeJson(join(runDir, 'server.completion.json'), { status: 'completed' })
     const payload = await sessions('full')
     const byKey = new Map(payload.sessions.map(row => [row.key, row]))
     const roles = new Set(payload.sessions.map(row => row.role))
@@ -371,13 +372,17 @@ test('sessions: a path, a credential and an out-of-range time in every file type
   })
 })
 
-test('sessions redaction: a path and a fake 40-character key are removed; task-file and a lone sk- stay intact', () => {
+test('sessions redaction: a path (one root-level segment too) and a fake 40-character key are removed; task-file and a lone sk- stay intact', () => {
   assert.equal(redactText('see /home/you/secret/run'), 'see <path>')
   assert.equal(redactText('see /données/runs/x, (/用户/run) and file:///Users/zoë/x'), 'see <path>, (<path>) and <path>')
   assert.equal(redactText('a relative données/runs/x stays'), 'a relative données/runs/x stays')
   // CJK puts no space before a path: a path right after a CJK letter is still absolute.
   assert.equal(redactText('无法读取/home/agentops/.ssh/id'), '无法读取<path>')
   assert.equal(redactText('文件/home/u/secret/run と ファイル/etc/x'), '文件<path> と ファイル<path>')
+  // A one-segment root path is absolute too; a slash between letters or digits is not a path.
+  assert.equal(redactText('cannot open /secret'), 'cannot open <path>')
+  assert.equal(redactText('/srv, (/tmp) and file:///etc'), '<path>, (<path>) and <path>')
+  assert.equal(redactText('P0/P1 and/or 1/2 stay; ~ and ~5 stay; http://example.com/x stays'), 'P0/P1 and/or 1/2 stay; ~ and ~5 stay; http://example.com/x stays')
   assert.equal(redactText(`token sk-${'x'.repeat(40)}`), 'token <redacted>')
   assert.equal(redactText(`ghp_${'A'.repeat(36)} github_pat_${'b'.repeat(30)} xoxb-1234567890-abc Bearer ${'c'.repeat(30)} token=abcdefghijklmnop password=hunter22`), '<redacted> <redacted> <redacted> <redacted> <redacted> <redacted>')
   assert.equal(redactText('the task-file is fine, sk- alone stays, and so does openai-codex/gpt-6.1-sol'), 'the task-file is fine, sk- alone stays, and so does openai-codex/gpt-6.1-sol')
@@ -481,6 +486,26 @@ test('sessions: a worker\'s status comes from its completion and stop evidence, 
     assert.equal(await status('server'), 'stopped', 'a stopped worker whose cost was not recorded')
     await writeJson(join(runDir, 'server.stop.json'), { stopped: false, session_id: ID.server })
     assert.equal(await status('server'), 'running')
+  })
+})
+
+test('sessions: a running worker shows no end time, and a relaunch is never given the earlier session\'s cost', async () => {
+  await withEnv(async ({ runsRoot, sessions }) => {
+    const runDir = await seedFull(runsRoot(), 'relaunch')
+    const worker = async (lane: string) => (await sessions('relaunch')).sessions.find(row => row.key === `worker:${lane}`)!
+    const facts = (row: Awaited<ReturnType<typeof worker>>) => [row.status, row.session_id, row.started_at, row.ended_at, row.cost_usd, row.model]
+    // The same session, still running: its cost so far, but no end time (the cost file's time is when it was recorded).
+    assert.deepEqual(facts(await worker('viewer')), ['running', ID.viewer, '2026-01-01T11:00:00.000Z', null, 3.5, 'claude-opus-4-8'])
+    // Relaunched: a new launch receipt (another session, no completion or stop of it) beside the earlier session's cost file.
+    const relaunched = '7a1c0f3e-2b4d-4c8e-9f60-1a2b3c4d5e62'
+    await writeJson(join(runDir, 'server.interactive.json'), { session_id: relaunched, worktree: join(runDir, 'worktree-server'), launch_requested_at: T1, launch_token: 'tok-2', requested: { model: 'claude-opus-5-5' } })
+    assert.deepEqual(facts(await worker('server')), ['running', relaunched, '2026-01-01T12:00:00.000Z', null, null, 'claude-opus-5-5'])
+    assert.equal((await worker('server')).duration_seconds, null, 'the earlier session\'s duration is not this one\'s')
+    // Once the relaunch completes, its own cost file gives its end time and spend.
+    await writeJson(join(runDir, 'server.completion.json'), { status: 'completed', launch_token: 'tok-2' })
+    await writeJson(join(runDir, 'server.cost.json'), { session_id: relaunched, cost_usd: 2.25, duration_ms: 60000, recorded_at: '2026-01-01T13:00:00Z', models: ['claude-opus-5-5'] })
+    assert.deepEqual(facts(await worker('server')), ['succeeded', relaunched, '2026-01-01T12:00:00.000Z', '2026-01-01T13:00:00.000Z', 2.25, 'claude-opus-5-5'])
+    assert.equal((await worker('server')).duration_seconds, 60)
   })
 })
 
@@ -728,6 +753,33 @@ test('a running round: reviewer rows from the live receipts while the section is
   })
 })
 
+test('triage focuses a failed pinned step that only shares a projected id; a failed projected card stays advisory', async () => {
+  await withEnv(async ({ runsRoot, store }) => {
+    const runDir = join(runsRoot(), 'pinned-panel')
+    await mkdir(runDir, { recursive: true })
+    await writeRunState(runDir, 'pinned-panel', {
+      review: null, plan: ['general'],
+      events: [{ sequence: 1, time: T0, node: 'review', status: 'running', message: 'Launching or reconciling the exact native session' }],
+    })
+    const { detail, events } = await store.loadRun(store.scope('sessions', 'main'), 'pinned-panel')
+    assert.ok(detail.definition.nodes.some(node => node.node_id === 'panel' && node.kind === 'review'), 'the projected panel node is joined')
+    // `panel` failed: as the projected card (kind review, a dependency of the review gate), or as a pinned step of that id
+    // (the projection refuses to join its own panel beside it), here a worker the review does not depend on.
+    const failedPanel = (pinned: boolean): RunDetail => {
+      const edit = <T extends { node_id: string; kind: string; depends_on: string[] }>(node: T): T =>
+        node.node_id === 'review' && pinned ? { ...node, depends_on: node.depends_on.filter(id => id !== 'panel') }
+          : node.node_id === 'panel' && pinned ? { ...node, kind: 'worker', depends_on: ['challenge'] } : node
+      return {
+        ...detail,
+        definition: { ...detail.definition, nodes: detail.definition.nodes.map(edit) },
+        snapshot: { ...detail.snapshot, nodes: detail.snapshot.nodes.map(node => edit(node.node_id === 'panel' ? { ...node, status: 'failed' as const } : node)) },
+      }
+    }
+    assert.equal(deriveFocus(failedPanel(false), events)?.node_id, 'review', 'a projected card is never the focus')
+    assert.equal(deriveFocus(failedPanel(true), events)?.node_id, 'panel', 'a pinned step named panel is')
+  })
+})
+
 // ---- The resume command (PRD 3.5) ---------------------------------------------------------------------------------
 
 test('resume: the ~/ form for an exposed project whose directory exists under HOME; bare otherwise, and for a quote', async () => {
@@ -783,6 +835,34 @@ test('a stray review.round-99999999.json neither hangs the sessions request nor 
     assert.ok(Date.now() - started < 5000, 'answered promptly')
     const reviewers = payload.sessions.filter(row => row.role === 'reviewer').map(row => [row.key, row.round, row.verdict])
     assert.deepEqual(reviewers.sort(), [['reviewer:general:1', 1, 'blocked'], ['reviewer:general:2', 2, 'running']])
+  })
+})
+
+test('archived rounds are read from the files that exist: round 1 and 3 archived, round 2 restored, round 4 running ([L12] 3)', async () => {
+  await withEnv(async ({ runsRoot, sessions }) => {
+    const runDir = join(runsRoot(), 'gap')
+    await mkdir(runDir, { recursive: true })
+    await writeJson(join(runDir, 'automatic-review-general.json'), { reviewer_id: 'general', status: 'running', session_id: ID.general, transport: 'native' })
+    for (const [k, verdict, session] of [[1, 'blocked', ID.general1], [3, 'approved', ID.coverage]] as const) {
+      await writeJson(join(runDir, `review.round-${k}.json`), { round: k, reviewers: [{ reviewer_id: 'general', verdict, status: 'accepted', session_id: session, transport: 'native', findings: [] }], findings: [] })
+    }
+    // A stray file the fix loop never recorded is still not a round.
+    await writeJson(join(runDir, 'review.round-99999999.json'), { round: 99999999, reviewers: [{ reviewer_id: 'general', verdict: 'approved', status: 'accepted', transport: 'native', findings: [] }], findings: [] })
+    // The controller numbers a round after every round in review-rounds.json; round 2 was restored (its file went back to review.json, then was archived as round 3).
+    const reviewRound = (round: number, restored: boolean) => ({
+      round, verdict: 'blocked', candidate: SHA40, lane: 'server', findings: [], reviewer_sessions: [], started_at: T0,
+      archived: !restored, restored_at: restored ? T1 : null, repair_n: null, reviewers: [],
+    })
+    await writeRunState(runDir, 'gap', {
+      review: null, plan: ['general'],
+      fixLoop: { version: '1.0.0', rounds: 3, repairs: [], review_rounds: [reviewRound(1, false), reviewRound(2, true), reviewRound(3, false)] },
+      events: [{ sequence: 1, time: T0, node: 'review', status: 'running', message: 'Launching or reconciling the exact native session' }],
+    })
+    const payload = await sessions('gap')
+    const reviewers = payload.sessions.filter(row => row.role === 'reviewer').map(row => [row.key, row.round, row.verdict, row.session_id])
+    assert.deepEqual(reviewers.sort(), [
+      ['reviewer:general:1', 1, 'blocked', ID.general1], ['reviewer:general:3', 3, 'approved', ID.coverage], ['reviewer:general:4', 4, 'running', ID.general],
+    ])
   })
 })
 

@@ -92,7 +92,8 @@ export function NodeSheet({ node, now, isFocus, href, onNavigate, onClose, child
           <h4>Command</h4>
           {node.projected
             // A projected session card records a session of the review or a verify step; the run never waits at it (run-sessions).
-            ? <p className="nr-p" data-testid="sheet-session-note">A session of {node.projected === 'lane_review' ? 'the lane\'s verify step' : 'the review'}, not a step the run waits at; nothing to type here.{node.cost ? ` Cost: ${node.cost}.` : ''}</p>
+            // Its own resume command, when it has one, is on the step page, so the sheet points there rather than saying "nothing".
+            ? <p className="nr-p" data-testid="sheet-session-note">A session of {node.projected === 'lane_review' ? 'the lane\'s verify step' : 'the review'}, not a step the run waits at, so the run needs no command here. Its resume command, when it has one, is on the step page.{node.cost ? ` Cost: ${node.cost}.` : ''}</p>
             : isFocus && now ? <CommandBlock next={now.next} /> : <p className="nr-p">{now === null && isFocus ? 'Reading the run\'s events and results…' : 'No command is recorded for this step; the run waits elsewhere.'}</p>}
         </section>
         {node.reviewers && (

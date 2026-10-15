@@ -4,7 +4,8 @@ import type { ReviewResult, RunDetail } from './api.ts'
 import { CommandBlock } from './CommandBlock.tsx'
 import { attemptWord, type StripItem, type Timing, type VerdictLead } from './node/model.ts'
 import { AppLink, StatusBadge } from './panels.tsx'
-import { executorCategory, executorOf, STATUS_LABEL } from './status.ts'
+import { nodeExecutor, projectedSucceededMeaning } from './signal/executor.ts'
+import { executorCategory, STATUS_LABEL } from './status.ts'
 import { STATUS_GLYPH } from './steps.ts'
 import { Time } from './Time.tsx'
 import { formatSpan } from './time.ts'
@@ -38,8 +39,9 @@ const sentence = (text: string) => (/[.!?]$/.test(text) ? text : `${text}.`)
  * "This is not workflow completion". A worker's success links the verification that proves it; a verification that passed
  * after earlier attempts says so, and after which repair.
  */
-function statusCause({ kind, status, attempt, cause, repairs, verifyNode, onNavigate }: {
+function statusCause({ kind, nodeId, status, attempt, cause, repairs, verifyNode, onNavigate }: {
   kind: DefinitionNode['kind']
+  nodeId: string
   status: NodeStatus | 'no_record'
   attempt: number
   /** The latest status message of the shown attempt, humanized; null when none was recorded. */
@@ -58,6 +60,8 @@ function statusCause({ kind, status, attempt, cause, repairs, verifyNode, onNavi
     case 'cancelled': return 'This step was cancelled.'
     case 'failed': return `This step failed.${cause ? ` ${sentence(cause)}` : ' The run cannot succeed without intervention.'}`
     case 'succeeded':
+      // A finished reviewer or lane review (run-sessions) points at its verdict, which may be blocked, not "This step completed."
+      if (projectedSucceededMeaning(nodeId)) return projectedSucceededMeaning(nodeId)
       if (kind === 'worker') {
         if (!verifyNode) return 'Session ended its turn. This is not workflow completion; verification, review and integration are separate steps.'
         return <>Session ended its turn. This is not workflow completion — {VERIFY_WORD[verifyNode.status]} <AppLink href={verifyNode.href} onNavigate={onNavigate}>{verifyNode.label} ›</AppLink></>
@@ -163,6 +167,8 @@ type Props = {
   verdict: { lead: VerdictLead; outcome: string | null } | null
   /** The run's likely next step when this node is its focus and the latest attempt is shown; null otherwise. */
   next: Now['next'] | null
+  /** What the status means when the node's own record words it (a failed report-only panel, PRD 3.2); replaces the status wording. */
+  meaning?: string | null
   onNavigate: (pathname: string) => void
 }
 
@@ -171,7 +177,7 @@ type Props = {
  * its times (the source named when it is not an event); what the status means, worded by its cause; the attempt strip
  * when there were several; and the run's next step when this node is where the run stopped.
  */
-export function NodeHeader({ definition, status, attempt, timing, clock, cause, revision, timeline, reviewTransport, verifyNode, strip, loaded, attemptHref, verdict, next, onNavigate }: Props) {
+export function NodeHeader({ definition, status, attempt, timing, clock, cause, revision, timeline, reviewTransport, verifyNode, strip, loaded, attemptHref, verdict, next, meaning = null, onNavigate }: Props) {
   const starts = timing?.start ? Date.parse(timing.start.at) : Infinity
   const repairs = (timeline?.markers ?? []).filter(marker => marker.kind === 'repair' && marker.node_id === definition.node_id && Date.parse(marker.at) <= starts).map(marker => marker.repair?.n ?? 0).filter(n => n > 0)
   return (
@@ -181,7 +187,7 @@ export function NodeHeader({ definition, status, attempt, timing, clock, cause, 
         {status === 'no_record'
           ? <span className="status-badge status-cancelled" data-status="no_record" title="Ended without a record: a later attempt replaced it before any verdict."><span>No record</span></span>
           : <StatusBadge status={status} />}
-        <span className="node-executor-line"><span aria-hidden="true">· </span><span data-testid="node-executor" data-executor={executorCategory(definition.kind)}>{executorOf(definition.kind, reviewTransport, definition.node_id)}</span></span>
+        <span className="node-executor-line"><span aria-hidden="true">· </span><span data-testid="node-executor" data-executor={executorCategory(definition.kind)}>{nodeExecutor(definition.kind, reviewTransport, definition.node_id)}</span></span>
       </div>
       <p className="node-timing" data-testid="node-timing">
         {attempt === 0 ? <span data-testid="node-attempt">{attemptWord(0)}</span> : <>attempt <span data-testid="node-attempt">{attemptWord(attempt)}</span></>}
@@ -194,7 +200,7 @@ export function NodeHeader({ definition, status, attempt, timing, clock, cause, 
             <strong className="node-verdict" data-testid="node-verdict" data-verdict={verdict.lead.verdict ?? 'none'}>{verdict.lead.text}</strong>
             {verdict.outcome && <span className="projects-muted node-verdict-outcome" data-testid="node-verdict-outcome"> · {verdict.outcome}</span>}
           </>
-        ) : statusCause({ kind: definition.kind, status, attempt, cause, repairs, verifyNode, onNavigate })}
+        ) : meaning ?? statusCause({ kind: definition.kind, nodeId: definition.node_id, status, attempt, cause, repairs, verifyNode, onNavigate })}
       </p>
       {strip.length > 0 && <AttemptStrip items={strip} loaded={loaded} shown={attempt} attemptHref={attemptHref} onNavigate={onNavigate} />}
       {next && (

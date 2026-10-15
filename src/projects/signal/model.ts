@@ -7,13 +7,14 @@
 import type { Attention, AttentionKind, Instant, Now, RunAttention, Timeline } from '../../../contracts/projects/triage.ts'
 import { humanizeEvent } from '../../../contracts/projects/triage.ts'
 import type { PanelResults, ReviewFinding, ReviewResult, RunDetail, RunInputs, Sessions, WorkflowEvent } from '../api.ts'
-import { isProjectedSessionNode, stageCardOf } from '../sessions/model.ts'
+import { stageCardOf } from '../sessions/model.ts'
 import type { RepairEntry } from '../../../contracts/projects/v1.ts'
 import { isBlockingFinding } from '../api.ts'
 import { isRepairNode } from '../dag.ts'
 import { executorCategory, isAttackNode, isChallengeNode, isSidecarNode, KIND_LABEL, STATUS_LABEL, type Executor, type NodeKind, type RunStatus } from '../status.ts'
 import type { StepRow } from '../steps.ts'
 import { stateTone, TONE_LABEL, type Tone } from '../tone.ts'
+import { projectedSessionKind } from './executor.ts'
 
 export type StageEvent = { sequence: number; at: string; status: RunStatus | null; text: string }
 
@@ -168,12 +169,6 @@ export function factsOf(node: Pick<StageNode, 'tone' | 'word' | 'attention' | 'a
   return bits.slice(0, 3).join(' · ')
 }
 
-/** Which projected session card a node id is ([L2]); null for a pinned step. */
-function projectedKindOf(nodeId: string): StageNode['projected'] {
-  if (!isProjectedSessionNode(nodeId)) return null
-  return nodeId === 'panel' ? 'panel' : nodeId.startsWith('lane-review-') ? 'lane_review' : 'reviewer'
-}
-
 export function stageNodes(input: StageModelInput, span: (ms: number) => string): StageNode[] {
   const { detail, rows, events, inputs, review, attention, reviewRound, sessions, panels } = input
   const snapshot = new Map(detail.snapshot.nodes.map(node => [node.node_id, node]))
@@ -197,7 +192,7 @@ export function stageNodes(input: StageModelInput, span: (ms: number) => string)
     const worker = node.kind === 'worker' && !repair ? inputs?.workers.find(entry => entry.launch_node_id === node.node_id) ?? null : null
     // A projected session card's word, tone, open P0/P1, cost and facts come from the sessions payload (PRD 3.1/3.2), the panel's
     // from its own record ([L12] 1): a blocked reviewer is a finished session (status succeeded) whose card carries the fail tone ([L11] 2). Its served status until it loads.
-    const projected = projectedKindOf(node.node_id)
+    const projected = projectedSessionKind(node.node_id)
     const stageCard = projected ? stageCardOf(sessions ?? null, node.node_id, panels ?? null) : null
     const reviewOpen = isReview && review ? review.findings.filter(finding => isBlockingFinding(finding) && finding.disposition !== 'resolved').length : null
     const card: Omit<StageNode, 'facts'> = {

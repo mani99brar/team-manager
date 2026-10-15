@@ -133,9 +133,11 @@ export const PANEL_BYTE_LIMIT = 4 * 1024 * 1024
  * letter, mark or digit, so a directory named `données` or `用户` is a path segment like an ASCII one. Only a letter of a
  * script written with spaces (Latin, Greek, Cyrillic) or a digit before the slash makes it a relative path: CJK, Thai and
  * other scripts put no space before a path, so `无法读取/home/u` is redacted (a relative path in them may be over-redacted).
+ * One segment is enough: a root-level `/secret` or `/srv` is a path too, so a slash command or route name such as
+ * `/sessions` is redacted as well (the safe direction); `P0/P1` and `and/or` stay, since a letter precedes their slash.
  */
 export function redactPaths(text: string): string {
-  return text.replace(/(?:file:\/\/(?=\/)|(?<![\p{Script=Latin}\p{Script=Greek}\p{Script=Cyrillic}\p{Nd}._@~+/-]))(?:~|\/[\p{L}\p{M}\p{N}._@~+-]+)(?:\/[\p{L}\p{M}\p{N}._@~+-]*)+/gu, '<path>')
+  return text.replace(/(?:file:\/\/(?=\/)|(?<![\p{Script=Latin}\p{Script=Greek}\p{Script=Cyrillic}\p{Nd}._@~+/-]))(?:~(?:\/[\p{L}\p{M}\p{N}._@~+-]*)+|\/[\p{L}\p{M}\p{N}._@~+-]+(?:\/[\p{L}\p{M}\p{N}._@~+-]*)*)/gu, '<path>')
 }
 
 /**
