@@ -23,14 +23,21 @@ export const DATE_FILTERS = ['any', 'today', '7d', '30d', 'all'] as const
 export type DateFilter = (typeof DATE_FILTERS)[number]
 export const DATE_FILTER_LABEL: Record<DateFilter, string> = { any: 'Any date', today: 'Today', '7d': '7 days', '30d': '30 days', all: 'All time' }
 
-/** Which list the bar sits on: it decides the date choices, the sort choices and the scope line. */
-export type ScopeKind = 'feature' | 'project' | 'triage'
+/**
+ * Which list the bar sits on: it decides the date choices, the sort choices and the scope line. `all` is Triage under "All
+ * time": the registry's pages over every project, read on request.
+ */
+export type ScopeKind = 'feature' | 'project' | 'triage' | 'all'
 
-/** The date choices each list offers: Triage never reads beyond its window, only the feature page reads older pages. */
+/**
+ * The date choices each list offers: Triage reads beyond its window only under "All time" (the registry's pages), the feature
+ * page reads its own older pages.
+ */
 export const DATE_CHOICES: Record<ScopeKind, readonly DateFilter[]> = {
-  triage: ['any', 'today', '7d'],
+  triage: ['any', 'today', '7d', 'all'],
   project: ['any', 'today', '7d', '30d'],
   feature: ['any', 'today', '7d', '30d', 'all'],
+  all: ['any', 'today', '7d', 'all'],
 }
 
 /** The sort choices each list offers, each naming its key. */
@@ -38,6 +45,12 @@ export const SORT_CHOICES: Record<ScopeKind, readonly { id: ListSort; label: str
   triage: [{ id: 'live', label: 'Needs you and running first' }, { id: 'newest', label: 'Newest created first' }, { id: 'oldest', label: 'Oldest created first' }],
   feature: [{ id: 'live', label: 'Needs you and running first' }, { id: 'newest', label: 'Newest created first' }, { id: 'oldest', label: 'Oldest created first' }],
   project: [{ id: 'live', label: 'Needs you and running first' }, { id: 'newest', label: 'Latest activity first' }, { id: 'oldest', label: 'Earliest activity first' }],
+  all: [{ id: 'live', label: 'Needs you and running first' }, { id: 'newest', label: 'Newest created first' }, { id: 'oldest', label: 'Oldest created first' }],
+}
+
+/** The URL's date as a list reads it: a date the list does not offer (the URL key is shared by every list) is "Any date". */
+export function offeredDate(kind: ScopeKind, date: DateFilter): DateFilter {
+  return DATE_CHOICES[kind].includes(date) ? date : 'any'
 }
 
 export type RunFilterState = {
@@ -139,15 +152,26 @@ export function statusCounts(items: readonly FilterItem[], state: RunFilterState
 }
 
 /**
- * The scope line, in its closed set: the feature page "<k> of <n> runs · Load more runs" while a cursor remains, "<k> of <n>
+ * The scope line, in its closed set: Triage under "All time" "<k> of <n> runs · every project · Load more runs" until every
+ * page answered, then "<k> of <n> runs · every project, all loaded"; the feature page "<k> of <n> runs · Load more runs" while a cursor remains, "<k> of <n>
  * runs, all loaded" once none does; the project page "· the first 50 runs of each feature" while any feature has more, else
  * "all loaded"; Triage "· live runs and runs finished in the last 7 days". `<k>` counts the matching runs, `<n>` the runs read.
  */
 export function scopeLine(kind: ScopeKind, matched: number, read: number, more: boolean): string {
   const head = `${matched} of ${read} runs`
   if (kind === 'triage') return `${head} · live runs and runs finished in the last 7 days`
+  // "All time": `more` while a cursor remains or a page failed, so "all loaded" is said only once every page answered.
+  if (kind === 'all') return more ? `${head} · every project · Load more runs` : `${head} · every project, all loaded`
   if (!more) return `${head}, all loaded`
   return kind === 'feature' ? `${head} · Load more runs` : `${head} · the first 50 runs of each feature`
+}
+
+/**
+ * The feature page's scope line once it read as many pages as its URL can restore (`MAX_LIST_PAGES`) and a cursor remains: it
+ * says where it stopped and that "All time" reads on, never "Load more runs", which it cannot do there.
+ */
+export function cappedScopeLine(matched: number, read: number, pages: number): string {
+  return `${matched} of ${read} runs · the first ${pages} pages; choose All time to read on`
 }
 
 /** How far the project page's run read got: the lists are still being read, failed as a whole, or were read (some features may not be). */

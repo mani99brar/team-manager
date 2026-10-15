@@ -1,14 +1,17 @@
 import { z } from 'zod'
 
 /**
- * The run-control API (docs/PRD_RUN_CONTROLS.md Appendix A, contract 1.0.0), mounted at /api/run-controls. The server validates
+ * The run-control API (docs/PRD_RUN_CONTROLS.md Appendix A, contract 1.1.0), mounted at /api/run-controls. The server validates
  * every payload it sends against these schemas; the viewer mirrors the types. decisions.md [L1] 3 and [L4] add the status route's
- * `enabled: false` form and the clean-preview route (`{ exitCode, output }`, the two camelCase keys).
+ * `enabled: false` form and the clean-preview route (`{ exitCode, output }`, the two camelCase keys); 1.1.0 adds the relaunch
+ * preview (`{ exitCode, line }`: the dry run's first line, the controller's verdict on the chosen lane).
  */
-export const CONTROLS_VERSION = '1.0.0'
+export const CONTROLS_VERSION = '1.1.0'
 
+/** 1.1.0 appends `retry_all` and `relaunch` (the controller's `retry --all-failed` and `relaunch`); the first twelve keep their order. */
 export const CONTROL_IDS = [
   'restart', 'pause', 'retry', 'reconcile', 'resume', 'accept_challenge', 'release_hold', 'answer', 'approve', 'repair_session', 'abandon', 'clean',
+  'retry_all', 'relaunch',
 ] as const
 
 export const CONTROL_RUNS = ['short', 'long', 'signal'] as const
@@ -95,8 +98,13 @@ export const controlRequestSchema = z.strictObject({ request_id: z.uuid(), run_s
 /** `POST .../clean-preview` body ([L4]): nothing but the state token. */
 export const cleanPreviewRequestSchema = z.strictObject({ run_state_token: z.string().min(1).max(128) })
 
+/** `POST .../relaunch-preview` body: the state token and the lane to dry-run, nothing else. */
+export const relaunchPreviewRequestSchema = z.strictObject({ run_state_token: z.string().min(1).max(128), lane: z.string().min(1).max(128) })
+
 export const controlResponseSchema = z.strictObject({ record: controlRecordSchema })
 export const cleanPreviewResponseSchema = z.strictObject({ exitCode: z.number().int().nullable(), output: z.string() })
+/** The relaunch dry run's exit and its first line as printed (stdout's first line, else the `Blocked:` line of stderr). */
+export const relaunchPreviewResponseSchema = z.strictObject({ exitCode: z.number().int().nullable(), line: z.string() })
 export const controlErrorSchema = z.strictObject({ error: z.strictObject({ code: z.enum(CONTROL_ERROR_CODES), message: z.string().min(1) }) })
 
 export type ControlId = z.infer<typeof controlIdSchema>
@@ -111,4 +119,5 @@ export type ControlRequest = z.infer<typeof controlRequestSchema>
 export const controlSchemas = {
   controlsStatus: controlsStatusSchema, runControls: runControlsSchema, controlRecord: controlRecordSchema, controlRequest: controlRequestSchema,
   controlResponse: controlResponseSchema, cleanPreviewRequest: cleanPreviewRequestSchema, cleanPreviewResponse: cleanPreviewResponseSchema, controlError: controlErrorSchema,
+  relaunchPreviewRequest: relaunchPreviewRequestSchema, relaunchPreviewResponse: relaunchPreviewResponseSchema,
 } as const

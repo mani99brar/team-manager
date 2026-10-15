@@ -6,6 +6,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { Project, RunSummary, WorkflowDefinition, WorkflowRuns } from '../api.ts'
+import { spendFigure } from './spend.ts'
 import { classifyRuns, classOf, lastActivityAt, liveRank } from '../lists.ts'
 import { featureOpen, orderFeatureRuns, orderFeatures } from './projectModel.ts'
 import { FilterBar, type ListControl } from '../FilterBar.tsx'
@@ -242,6 +243,8 @@ export function ProjectPage({ project, workflows, projectRuns, runsState, steps,
   // before the chart. A workflow whose run list failed contributes no runs (its `runs` is empty) but is counted as unread, so
   // the section says "N feature(s) cannot be read" and never claims a plain all-clear the data does not hold ([L10], [L12]).
   const allRuns = useMemo(() => projectRuns.flatMap(w => w.runs.map(run => ({ run, workflowId: w.workflow.workflow_id }))), [projectRuns])
+  // The recorded Claude spend, once the overview is read; nothing before, or when this server sends none.
+  const spendText = spendFigure(overview === null ? null : overviewMap.get(project.project_id)?.spend)
   const waitingRuns = allRuns.filter(({ run }) => classOf(classes, run).needs !== null)
   const runningRuns = allRuns.filter(({ run }) => run.status === 'running' && classOf(classes, run).needs === null)
 
@@ -261,15 +264,17 @@ export function ProjectPage({ project, workflows, projectRuns, runsState, steps,
             : <> · {UPDATE_TIME_NOT_RECORDED}</>)}</span>}
           {sameRepo && <span data-testid="dispatch-same-repo"> · {sameRepo}</span>}
         </p>
-        {(finished.length > 0 || counts.waits > 0) && (
+        {(finished.length > 0 || counts.waits > 0 || spendText !== null) && (
           <p className="dispatch-figs" data-testid="dispatch-figures">
-            {counts.waits > 0 && <span className="dispatch-fig tone-warn"><StateGlyph tone="warn" /><b>{counts.waits}</b> {counts.waits === 1 ? 'waits' : 'wait'} on you</span>}
-            <span className="dispatch-fig tone-ok"><StateGlyph tone="ok" /><b>{counts.succeeded}</b> succeeded</span>
-            <span className="dispatch-fig tone-fail"><StateGlyph tone="fail" /><b>{counts.failed}</b> failed</span>
-            <span className="dispatch-fig tone-idle"><StateGlyph tone="idle" /><b>{counts.cancelled}</b> cancelled</span>
-            <span className="dispatch-fig q">{medOk !== null ? <>median <b>{formatSpan(medOk)}</b> to land</> : 'nothing landed'}</span>
-            {medStop !== null && <span className="dispatch-fig q">median <b>{formatSpan(medStop)}</b> before a stop</span>}
-            <span className="dispatch-fig q">spend not recorded</span>
+            {(finished.length > 0 || counts.waits > 0) && <>
+              {counts.waits > 0 && <span className="dispatch-fig tone-warn"><StateGlyph tone="warn" /><b>{counts.waits}</b> {counts.waits === 1 ? 'waits' : 'wait'} on you</span>}
+              <span className="dispatch-fig tone-ok"><StateGlyph tone="ok" /><b>{counts.succeeded}</b> succeeded</span>
+              <span className="dispatch-fig tone-fail"><StateGlyph tone="fail" /><b>{counts.failed}</b> failed</span>
+              <span className="dispatch-fig tone-idle"><StateGlyph tone="idle" /><b>{counts.cancelled}</b> cancelled</span>
+              <span className="dispatch-fig q">{medOk !== null ? <>median <b>{formatSpan(medOk)}</b> to land</> : 'nothing landed'}</span>
+              {medStop !== null && <span className="dispatch-fig q">median <b>{formatSpan(medStop)}</b> before a stop</span>}
+            </>}
+            {spendText !== null && <span className="dispatch-fig q" data-testid="dispatch-spend">{spendText}</span>}
           </p>
         )}
         <nav className="dispatch-jump" aria-label="On this page">

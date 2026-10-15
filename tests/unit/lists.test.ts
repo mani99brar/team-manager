@@ -13,9 +13,10 @@ import {
   recordHomeReadings, recordReading, RECENT_WINDOW_MS, reviewStepsOf, rowSummary, rowTime, searchRows, servedDisagreement, servedNow, sincePausedLabel, stepTally, waitingKind, workflowTitle, type ServedRun,
   classifyRuns, classOf, rowLook, stoppedLabel, type RunClass,
   compareLive, HOME_SECTION_ORDER, liveRank, sectionOrderWords, sortHomeSections, sortRuns, type HomeSections,
+  LISTS_IDLE_POLL_MS, LISTS_POLL_MS, listsPollMs, mergeRunRows, registryKey,
 } from '../../src/projects/lists.ts'
 import {
-  DATE_CHOICES, DATE_FILTER_LABEL, DEFAULT_FILTER, filterActive, filterItems, inDateWindow, projectScopeLine, runPhase, scopeLine, SORT_CHOICES, statusCounts, statusOf,
+  cappedScopeLine, DATE_CHOICES, DATE_FILTER_LABEL, DEFAULT_FILTER, filterActive, filterItems, inDateWindow, offeredDate, projectScopeLine, runPhase, scopeLine, SORT_CHOICES, statusCounts, statusOf,
   STATUS_FILTERS, type FilterItem, type RunFilterState,
 } from '../../src/projects/runFilter.ts'
 import { PHASES } from '../../src/projects/dispatch/phases.ts'
@@ -1004,8 +1005,8 @@ describe('the filter bar model (runFilter)', () => {
       scopeLine('feature', 3, 50, true), scopeLine('triage', 1, 9, false)]
     for (const line of every) assert.ok(closed.some(re => re.test(line)), `scope line outside the closed set: ${line}`)
   })
-  test('the closed choices: Triage dates any, today, 7 days; the project page adds 30 days; only the feature page has All time; sorts name their keys', () => {
-    assert.deepEqual(DATE_CHOICES.triage.map(id => DATE_FILTER_LABEL[id]), ['Any date', 'Today', '7 days'])
+  test('the closed choices: Triage dates any, today, 7 days and All time; the project page adds 30 days and no All time; sorts name their keys', () => {
+    assert.deepEqual(DATE_CHOICES.triage.map(id => DATE_FILTER_LABEL[id]), ['Any date', 'Today', '7 days', 'All time'])
     assert.deepEqual(DATE_CHOICES.project.map(id => DATE_FILTER_LABEL[id]), ['Any date', 'Today', '7 days', '30 days'])
     assert.deepEqual(DATE_CHOICES.feature.map(id => DATE_FILTER_LABEL[id]), ['Any date', 'Today', '7 days', '30 days', 'All time'])
     assert.deepEqual(SORT_CHOICES.feature.map(choice => choice.label), ['Needs you and running first', 'Newest created first', 'Oldest created first'])
@@ -1052,5 +1053,82 @@ describe('the stage B list seeds, as the routes serve them', () => {
     const workflow = B_FILTER.workflows.find(item => item.workflow_id === 'filter-runs')!
     const finishedFirst = workflow.runs.filter(run => ['succeeded', 'failed', 'cancelled'].includes(run.status)).map(run => Date.parse(run.moved))
     for (const run of workflow.page2 ?? []) assert.ok(Date.parse(run.moved) < Math.max(...finishedFirst), run.id)
+  })
+})
+
+describe('the registry home read and Triage "All time" (ux-critique-fixes-c)', () => {
+  const waiting = activity({ attention: { kind: 'question', node_id: 'launch_ui', since: '2026-03-20T10:00:00Z' }, waiting_questions: 1 })
+  test('the cadence: 15 s while a row runs or needs the operator, 60 s otherwise', () => {
+    assert.equal(LISTS_POLL_MS, 15_000)
+    assert.equal(LISTS_IDLE_POLL_MS, 60_000)
+    assert.equal(listsPollMs([]), LISTS_IDLE_POLL_MS)
+    assert.equal(listsPollMs([summary('done', 'succeeded'), summary('broke', 'failed'), summary('gone', 'cancelled')]), LISTS_IDLE_POLL_MS)
+    assert.equal(listsPollMs([summary('done', 'succeeded'), summary('live', 'running')]), LISTS_POLL_MS)
+    assert.equal(listsPollMs([summary('asks', 'paused', { activity: waiting })]), LISTS_POLL_MS, 'a run that waits on the operator')
+    // A paused run nobody waits on, and an accepted override, keep the idle cadence.
+    assert.equal(listsPollMs([summary('parked', 'paused', { activity: activity() })]), LISTS_IDLE_POLL_MS)
+    assert.equal(listsPollMs([{ ...summary('over', 'running'), accepted: { candidate: 'b'.repeat(40), reason: 'merged', by: 'operator', accepted_at: '2026-03-19T10:00:00Z', on_main: true, review: 'recorded', open_findings: [], abandoned: null } } as RunSummary]), LISTS_IDLE_POLL_MS)
+  })
+  test('the All time scope pair: "all loaded" only once no cursor remains and every page answered; n counts unique runs', () => {
+    assert.equal(scopeLine('all', 3, 120, false), '3 of 120 runs · every project, all loaded')
+    assert.equal(scopeLine('all', 3, 120, true), '3 of 120 runs · every project · Load more runs')
+    // A cursor remains, or a page failed: both are "more", never "all loaded".
+    for (const state of [{ cursor: 'c2', failed: false }, { cursor: null, failed: true }, { cursor: 'c2', failed: true }]) {
+      assert.doesNotMatch(scopeLine('all', 1, 2, state.cursor !== null || state.failed), /all loaded/)
+    }
+    const home = [summary('a', 'running'), summary('b', 'succeeded')].map(run => ({ run }))
+    const pages = [summary('b', 'succeeded'), summary('c', 'failed')].map(run => ({ run }))
+    const merged = mergeRunRows(home, pages)
+    assert.equal(scopeLine('all', merged.length, merged.length, false), '3 of 3 runs · every project, all loaded', 'n counts each run once')
+    assert.equal(DATE_CHOICES.all.join(), DATE_CHOICES.triage.join())
+  })
+  test('a run read twice is listed once, by project, workflow and run id, and the home row wins', () => {
+    const homeRow = { run: summary('twice', 'running', { updated: '2026-03-20T11:00:00Z' }), from: 'home' }
+    const pageRow = { run: summary('twice', 'running', { updated: '2026-03-20T09:00:00Z' }), from: 'page' }
+    const otherWorkflow = { run: summary('twice', 'succeeded', { workflow: 'other' }), from: 'page' }
+    const otherProject = { run: summary('twice', 'succeeded', { project: 'beta' }), from: 'page' }
+    const merged = mergeRunRows([homeRow], [pageRow, otherWorkflow, otherProject, pageRow])
+    assert.equal(merged.length, 3)
+    assert.equal(merged.find(row => registryKey(row.run) === registryKey(homeRow.run))!.from, 'home')
+    assert.equal(new Set(merged.map(row => registryKey(row.run))).size, merged.length)
+  })
+  test('merging the pages never changes a home row\'s classification', () => {
+    const live = summary('live-q', 'paused', { created: '2026-03-20T09:00:00Z', activity: waiting })
+    const home = [live, summary('home-run', 'running', { created: '2026-03-20T08:00:00Z' }), summary('home-done', 'succeeded', { workflow: 'w2', created: '2026-03-18T08:00:00Z' })]
+    // Older runs from the pages: an old run of the same feature that waits too, and a finished one of another workflow.
+    const older = [summary('old-q', 'paused', { created: '2026-01-02T09:00:00Z', updated: '2026-01-02T09:00:00Z', activity: waiting }), summary('old-done', 'failed', { workflow: 'w3', created: '2026-01-01T09:00:00Z' })]
+    const before = classifyRuns(home)
+    const after = classifyRuns(mergeRunRows(home.map(run => ({ run })), older.map(run => ({ run }))).map(row => row.run))
+    for (const run of home) assert.deepEqual(classOf(after, run), classOf(before, run), run.run_id)
+  })
+  test('a filter, date or sort change never changes the counts or the pinned set (they read the home rows, unfiltered)', () => {
+    const home = [summary('w1', 'paused', { activity: waiting }), summary('r1', 'running'), summary('s1', 'succeeded')]
+    const classes = classifyRuns(home)
+    const needs = (runs: RunSummary[]) => runs.filter(run => classOf(classes, run).needs !== null).map(run => run.run_id)
+    const pins = new Set(['alpha-project/ux-lists/s1'])
+    const pinned = (runs: RunSummary[]) => runs.filter(run => pins.has(registryKey(run))).map(run => run.run_id)
+    const baseline = { needs: needs(home), pinned: pinned(home) }
+    const items = home.map(run => ({ run, cls: classOf(classes, run) }))
+    for (const change of [{ q: 'nothing' }, { status: ['failed'] as const }, { date: 'today' as const }, { date: 'all' as const }, { sort: 'oldest' as const }]) {
+      const state = { ...DEFAULT_FILTER, ...change } as RunFilterState
+      filterItems(items, state, { now: NOW, zone: 'utc' })
+      sortRuns(items, state.sort, classes)
+      assert.deepEqual({ needs: needs(home), pinned: pinned(home) }, baseline, JSON.stringify(change))
+    }
+  })
+  test('the kind-aware date: a list reads a date it does not offer as "Any date"', () => {
+    assert.equal(offeredDate('triage', 'all'), 'all')
+    assert.equal(offeredDate('project', 'all'), 'any')
+    assert.equal(offeredDate('triage', '30d'), 'any')
+  })
+})
+
+describe('the carried list fixes (ux-critique-fixes-c)', () => {
+  test('the feature page at its page cap says why it stops and that All time reads on, never "Load more runs"; uncapped lines stay', () => {
+    const capped = cappedScopeLine(40, 40, 20)
+    assert.equal(capped, '40 of 40 runs · the first 20 pages; choose All time to read on')
+    assert.doesNotMatch(capped, /Load more runs|all loaded/)
+    assert.equal(scopeLine('feature', 3, 9, true), '3 of 9 runs · Load more runs')
+    assert.equal(scopeLine('feature', 3, 9, false), '3 of 9 runs, all loaded')
   })
 })

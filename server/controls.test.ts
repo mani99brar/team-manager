@@ -13,7 +13,7 @@ import * as examples from '../contracts/projects/examples.ts'
 import { createApp } from './app.ts'
 import { ANSWER_PANE_REASON } from './controls.ts'
 import { loadControlsConfig } from './controlsGuard.ts'
-import { deviceNumbers, probeLock, type SpawnFn } from './controlsRunner.ts'
+import { deviceNumbers, probeLock, systemdRunArgv, type SpawnFn } from './controlsRunner.ts'
 import { parseProjectsConfig } from './projectsConfig.ts'
 
 /**
@@ -172,14 +172,53 @@ class FakeChild extends EventEmitter {
   unref() {}
 }
 
-function recorder() {
+/** What the fake controller answers to `-m workflow <command> --help`: the engine's commands by default. */
+type HelpAnswers = { retry: { code: number; text: string }; relaunch: { code: number; text: string } }
+const NEW_HELP: HelpAnswers = {
+  retry: { code: 0, text: 'usage: python -m workflow retry [-h] [--phase {worker,candidate}] [--node NODE] [--all-failed] --by BY run\n' },
+  relaunch: { code: 0, text: 'usage: python -m workflow relaunch [-h] [--dry-run] --by BY run lane\n' },
+}
+const OLD_HELP: HelpAnswers = {
+  retry: { code: 0, text: 'usage: python -m workflow retry [-h] --phase {worker,candidate} --node NODE --by BY run\n' },
+  relaunch: { code: 2, text: "python -m workflow: error: argument command: invalid choice: 'relaunch'\n" },
+}
+
+/** A child whose stdout and stderr are pipes: it prints and exits on its own, as `capture` reads it. */
+function pipedChild(pid: number, out: { stdout?: string; stderr?: string; code: number }) {
+  const child = new FakeChild(pid) as FakeChild & { stdout: EventEmitter; stderr: EventEmitter }
+  child.stdout = new EventEmitter()
+  child.stderr = new EventEmitter()
+  setImmediate(() => {
+    if (out.stdout) child.stdout.emit('data', Buffer.from(out.stdout))
+    if (out.stderr) child.stderr.emit('data', Buffer.from(out.stderr))
+    child.emit('exit', out.code, null)
+  })
+  return child
+}
+
+function recorder(help: HelpAnswers = NEW_HELP) {
   const calls: Spawned[] = []
   const children: FakeChild[] = []
   const output: string[] = []
+  /** The capability reads (`--help`), kept apart from `calls` so the other tests count only what a request spawned. */
+  const probes: Spawned[] = []
+  /** Answers for the next piped captures (the relaunch dry run): stdout, stderr and the exit code. */
+  const piped: { stdout?: string; stderr?: string; code: number }[] = []
   const gate: { wait: Promise<void> | null } = { wait: null }
   const auto: { code: number | null } = { code: null }
   const spawn: SpawnFn = async (command, args, options) => {
-    calls.push({ command, args, cwd: options.cwd, env: options.env, stdio: options.stdio, shell: options.shell, detached: options.detached })
+    const entry = { command, args, cwd: options.cwd, env: options.env, stdio: options.stdio, shell: options.shell, detached: options.detached }
+    if (args[3] === '--help' && (args[2] === 'retry' || args[2] === 'relaunch')) {
+      probes.push(entry)
+      const answer = help[args[2]]
+      return pipedChild(4000 + probes.length, { stdout: answer.text, code: answer.code }) as unknown as ChildProcess
+    }
+    calls.push(entry)
+    if (piped.length > 0 && Array.isArray(options.stdio) && options.stdio[1] === 'pipe') {
+      const child = pipedChild(5000 + calls.length, piped.shift()!)
+      children.push(child)
+      return child as unknown as ChildProcess
+    }
     if (gate.wait) await gate.wait
     const child = new FakeChild(5000 + calls.length)
     children.push(child)
@@ -189,7 +228,7 @@ function recorder() {
     if (auto.code !== null) { const code = auto.code; setImmediate(() => child.emit('exit', code, null)) }
     return child as unknown as ChildProcess
   }
-  return { calls, children, output, gate, auto, spawn, exit: (index: number, code: number | null, signal: NodeJS.Signals | null = null) => children[index].emit('exit', code, signal) }
+  return { calls, children, output, probes, piped, gate, auto, spawn, exit: (index: number, code: number | null, signal: NodeJS.Signals | null = null) => children[index].emit('exit', code, signal) }
 }
 
 type RigOptions = {
@@ -200,6 +239,8 @@ type RigOptions = {
   spawn?: SpawnFn
   timeoutMs?: number
   seeds?: Record<string, Seed>
+  /** What the fake controller's `--help` prints and exits with: the engine's commands unless an older controller is asked for. */
+  help?: HelpAnswers
 }
 
 async function rig(options: RigOptions = {}) {
@@ -225,7 +266,7 @@ async function rig(options: RigOptions = {}) {
     MD_MANAGER_WEB_PORT: WEB_PORT, MD_MANAGER_API_PORT: '3001', CLAUDECODE: '1', ...options.env,
   }
   const setup = await loadControlsConfig(env)
-  const spawner = recorder()
+  const spawner = recorder(options.help)
   const config = await parseProjectsConfig(JSON.stringify({
     version: 1,
     projects: [{ project_id: PROJECT, name: PROJECT, repository: join(root, 'repo'), workflows: [{ workflow_id: WORKFLOW, runs_root: runsRoot, definition: { name: 'Feature implementation', nodes: graph(lanes, false) } }] }],
@@ -260,6 +301,8 @@ async function rig(options: RigOptions = {}) {
     post(run, control, params, { ...extra, token: (await controls(run)).run_state_token })
   const seed = (run: string, spec: Seed) => seedRun(runsRoot, run, spec)
   for (const [run, spec] of Object.entries(options.seeds ?? {})) await seed(run, spec)
+  // Creating the app reads the controller's two help texts, and nothing else, when the controls are on.
+  await app.ready()
   const close = async (remove = true) => { await app.close(); if (remove) await rm(root, { recursive: true, force: true }) }
   return { root, home, wfhome, python, runsRoot, proc, env, setup, spawner, kills, app, url, headers, controls, post, act, seed, close }
 }
@@ -314,7 +357,7 @@ test('[L5] a disabled setup serves status enabled:false and 404 CONTROLS_DISABLE
     assert.equal(r.setup.enabled, false)
     const status = await r.app.inject({ method: 'GET', url: '/api/run-controls/status' })
     assert.equal(status.statusCode, 200)
-    assert.deepEqual(status.json(), { version: '1.0.0', enabled: false, paired: false })
+    assert.deepEqual(status.json(), { version: '1.1.0', enabled: false, paired: false })
   })
 })
 
@@ -332,7 +375,7 @@ test('[disabled] controls off: every control route is 404 CONTROLS_DISABLED, not
         assert.equal(errorOf(response).code, 'CONTROLS_DISABLED')
       }
       const status = await app.inject({ method: 'GET', url: '/api/run-controls/status' })
-      assert.deepEqual(status.json(), { version: '1.0.0', enabled: false, paired: false })
+      assert.deepEqual(status.json(), { version: '1.1.0', enabled: false, paired: false })
       const projects = await app.inject({ method: 'POST', url: `/api/projects/${PROJECT}/workflows/${WORKFLOW}/runs/r1`, payload: {} })
       assert.equal(projects.statusCode, 405)
       assert.equal((await app.inject({ method: 'GET', url: '/api/projects' })).statusCode, 200)
@@ -345,8 +388,8 @@ test('[enabled] the Projects API still answers 405 to a POST and status reports 
   await withRig({ seeds: { r1: SEEDS.stopped } }, async r => {
     assert.equal((await r.app.inject({ method: 'POST', url: `/api/projects/${PROJECT}/workflows/${WORKFLOW}/runs/r1`, payload: {} })).statusCode, 405)
     assert.equal((await r.app.inject({ method: 'POST', url: '/api/projects', payload: {} })).statusCode, 405)
-    assert.deepEqual((await r.app.inject({ method: 'GET', url: '/api/run-controls/status' })).json(), { version: '1.0.0', enabled: true, paired: false })
-    assert.deepEqual((await r.app.inject({ method: 'GET', url: '/api/run-controls/status', headers: { 'x-mdm-control-token': TOKEN } })).json(), { version: '1.0.0', enabled: true, paired: true })
+    assert.deepEqual((await r.app.inject({ method: 'GET', url: '/api/run-controls/status' })).json(), { version: '1.1.0', enabled: true, paired: false })
+    assert.deepEqual((await r.app.inject({ method: 'GET', url: '/api/run-controls/status', headers: { 'x-mdm-control-token': TOKEN } })).json(), { version: '1.1.0', enabled: true, paired: true })
     assert.equal(((await r.app.inject({ method: 'GET', url: '/api/run-controls/status', headers: { 'x-mdm-control-token': 'x'.repeat(40) } })).json() as { paired: boolean }).paired, false)
   })
 })
@@ -561,7 +604,7 @@ test('[L6] 1: the stored line keeps argv and unit; reads strip them; lost recove
     first.spawner.auto.code = null
     assert.equal((await first.act('k1', 'restart')).statusCode, 202)
     const long = lines('k1').at(-1)!
-    assert.deepEqual(long.argv, ['systemd-run', '--user', '--scope', '--collect', `--unit=${unitFor('k1', 1)}`, `--working-directory=${first.wfhome}`, '--', first.python, '-m', 'workflow', 'automatic', join(first.runsRoot, 'k1'), '--live', ...BY])
+    assert.deepEqual(long.argv, ['systemd-run', '--user', '--scope', '--collect', `--unit=${unitFor('k1', 1)}`, `--working-directory=${first.wfhome}`, '--property=OOMPolicy=continue', '--', first.python, '-m', 'workflow', 'automatic', join(first.runsRoot, 'k1'), '--live', ...BY])
     assert.equal(long.unit, unitFor('k1', 1))
     // The wire records are Appendix A's strict shape.
     const served = (await first.controls('k1')).records[0] as Record<string, unknown>
@@ -851,7 +894,7 @@ test('[long] a long control runs as a transient user unit: the exact systemd-run
     assert.equal(running.status, 'running')
     assert.equal(running.command, '$PY -m workflow automatic "$RUN" --live --by operator')
     assert.deepEqual(r.spawner.calls[0].args, [
-      '--user', '--scope', '--collect', `--unit=${unitFor('u1', 1)}`, `--working-directory=${r.wfhome}`, '--',
+      '--user', '--scope', '--collect', `--unit=${unitFor('u1', 1)}`, `--working-directory=${r.wfhome}`, '--property=OOMPolicy=continue', '--',
       r.python, '-m', 'workflow', 'automatic', join(r.runsRoot, 'u1'), '--live', '--by', 'operator',
     ])
     assert.equal(r.spawner.calls[0].command, 'systemd-run')
@@ -1229,5 +1272,198 @@ test('[contract] the served RunControls match the committed examples for the see
     ]
     // 'q-none' has a pane-less question while HERDR_ENV=1: the same unavailable answer as the example.
     for (const [run, name] of pairs) assert.deepEqual((await r.controls(run)).controls, states[name].controls, name)
+  })
+})
+
+test('[long] systemdRunArgv sets OOMPolicy=continue on the scope, before the -- that starts the controller argv', () => {
+  const argv = systemdRunArgv({ home: '/wf' }, 'mdm-control-0000abcd-1', ['/py', '-m', 'workflow', 'automatic', '/runs/r', '--live'])
+  const property = argv.indexOf('--property=OOMPolicy=continue')
+  const separator = argv.indexOf('--')
+  assert.ok(property >= 0, 'the property is passed')
+  assert.ok(property < separator, 'the property precedes --')
+  assert.equal(argv.filter(arg => arg.startsWith('--property=')).length, 1)
+  assert.deepEqual(argv.slice(separator + 1), ['/py', '-m', 'workflow', 'automatic', '/runs/r', '--live'])
+})
+
+// ---- 1.1.0: Retry all failed checks and Relaunch a lane ------------------------------------------------------------------
+
+const twoFailed: Seed = {
+  next: ['verify_ui', 'verify_adapter'],
+  tasks: [{ node_id: 'verify_ui', error: 'Gate blocked', interrupts: [], result: null }, { node_id: 'verify_adapter', error: 'Gate blocked', interrupts: [], result: null }],
+}
+const candidateFailed: Seed = { next: ['candidate'], tasks: [{ node_id: 'candidate', error: 'Combined candidate lane ui failed', interrupts: [], result: null }] }
+const relaunchable: Seed = { next: ['launch_ui', 'launch_adapter'], files: { 'ui.interactive.json': { status: 'needs_reconciliation' }, 'adapter.interactive.json': { status: 'attached_session_available' } } }
+const RETRY_ALL_OUT = [
+  'worker/ui will run attempt 2', 'worker/adapter will run attempt 2',
+  'Nothing ran. An automatic run continues under its supervisor: /py -m workflow automatic /runs/r --live --by operator',
+]
+const RELAUNCH_OUT = [
+  'Relaunched ui once: session 6f1c2d3e-0000-4000-8000-000000000001; archived ui.interactive.launch-1.json.', 'Continue the run with:',
+  '/py -m workflow reconcile /runs/r --by operator', '/py -m workflow automatic /runs/r --live --by operator',
+]
+const preview = (r: Awaited<ReturnType<typeof rig>>, run: string, body: Record<string, unknown>) =>
+  r.app.inject({ method: 'POST', url: r.url(run, '/relaunch-preview'), headers: r.headers(), payload: JSON.stringify(body) })
+
+test('[recovery] the app reads the two help texts once, at creation; no controls GET spawns anything; a disabled setup reads none', async () => {
+  await withRig({ seeds: { a: twoFailed, b: relaunchable } }, async r => {
+    assert.deepEqual(r.spawner.probes.map(call => [call.command, call.args]), [
+      [r.python, ['-m', 'workflow', 'retry', '--help']], [r.python, ['-m', 'workflow', 'relaunch', '--help']]])
+    assert.equal(r.spawner.probes[0].shell, false)
+    assert.deepEqual(r.spawner.calls, [], 'nothing else ran at creation')
+    for (let i = 0; i < 3; i++) for (const run of ['a', 'b']) await r.controls(run)
+    assert.equal(r.spawner.probes.length, 2, 'the reads are cached for the process: no repeated probe')
+    assert.deepEqual(r.spawner.calls, [], 'no controls GET, the first one included, spawns a process')
+  })
+  const off = await rig({ seeds: { a: twoFailed }, env: { MD_MANAGER_RUN_CONTROLS: 'off' } })
+  try {
+    assert.equal(off.setup.enabled, false)
+    assert.deepEqual([off.spawner.probes, off.spawner.calls], [[], []], 'a controls-disabled app spawns nothing')
+  } finally { await off.close() }
+})
+
+test('[recovery] an older controller: both controls unavailable with their reasons, on every run, and the POSTs refused', async () => {
+  await withRig({ seeds: { a: twoFailed, b: relaunchable }, help: OLD_HELP }, async r => {
+    for (const run of ['a', 'b']) {
+      const controls = await r.controls(run)
+      assert.equal(byId(controls, 'retry_all').reason, 'This controller has no `retry --all-failed` (workflow-collected-fixes is not merged)')
+      assert.equal(byId(controls, 'relaunch').reason, 'This controller has no `relaunch` command (workflow-collected-fixes is not merged)')
+    }
+    assert.equal(errorOf(await r.act('a', 'retry_all')).code, 'NOT_AVAILABLE')
+    assert.equal(errorOf(await r.act('b', 'relaunch', { lane: 'ui' })).code, 'NOT_AVAILABLE')
+    assert.equal(errorOf(await preview(r, 'b', { run_state_token: (await r.controls('b')).run_state_token, lane: 'ui' })).code, 'NOT_AVAILABLE')
+    assert.deepEqual(r.spawner.calls, [])
+  })
+  // A retry help without --all-failed is absent even on exit 0, and a failed help read is absent too (fail closed).
+  await withRig({ seeds: { a: twoFailed, b: relaunchable }, help: { retry: OLD_HELP.retry, relaunch: { code: 1, text: '' } } }, async r => {
+    assert.equal(byId(await r.controls('a'), 'retry_all').available, false)
+    assert.equal(byId(await r.controls('b'), 'relaunch').available, false)
+  })
+})
+
+test('[recovery] retry_all: offered for two or more failed worker lanes under Retry\'s rules; its argv, record and effect', async () => {
+  await withRig({ seeds: { two: twoFailed, one: SEEDS.failedVerify, cand: candidateFailed, lock: twoFailed, gone: { ...twoFailed, ...SEEDS.abandoned, next: twoFailed.next }, done: { ...twoFailed, accepted: true }, manual: { ...twoFailed, automatic: false } } }, async r => {
+    const two = await r.controls('two')
+    const control = byId(two, 'retry_all')
+    assert.deepEqual([control.available, control.label, control.runs, control.confirm, control.params], [true, 'Retry all failed checks', 'short', 'plain', []])
+    assert.equal(control.command, '$PY -m workflow retry "$RUN" --phase worker --all-failed --by operator')
+    assert.match(control.effect, /Restart supervisor then reruns them/)
+    assert.equal(byId(await r.controls('one'), 'retry_all').reason, 'Fewer than two worker checks failed')
+    assert.equal(byId(await r.controls('cand'), 'retry_all').reason, 'Fewer than two worker checks failed', 'candidate targets never count')
+    assert.equal(byId(await r.controls('cand'), 'retry').available, true, 'the single retry still offers the candidate')
+    assert.equal(byId(await r.controls('gone'), 'retry_all').reason, 'The run was abandoned')
+    assert.equal(byId(await r.controls('done'), 'retry_all').reason, 'The run is finished')
+    assert.equal(byId(await r.controls('manual'), 'retry_all').available, true, 'no automatic-run condition: the controller refuses a manual run itself')
+    const runDir = join(r.runsRoot, 'lock')
+    await r.proc.hold(join(runDir, 'automatic-supervisor.lock'), 777, ['python3', '-m', 'workflow', 'automatic', runDir, '--live'])
+    assert.match(byId(await r.controls('lock'), 'retry_all').reason!, /^A supervisor is running/, 'the lock first')
+    await r.proc.release()
+    // Confirmed: exactly the controller's command, its lines in the record.
+    r.spawner.output.push(`${RETRY_ALL_OUT.join('\n')}\n`)
+    r.spawner.auto.code = 0
+    const response = await r.act('two', 'retry_all')
+    assert.equal(response.statusCode, 200, response.body)
+    const record = controlResponseSchema.parse(response.json()).record
+    assert.deepEqual(r.spawner.calls.map(call => call.args), [['-m', 'workflow', 'retry', join(r.runsRoot, 'two'), '--phase', 'worker', '--all-failed', '--by', 'operator']])
+    assert.equal(r.spawner.calls[0].shell, false)
+    assert.deepEqual([record.status, record.exit_code, record.output_tail], ['succeeded', 0, RETRY_ALL_OUT])
+    // A controller refusal (the manual-run Blocked line) is a failed record with that line first.
+    r.spawner.output.push('Blocked: retry --all-failed needs an automatic run; retry each lane in your terminal\n')
+    r.spawner.auto.code = 1
+    const refused = controlResponseSchema.parse((await r.act('manual', 'retry_all')).json()).record
+    assert.equal(refused.status, 'failed')
+    assert.match(refused.output_tail[0], /^Blocked: /)
+  })
+})
+
+test('[recovery] relaunch: the cheap-facts choices; each condition met and unmet', async () => {
+  await withRig({ seeds: {
+    ok: relaunchable,
+    absent: { next: ['launch_ui'] },
+    notNext: { next: ['verify_ui'], files: { 'ui.interactive.json': { status: 'needs_reconciliation' } } },
+    attached: { next: ['launch_ui'], files: { 'ui.interactive.json': { status: 'attached_session_available' } } },
+    completed: { next: ['launch_ui'], files: { 'ui.interactive.json': { status: 'needs_reconciliation' }, 'ui.completion.json': { status: 'completed' } } },
+    handed: { next: ['launch_ui'], files: { 'ui.handoff.json': { summary: 'x' } } },
+    stopped: { next: ['launch_ui'], files: { 'ui.stop.json': { stopped: true } } },
+    archived: { next: ['launch_ui'], files: { 'ui.interactive.json': { status: 'attached_session_available' }, 'ui.interactive.launch-1.json': { status: 'needs_reconciliation' } } },
+    lock: relaunchable,
+  } }, async r => {
+    const ok = byId(await r.controls('ok'), 'relaunch')
+    assert.deepEqual([ok.available, ok.label, ok.runs, ok.confirm], [true, 'Relaunch a lane', 'short', 'plain'])
+    assert.deepEqual(ok.params, [{ name: 'lane', kind: 'choice', choices: ['ui'], required: true }], 'the adapter\'s attached receipt does not qualify')
+    assert.match(ok.effect, /Reconcile launches and then Restart supervisor/)
+    assert.deepEqual(byId(await r.controls('absent'), 'relaunch').params[0], { name: 'lane', kind: 'choice', choices: ['ui'], required: true }, 'an absent receipt qualifies')
+    for (const run of ['notNext', 'attached', 'completed', 'handed', 'stopped', 'archived']) {
+      const control = byId(await r.controls(run), 'relaunch')
+      assert.equal(control.reason, 'No lane launch is waiting to be relaunched', run)
+    }
+    const runDir = join(r.runsRoot, 'lock')
+    await r.proc.hold(join(runDir, 'automatic-supervisor.lock'), 778, ['python3', '-m', 'workflow', 'automatic', runDir, '--live'])
+    assert.match(byId(await r.controls('lock'), 'relaunch').reason!, /^A supervisor is running/)
+  })
+})
+
+test('[recovery] relaunch-preview: the dry run\'s first line verbatim, exit 0 and 1; a stale token and an unoffered lane refused; no record', async () => {
+  await withRig({ seeds: { ok: relaunchable } }, async r => {
+    const token = (await r.controls('ok')).run_state_token
+    r.spawner.piped.push({ stdout: 'relaunch ui: allowed\nwould archive ui.interactive.json\n', code: 0 })
+    const allowed = await preview(r, 'ok', { run_state_token: token, lane: 'ui' })
+    assert.equal(allowed.statusCode, 200, allowed.body)
+    assert.deepEqual(allowed.json(), { exitCode: 0, line: 'relaunch ui: allowed' })
+    assert.deepEqual(r.spawner.calls.at(-1)!.args, ['-m', 'workflow', 'relaunch', join(r.runsRoot, 'ok'), 'ui', '--dry-run', '--by', 'operator'])
+    assert.deepEqual(r.spawner.calls.at(-1)!.stdio, ['ignore', 'pipe', 'pipe'])
+    const refusal = "relaunch ui: refused: session 6f1c2d3e-0000-4000-8000-000000000001 ('done') carries the launch name ui"
+    r.spawner.piped.push({ stdout: `${refusal}\n`, code: 1 })
+    assert.deepEqual((await preview(r, 'ok', { run_state_token: token, lane: 'ui' })).json(), { exitCode: 1, line: refusal })
+    // Some refusals print only a Blocked line on stderr.
+    r.spawner.piped.push({ stderr: 'Traceback noise\nBlocked: the lane ui has no launch receipt to archive\n', code: 1 })
+    assert.deepEqual((await preview(r, 'ok', { run_state_token: token, lane: 'ui' })).json(), { exitCode: 1, line: 'Blocked: the lane ui has no launch receipt to archive' })
+    const spawned = r.spawner.calls.length
+    assert.equal(errorOf(await preview(r, 'ok', { run_state_token: 'stale', lane: 'ui' })).code, 'STATE_CHANGED')
+    const outside = await preview(r, 'ok', { run_state_token: token, lane: 'adapter' })
+    assert.equal(outside.statusCode, 400)
+    assert.equal(errorOf(outside).code, 'INVALID_PARAMS')
+    assert.equal(errorOf(await preview(r, 'ok', { run_state_token: token, lane: 'ui', request_id: crypto.randomUUID() })).code, 'INVALID_PARAMS')
+    assert.equal(errorOf(await r.app.inject({ method: 'POST', url: r.url('ok', '/relaunch-preview'), headers: r.headers({ 'x-mdm-control-token': undefined }), payload: JSON.stringify({ run_state_token: token, lane: 'ui' }) })).code, 'TOKEN_REQUIRED')
+    assert.equal(r.spawner.calls.length, spawned, 'a refused preview runs nothing')
+    assert.deepEqual((await r.controls('ok')).records, [], 'a preview writes no record')
+  })
+})
+
+test('[recovery] a confirmed relaunch runs relaunch alone: the record holds the controller\'s lines, then Reconcile is offered; no chaining', async () => {
+  await withRig({ seeds: { ok: relaunchable } }, async r => {
+    r.spawner.output.push(`${RELAUNCH_OUT.join('\n')}\n`)
+    r.spawner.auto.code = 0
+    const response = await r.act('ok', 'relaunch', { lane: 'ui' })
+    assert.equal(response.statusCode, 200, response.body)
+    const record = controlResponseSchema.parse(response.json()).record
+    assert.deepEqual(r.spawner.calls.map(call => call.args), [['-m', 'workflow', 'relaunch', join(r.runsRoot, 'ok'), 'ui', '--by', 'operator']])
+    assert.ok(!r.spawner.calls.some(call => call.args.includes('reconcile') || call.args.includes('automatic')), 'no reconcile or automatic command runs')
+    assert.deepEqual([record.status, record.command, record.params, record.output_tail], ['succeeded', '$PY -m workflow relaunch "$RUN" ui --by operator', { lane: 'ui' }, RELAUNCH_OUT])
+    // The fake controller archived the receipt as the engine does; the existing rule then offers Reconcile.
+    await rm(join(r.runsRoot, 'ok', 'ui.interactive.json'))
+    await writeFile(join(r.runsRoot, 'ok', 'ui.interactive.json'), JSON.stringify({ status: 'needs_reconciliation' }))
+    const after = await r.controls('ok')
+    assert.equal(byId(after, 'reconcile').available, true)
+    assert.equal(byId(after, 'restart').available, true)
+    assert.match(byId(after, 'relaunch').effect, /Reconcile launches and then Restart supervisor/)
+    // A lane outside the choices, and a refusal, as for every control.
+    assert.equal(errorOf(await r.act('ok', 'relaunch', { lane: 'adapter' })).code, 'INVALID_PARAMS')
+    r.spawner.output.push('Blocked: session 6f1c2d3e (\'done\') carries the launch name ui\nNothing was relaunched.\n')
+    r.spawner.auto.code = 1
+    const refused = controlResponseSchema.parse((await r.act('ok', 'relaunch', { lane: 'ui' })).json()).record
+    assert.deepEqual([refused.status, refused.output_tail], ['failed', ["Blocked: session 6f1c2d3e ('done') carries the launch name ui", 'Nothing was relaunched.']])
+  })
+})
+
+test('[recovery] the 14 controls in order, retry_all and relaunch after clean; the recovery example is what the server serves', async () => {
+  await withRig({ seeds: { rec: { ...twoFailed, next: ['verify_ui', 'verify_adapter', 'launch_ui'], files: { 'ui.interactive.json': { status: 'needs_reconciliation' } } } } }, async r => {
+    const controls = await r.controls('rec')
+    assert.equal(controls.version, '1.1.0')
+    assert.equal(controls.controls.length, 14)
+    assert.deepEqual(controls.controls.map(control => control.id), [...CONTROL_IDS])
+    assert.deepEqual(controls.controls.slice(12).map(control => control.id), ['retry_all', 'relaunch'])
+    assert.deepEqual(controls.controls, examples.runControlsStates.recovery.controls)
+    assert.throws(() => runControlsSchema.parse({ ...controls, controls: controls.controls.slice(0, 13) }))
+    assert.throws(() => runControlsSchema.parse({ ...controls, controls: [...controls.controls.slice(0, 12), controls.controls[13], controls.controls[12]] }))
   })
 })

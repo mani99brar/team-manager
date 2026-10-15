@@ -1,4 +1,4 @@
-import { TOKEN_KEY, type CleanPreview, type ControlErrorCode, type ControlRecord, type ControlScope, type ControlsStatus, type Params, type RunControls } from './types.ts'
+import { TOKEN_KEY, type CleanPreview, type RelaunchPreview, type ControlErrorCode, type ControlRecord, type ControlScope, type ControlsStatus, type Params, type RunControls } from './types.ts'
 
 const TOKEN_HEADER = 'X-MDM-Control-Token'
 
@@ -41,6 +41,7 @@ export const controlPaths = {
   run: (scope: ControlScope) => `/api/run-controls/${segments(scope)}`,
   control: (scope: ControlScope, id: string) => `/api/run-controls/${segments(scope)}/${encodeURIComponent(id)}`,
   preview: (scope: ControlScope) => `/api/run-controls/${segments(scope)}/clean-preview`,
+  relaunchPreview: (scope: ControlScope) => `/api/run-controls/${segments(scope)}/relaunch-preview`,
   record: (scope: ControlScope, recordId: string) => `/api/run-controls/${segments(scope)}/records/${encodeURIComponent(recordId)}`,
 }
 
@@ -79,3 +80,7 @@ export const postControl = (scope: ControlScope, token: string, id: string, body
 /** Clean's dry run: body is the run state token only, never a `request_id` (decisions [L4]). */
 export const postCleanPreview = (scope: ControlScope, token: string, runStateToken: string) =>
   request<CleanPreview>(controlPaths.preview(scope), token, { run_state_token: runStateToken })
+
+/** Relaunch's dry run for one lane: the run state token and the lane only, never a `request_id`; it writes no record. */
+export const postRelaunchPreview = (scope: ControlScope, token: string, runStateToken: string, lane: string) =>
+  request<RelaunchPreview>(controlPaths.relaunchPreview(scope), token, { run_state_token: runStateToken, lane })

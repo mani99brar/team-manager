@@ -373,6 +373,27 @@ export class Runner {
   }
 
   /** A short child whose stdout and stderr come back as text (the clean preview); bounded like every short control. */
+  /** `capture` with stdout and stderr kept apart (the relaunch dry run's verdict is stdout's first line, else stderr's `Blocked:` line). */
+  async captureStreams(command: string, args: string[]): Promise<{ exitCode: number | null; stdout: string; stderr: string }> {
+    const child = await this.spawn(command, args, { cwd: this.config.home, env: this.config.childEnv, detached: true, stdio: ['ignore', 'pipe', 'pipe'], shell: false })
+    return new Promise((resolveCapture, reject) => {
+      const chunks: { stdout: Buffer[]; stderr: Buffer[] } = { stdout: [], stderr: [] }
+      let size = 0
+      for (const name of ['stdout', 'stderr'] as const) {
+        child[name]?.on('data', (chunk: Buffer) => {
+          if (size < PROC_LIMIT) { chunks[name].push(Buffer.from(chunk)); size += chunk.length }
+        })
+      }
+      const timer = setTimeout(() => { if (child.pid !== undefined) { try { this.kill(child.pid, 'SIGKILL') } catch { /* gone */ } } }, this.timeoutMs)
+      timer.unref()
+      child.once('error', error => { clearTimeout(timer); reject(error) })
+      child.once('exit', code => {
+        clearTimeout(timer)
+        setImmediate(() => resolveCapture({ exitCode: code, stdout: Buffer.concat(chunks.stdout).toString('utf8'), stderr: Buffer.concat(chunks.stderr).toString('utf8') }))
+      })
+    })
+  }
+
   async capture(command: string, args: string[]): Promise<{ exitCode: number | null; output: string }> {
     const child = await this.spawn(command, args, { cwd: this.config.home, env: this.config.childEnv, detached: true, stdio: ['ignore', 'pipe', 'pipe'], shell: false })
     return new Promise((resolveCapture, reject) => {
@@ -419,9 +440,12 @@ export function unitName(key: RunKey, n: number): string {
   return `mdm-control-${createHash('sha256').update(runKeyOf(key)).digest('hex').slice(0, 8)}-${n}`
 }
 
-/** [L1] 2: `systemd-run --user --scope --collect --unit=... --working-directory=<home> -- <argv>`, the child of this server. */
+/**
+ * [L1] 2: `systemd-run --user --scope --collect --unit=... --working-directory=<home> --property=OOMPolicy=continue -- <argv>`, the child
+ * of this server. `OOMPolicy=continue` keeps the scope, and the supervisor in it, alive when the kernel kills one of its checks for memory.
+ */
 export function systemdRunArgv(config: Pick<ControlsConfig, 'home'>, unit: string, argv: string[]): string[] {
-  return ['--user', '--scope', '--collect', `--unit=${unit}`, `--working-directory=${config.home}`, '--', ...argv]
+  return ['--user', '--scope', '--collect', `--unit=${unit}`, `--working-directory=${config.home}`, '--property=OOMPolicy=continue', '--', ...argv]
 }
 
 export function userHome(env: NodeJS.ProcessEnv): string {

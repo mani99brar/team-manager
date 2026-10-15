@@ -21,7 +21,10 @@ import {
   DISPATCH_BUSY, DISPATCH_NOORIGIN, DISPATCH_UNREADABLE, DISPATCH_WIDGETS, DISPATCH_WIDGETS_WT, NOORIGIN_NEEDS, PARKED_SINCE, RUN_DECIDE, RUN_HALT,
   RUN_HALT_LIVE, RUN_PARKED, RUN_REDO_NEW, RUN_REDO_OLD, RUN_RERUN_OLD, RUN_WT_DROPPED, RUN_WT_PARKED,
 } from './fixtures/dispatch.ts'
-import { attach, EXECUTION_WORDS, executionControlCount, expectNoExecutionControls, expectNoProjectPageExecutionControls, gotoProjectOpen, installHooks, installListsWorld, phase, PHASE_OPTIONS, projectsUrl, projectUrl, runUrl, triageUrl, workflowUrl, workspace } from './support.ts'
+import {
+  attach, editHomeRows, editHomeRuns, EXECUTION_WORDS, executionControlCount, expectNoExecutionControls, expectNoProjectPageExecutionControls, gotoProjectOpen, installHooks, installListsWorld,
+  isHomeRuns, isRegistryPages, phase, PHASE_OPTIONS, projectsUrl, projectUrl, runUrl, triageUrl, workflowUrl, workspace, type HomeEntry,
+} from './support.ts'
 import { B_FILTER, B_FOLD, B_MIX, B_MIX_ORDER, B_ORDER, B_ORDER_FEATURES, B_PARKED, B_RUNNER, bDefinition, bSummary, LISTS_B_NOW } from './fixtures/ux-lists.ts'
 
 installHooks()
@@ -94,14 +97,14 @@ async function serveDeskReviewers(page: Page) {
   await page.route(url => url.pathname === reviewsPath, route => route.fulfill({ json: DESK_REVIEW }))
 }
 
-const RUNS_LIST_PATH = /^\/api\/projects\/[^/]+\/workflows\/[^/]+\/runs$/
 
 test(`[scenario:home-sections] Runs home ranked by need at 1440: Needs you cards, Running and Paused as compact rows with step sub-headers, Recent with filtered-set counts, and the feature header's real reviewers (${phase})`, async ({ page }, testInfo) => {
   test.setTimeout(90_000)
   await serveDeskReviewers(page)
   await page.clock.setFixedTime(REVAMP_NOW)
-  // The Runs home data path is read against the mock: record one run-list fetch (P2: no browser test of it before).
-  const recorded = page.waitForRequest(request => request.method() === 'GET' && RUNS_LIST_PATH.test(new URL(request.url()).pathname))
+  // The Runs home data path is read against the mock: record its fetch (P2: no browser test of it before). Since stage C it is the
+  // one registry home read, which serves every workflow's run-list rows.
+  const recorded = page.waitForRequest(request => request.method() === 'GET' && isHomeRuns(new URL(request.url())))
   await page.goto(triageUrl)
   await testInfo.attach('runs-home-fetch', { body: new URL((await recorded).url()).pathname, contentType: 'text/plain' })
 
@@ -339,20 +342,9 @@ test(`Runs home with nothing waiting: "Needs you · 0" with the empty state in t
       runs = kept
     }
   }
-  await page.route(isRunList, async route => {
-    if (phase === 'candidate') {
-      const response = await route.fetch()
-      const body = await response.json() as { runs?: RunSummary[]; next_cursor: string | null }
-      await (Array.isArray(body.runs) ? route.fulfill({ json: filterWaiting(body as { runs: RunSummary[]; next_cursor: string | null }) }) : route.fulfill({ response }))
-      return
-    }
-    // A run list that could not be read carries no `runs` array (an unlistable workflow answers with an error): pass its
-    // response through untouched, status and all, so Runs home reads it under Attention exactly as it would without this override.
-    const resp = mockResponse(new URL(route.request().url()))
-    const body = JSON.parse(String(resp.body)) as { runs?: RunSummary[]; next_cursor: string | null }
-    if (!Array.isArray(body.runs)) { await route.fulfill({ status: resp.status, contentType: resp.contentType, body: resp.body }); return }
-    await route.fulfill({ json: filterWaiting(body as { runs: RunSummary[]; next_cursor: string | null }) })
-  })
+  // The rail, the cards and Triage read every list in one home read: each workflow's rows are filtered there; a workflow that
+  // could not be read keeps its error, so Runs home reads it under Attention exactly as it would without this override.
+  await editHomeRows(page, runs => filterWaiting({ runs, next_cursor: null }).runs)
   await page.clock.setFixedTime(REVAMP_NOW)
   await page.goto(triageUrl)
   const needs = page.getByTestId('needs-you')
@@ -373,7 +365,8 @@ test(`Runs home with nothing waiting: "Needs you · 0" with the empty state in t
 test(`Runs home with a run list that failed to load: a fail-toned Attention card naming the list and the API error (${phase})`, async ({ page }) => {
   test.slow()
   const failing = `/api/projects/${PROJECT.project_id}/workflows/${UX_REVAMP_LISTS_WORKFLOW_ID}/runs`
-  await page.route(url => url.pathname === failing, route => route.fulfill({ status: 500, json: { error: { code: 'revamp_test', message: 'The run list could not be read' } } }))
+  // The home read names that workflow's failure, as its run-list route answered it before.
+  await editHomeRuns(page, (entry, url) => (url.pathname === failing ? { ...entry, runs: [], next_cursor: null, error: { status: 500, code: 'revamp_test', message: 'The run list could not be read' } } : entry))
   await page.clock.setFixedTime(REVAMP_NOW)
   await page.goto(triageUrl)
   const attention = page.getByTestId('lists-errors')
@@ -400,8 +393,9 @@ test(`Runs home with a run list that failed to load: a fail-toned Attention card
 })
 
 /**
- * The other ways a run list fails to load: the request never gets an answer (network), or the server answers with a body that
- * is not JSON, an error page or a success. Each gives its own message in the same fail-toned Attention card.
+ * The other ways a read fails: the request never gets an answer (network), or the server answers with a body that is not JSON,
+ * an error page or a success. Triage reads every list in one request now, so it is that read which fails: Triage shows no row
+ * and no all-clear, and says the runs were not read, with each failure's own message in words.
  */
 const LIST_FAILURES: { what: string; answer: (route: Route) => Promise<void>; message: string }[] = [
   { what: 'a network failure', answer: route => route.abort('connectionrefused'), message: 'The API could not be reached. Check that the server is running, then retry.' },
@@ -410,21 +404,17 @@ const LIST_FAILURES: { what: string; answer: (route: Route) => Promise<void>; me
 ]
 
 for (const failure of LIST_FAILURES) {
-  test(`Runs home with a run list that failed by ${failure.what}: the Attention card says so in words (${phase})`, async ({ page }) => {
+  test(`Runs home whose run read failed by ${failure.what}: it says the runs were not read, in words, and claims nothing (${phase})`, async ({ page }) => {
     test.slow()
-    const failing = `/api/projects/${PROJECT.project_id}/workflows/${UX_REVAMP_LISTS_WORKFLOW_ID}/runs`
     // The answer is the failure itself in both phases: nothing of the original response is read.
-    await page.route(url => url.pathname === failing, failure.answer)
+    await page.route(isHomeRuns, failure.answer)
     await page.clock.setFixedTime(REVAMP_NOW)
     await page.goto(triageUrl)
-    const attention = page.getByRole('alert', { name: /^Attention · \d+$/ })
-    await expect(attention).toHaveAttribute('data-testid', 'lists-errors')
-    const card = attention.locator('li', { hasText: `${PROJECT.name} · ${UX_REVAMP_LISTS_WORKFLOW_ID}` })
-    await expect(card).toHaveCount(1)
-    expect(await card.getAttribute('class')).toMatch(/\bui-card\b.*\btone-fail\b/)
-    await expect(card.locator('span')).toHaveText(failure.message)
+    const notRead = page.getByTestId('home-not-read')
+    await expect(notRead).toHaveText(`Runs not read: ${failure.message}`, { timeout: 30_000 })
     for (const runId of OWN) await expect(page.locator(`a[data-run-id="${runId}"]`)).toHaveCount(0)
-    await expect(page.getByTestId('recent-runs').locator('a[data-run-id]').first()).toBeVisible()
+    await expect(page.getByTestId('home-quiet')).toHaveCount(0)
+    await expect(page.getByText('nothing waits on you')).toHaveCount(0)
     await expectNoExecutionControls(page)
   })
 }
@@ -621,22 +611,11 @@ const tokenColour = (page: Page, token: string) => page.evaluate(`(() => {
 })()`) as Promise<string>
 const colourOf = (locator: Locator) => locator.evaluate((element: unknown) => (globalThis as unknown as Styled).getComputedStyle(element).color)
 
-/** Answers a run list with `edit` applied to its original runs (the mocks' in the worker phase, the server's in the candidate). */
-async function editRunLists(page: Page, edit: (runs: RunSummary[], url: URL) => RunSummary[]) {
-  await page.route(isRunList, async route => {
-    const url = new URL(route.request().url())
-    if (phase === 'candidate') {
-      const response = await route.fetch()
-      const body = await response.json() as { runs?: RunSummary[]; next_cursor: string | null }
-      await (Array.isArray(body.runs) ? route.fulfill({ json: { ...body, runs: edit(body.runs, url) } }) : route.fulfill({ response }))
-      return
-    }
-    const resp = mockResponse(url)
-    const body = JSON.parse(String(resp.body)) as { runs?: RunSummary[]; next_cursor: string | null }
-    if (!Array.isArray(body.runs)) { await route.fulfill({ status: resp.status, contentType: resp.contentType, body: resp.body }); return }
-    await route.fulfill({ json: { ...body, runs: edit(body.runs, url) } })
-  })
-}
+/**
+ * Answers the registry home read with `edit` applied to each workflow's original rows (the mocks' in the worker phase, the
+ * server's in the candidate), keyed by the workflow's run-list URL as when each list was its own request.
+ */
+const editRunLists = (page: Page, edit: (runs: RunSummary[], url: URL) => RunSummary[]) => editHomeRows(page, edit)
 
 /** A synthetic paused run (paused at the review, so it needs nobody) in a workflow of its own id, dated in 2024. */
 const parkedRun = (base: RunSummary, runId: string, workflowId: string, created: string): RunSummary => ({
@@ -732,7 +711,7 @@ test(`[scenario:triage-loading] While the runs, the overview and the steps load,
   const stepsHeld = new Promise<void>(resolve => { releaseSteps = resolve })
   const isOverview = (url: URL) => url.pathname === '/api/dispatch/projects'
   const isSteps = (url: URL) => /^\/api\/dispatch\/projects\/[^/]+\/steps$/.test(url.pathname)
-  await page.route(url => isRunList(url) || isOverview(url), async route => { await lists; await route.fallback().catch(() => undefined) })
+  await page.route(url => isHomeRuns(url) || isRunList(url) || isOverview(url), async route => { await lists; await route.fallback().catch(() => undefined) })
   await page.route(isSteps, async route => { await stepsHeld; await route.fallback().catch(() => undefined) })
 
   const forbidden = ['cannot be read', 'nothing waits', 'Triage · 0', '0 runs']
@@ -783,9 +762,11 @@ test(`[scenario:triage-loading] While the runs, the overview and the steps load,
 test(`A project whose run list fails: its rail row says "cannot be read" and Triage says the lists are incomplete above Needs you; the feature page shows no review line before its reviewers read settles (${phase})`, async ({ page }) => {
   test.slow()
   await page.setViewportSize({ width: 1440, height: 900 })
-  await page.route(url => url.pathname === `/api/projects/${DISPATCH_WIDGETS_WT}/workflows/experiment/runs`
-    || url.pathname === `/api/projects/${DISPATCH_WIDGETS_WT}/workflows/wt-parked/runs` || url.pathname === `/api/projects/${DISPATCH_WIDGETS_WT}/workflows/wt-dropped/runs`,
-  route => route.fulfill({ status: 503, json: { error: { code: 'RUNS_UNREADABLE', message: 'held for the test' } } }))
+  const wtLists = (url: URL) => url.pathname === `/api/projects/${DISPATCH_WIDGETS_WT}/workflows/experiment/runs`
+    || url.pathname === `/api/projects/${DISPATCH_WIDGETS_WT}/workflows/wt-parked/runs` || url.pathname === `/api/projects/${DISPATCH_WIDGETS_WT}/workflows/wt-dropped/runs`
+  const unreadable: HomeEntry['error'] = { status: 503, code: 'RUNS_UNREADABLE', message: 'held for the test' }
+  await editHomeRuns(page, (entry, url) => (wtLists(url) ? { ...entry, runs: [], next_cursor: null, error: unreadable } : entry))
+  await page.route(wtLists, route => route.fulfill({ status: 503, json: { error: { code: 'RUNS_UNREADABLE', message: 'held for the test' } } }))
   await page.goto(triageUrl)
   await expect(railRow(page, DISPATCH_WIDGETS_WT)).toContainText('cannot be read', { timeout: 30_000 })
   const incomplete = page.getByTestId('lists-incomplete')
@@ -875,7 +856,7 @@ test(`Triage with nothing waiting, moved today or running: one line instead of t
 test(`Triage whose run reads all fail claims no quiet: no "Nothing waits on you" line, the sections stay shown (${phase})`, async ({ page }) => {
   test.slow()
   await page.setViewportSize({ width: 1440, height: 900 })
-  await page.route(isRunList, route => route.fulfill({ status: 500, json: { error: { code: 'internal', message: 'run list unreadable' } } }))
+  await editHomeRuns(page, entry => ({ ...entry, runs: [], next_cursor: null, error: { status: 500, code: 'internal', message: 'run list unreadable' } }))
   await page.clock.setFixedTime(REVAMP_NOW)
   await page.goto(triageUrl)
   await expect(page.getByTestId('lists-incomplete')).toHaveText(/^\d+ of \d+ projects read; lists incomplete$/, { timeout: 30_000 })
@@ -1482,7 +1463,8 @@ test(`[scenario:triage-filters] Triage's one bar filters every section before se
   await expect(recent.getByRole('button', { name: 'Group by project' })).toHaveCount(1)
   await expect(page.locator('input[type="search"]')).toHaveCount(1)
   await expect(page.locator('button[data-filter="failed"]')).toHaveCount(1)
-  await expect(bar(page).getByTestId('run-filter-date').locator('option')).toHaveText(['Any date', 'Today', '7 days'])
+  // Stage C adds "All time" (the registry's pages, read only when chosen); the other three stay.
+  await expect(bar(page).getByTestId('run-filter-date').locator('option')).toHaveText(['Any date', 'Today', '7 days', 'All time'])
   const scope = bar(page).getByTestId('run-filter-scope')
   await expect(scope).toHaveText(/^(\d+) of \1 runs · live runs and runs finished in the last 7 days$/)
   const title = await page.title()
@@ -1571,7 +1553,8 @@ test(`[scenario:project-collapsed] The project page folds its features into date
   await expect(folds.first().locator('.dispatch-def-list li')).toHaveCount(bDefinition(B_FOLD.project_id, B_FOLD.workflows[0].workflow_id).nodes.length)
   // No GitHub remote: the GitHub column is one line, and the chart takes the width a 380 px column would hold.
   const github = page.getByTestId('dispatch-github')
-  expect((await github.boundingBox())!.height).toBeLessThanOrEqual(48)
+  // Measured once the overview read settled (until then the column holds its reading state); the bound is unchanged.
+  await expect.poll(async () => (await github.boundingBox())!.height, { timeout: 30_000 }).toBeLessThanOrEqual(48)
   const chart = (await page.getByTestId('dispatch-chart').boundingBox())!.width
   const body = (await page.locator('.dispatch-project-body').boundingBox())!.width
   expect(chart, 'the chart is wider than beside a 380 px column').toBeGreaterThan(body - 380 - 16)
@@ -1677,7 +1660,7 @@ async function serveCappedPages(page: Page, cursors: string[]) {
   })
 }
 
-test(`'Load more runs' at the restorable page count is disabled and reads no further page; a reload and the copied URL show the same rows (${phase})`, async ({ page, context }) => {
+test(`At the restorable page count the feature page says why it stops and that All time reads on, offers no Load more and reads no further page; a reload and the copied URL show the same rows (${phase})`, async ({ page, context }) => {
   test.slow()
   const cursors: string[] = []
   await serveCappedPages(page, cursors)
@@ -1686,9 +1669,11 @@ test(`'Load more runs' at the restorable page count is disabled and reads no fur
   await page.goto(url)
   await expect(runList(page).locator('li')).toHaveCount(40, { timeout: 60_000 })
   await expect(page).toHaveURL(/\?pages=20$/)
-  const more = page.getByRole('button', { name: 'Load more runs' })
-  await expect(more).toBeDisabled()
-  await more.click({ force: true })
+  // No Load more it cannot do, in the button or the scope line: the cap is explained instead, naming All time.
+  await expect(page.getByRole('button', { name: 'Load more runs' })).toHaveCount(0)
+  await expect(page.getByTestId('feature-page-cap')).toHaveText('This list stops after 20 pages, the most a link can restore; choose "All time" in Date to read every older run.')
+  await expect(page.getByTestId('run-filter-scope')).toHaveText('40 of 40 runs · the first 20 pages; choose All time to read on')
+  await expect(page.getByTestId('run-filter-scope')).not.toContainText('Load more runs')
   await page.waitForTimeout(500)
   expect(cursors.filter(cursor => cursor === 'cap-21')).toHaveLength(0)
   await expect(runList(page).locator('li')).toHaveCount(40)
@@ -1696,7 +1681,8 @@ test(`'Load more runs' at the restorable page count is disabled and reads no fur
   await page.reload()
   await expect(runList(page).locator('li')).toHaveCount(40, { timeout: 60_000 })
   await expect(page).toHaveURL(/\?pages=20$/)
-  await expect(page.getByRole('button', { name: 'Load more runs' })).toBeDisabled()
+  await expect(page.getByRole('button', { name: 'Load more runs' })).toHaveCount(0)
+  await expect(page.getByTestId('feature-page-cap')).toBeVisible()
   expect(cursors.filter(cursor => cursor === 'cap-21')).toHaveLength(0)
   const shown = await runList(page).locator('a[data-run-id]').evaluateAll(links => links.map(link => link.getAttribute('data-run-id')))
   const copied = await context.newPage()
@@ -1826,10 +1812,10 @@ test(`The compact Triage chip at 900 px counts what needs the operator, equal to
   expect(before.chip).toBe(before.needs)
   expect(before.title).toBe(before.needs)
   // A paused-only run added to a project's run list does not move the chip's number.
-  await page.route(url => url.pathname === `/api/projects/${PROJECT.project_id}/workflows/${UX_REVAMP_LISTS_WORKFLOW_ID}/runs` && !url.searchParams.has('cursor'), async route => {
-    const body = await original(route) as { runs: RunSummary[]; next_cursor: string | null }
+  await editHomeRows(page, (runs, url) => {
+    if (url.pathname !== `/api/projects/${PROJECT.project_id}/workflows/${UX_REVAMP_LISTS_WORKFLOW_ID}/runs`) return runs
     const extra = bSummary(PROJECT.project_id, UX_REVAMP_LISTS_WORKFLOW_ID, { id: 'zz-paused-only', status: 'paused', created: '2030-01-01T00:00:00Z', moved: '2030-01-01T00:00:00Z', focus: 'review', attention: { kind: 'paused', node_id: 'review', since: '2030-01-01T00:00:00Z' } })
-    await route.fulfill({ json: { ...body, runs: [{ ...extra, definition_revision: body.runs[0]?.definition_revision ?? extra.definition_revision }, ...body.runs] } })
+    return [{ ...extra, definition_revision: runs[0]?.definition_revision ?? extra.definition_revision }, ...runs]
   })
   const after = await read()
   expect(after.chip).toBe(after.needs)
@@ -1879,4 +1865,393 @@ test(`Triage's opened superseded fold comes back open after opening a run and go
   await page.reload()
   await expect(page.getByTestId('superseded-runs')).toBeVisible({ timeout: 30_000 })
   await expect(page.getByTestId('superseded-runs')).not.toHaveAttribute('open', '')
+})
+
+// ---- ux-critique-fixes stage C, lane `server` (features/ux-critique-fixes-c/prd.md 7.1, 7.9) ---------------------------------
+
+type Seen = { path: string; search: URLSearchParams; at: number }
+/** Every API request the page makes, by path and query, in order. */
+function apiRequests(page: Page): Seen[] {
+  const seen: Seen[] = []
+  page.on('request', request => {
+    const parsed = new URL(request.url())
+    if (parsed.pathname.startsWith('/api/')) seen.push({ path: parsed.pathname, search: parsed.searchParams, at: Date.now() })
+  })
+  return seen
+}
+const homeReads = (seen: Seen[]) => seen.filter(item => item.path === '/api/dispatch/runs')
+const overviewReads = (seen: Seen[]) => seen.filter(item => item.path === '/api/dispatch/projects')
+const workflowLists = (seen: Seen[]) => seen.filter(item => /^\/api\/projects\/[^/]+\/workflows$/.test(item.path))
+const runListReads = (seen: Seen[]) => seen.filter(item => /^\/api\/projects\/[^/]+\/workflows\/[^/]+\/runs$/.test(item.path))
+const registryReads = (seen: Seen[]) => seen.filter(item => item.path === '/api/dispatch/runs/all')
+/** Advances the page clock by `ms` and lets the reads it started answer. */
+async function advance(page: Page, ms: number) {
+  await page.clock.runFor(ms)
+  await page.waitForTimeout(400)
+}
+/** Stops the page clock where it is, so only `advance` fires timers: a count over a window never catches a tick of real time. */
+async function pauseClock(page: Page) {
+  await page.clock.pauseAt(await page.evaluate(() => Date.now()) + 1000)
+}
+
+test(`[scenario:one-request] The rail, the cards and Triage read every run list in one request per poll; the project page reads only its own features (${phase})`, async ({ page }, testInfo) => {
+  test.slow()
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.clock.install({ time: REVAMP_NOW })
+  const seen = apiRequests(page)
+  for (const target of [triageUrl, projectsUrl]) {
+    await page.goto(target)
+    if (target === triageUrl) await expect(page.getByTestId('needs-you').locator(`a[data-run-id="${RUN_DECIDE}"]`)).toHaveCount(1, { timeout: 30_000 })
+    else await expect(page.getByTestId('dispatch-cards')).toBeVisible({ timeout: 30_000 })
+    await expect(railRow(page, DISPATCH_NOORIGIN).locator('.dispatch-rail-badge')).toHaveText(`${NOORIGIN_NEEDS.length} waits on you`, { timeout: 30_000 })
+    // The cold open: home reads with a since parameter (the dev build's strict mode may start and abort one), no per-project
+    // or per-workflow read.
+    expect(homeReads(seen).length, `${target}: a home read`).toBeGreaterThanOrEqual(1)
+    for (const read of homeReads(seen)) expect(read.search.get('since')).toMatch(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d+)?Z$/)
+    expect(workflowLists(seen)).toEqual([])
+    expect(runListReads(seen)).toEqual([])
+    // Across one poll interval (15 s: the seeds hold running and waiting runs): one home read, one overview read, nothing else.
+    await pauseClock(page)
+    seen.length = 0
+    await advance(page, 15_000)
+    expect(homeReads(seen).length, `${target}: one home read per poll`).toBe(1)
+    expect(homeReads(seen)[0].search.has('since')).toBe(true)
+    expect(overviewReads(seen).length).toBe(1)
+    expect(workflowLists(seen)).toEqual([])
+    expect(runListReads(seen)).toEqual([])
+    await page.clock.resume()
+    seen.length = 0
+  }
+  // Triage's sections and the rail's badges on the new source, by value, as stage A's scenarios assert them.
+  await page.goto(triageUrl)
+  const needs = page.getByTestId('needs-you')
+  for (const runId of NOORIGIN_NEEDS) await expect(needs.locator(`a[data-run-id="${runId}"]`)).toHaveCount(1, { timeout: 30_000 })
+  const cards = await needs.locator(':scope > ul > li').count()
+  await expect(needs.locator('.ui-section-header h2')).toHaveText(`Needs you · ${cards}`)
+  await expect(page).toHaveTitle(new RegExp(`^\\(${cards}\\) `))
+  await expect(railRow(page, DISPATCH_WIDGETS_WT).locator('.dispatch-rail-badge')).toHaveText('1 paused')
+  // While a poll is in flight the rows stay on screen and no reading wording returns.
+  let release = () => {}
+  const held = new Promise<void>(resolve => { release = resolve })
+  const hold = async (route: Route) => { await held; await route.fallback().catch(() => undefined) }
+  await page.route(isHomeRuns, hold)
+  await pauseClock(page)
+  seen.length = 0
+  await advance(page, 15_000)
+  expect(homeReads(seen).length).toBe(1)
+  await expect(needs.locator(`a[data-run-id="${RUN_DECIDE}"]`)).toHaveCount(1)
+  await expect(page.getByText('Loading the runs of every project…')).toHaveCount(0)
+  for (const sub of await page.getByTestId('dispatch-rail-list').locator('.dispatch-rail-sub').allInnerTexts()) expect(sub).not.toMatch(/reading…$/)
+  await attach(page, testInfo, 'one-request')
+  release()
+  await page.unroute(isHomeRuns, hold)
+  await page.clock.resume()
+
+  // A project page: its own features' first pages only, never another project's runs or a later page.
+  seen.length = 0
+  await page.goto(projectUrl(DISPATCH_NOORIGIN))
+  await expect(page.getByTestId('dispatch-features')).toBeVisible({ timeout: 30_000 })
+  await advance(page, 15_000)
+  const lists = runListReads(seen)
+  expect(lists.length).toBeGreaterThan(0)
+  for (const read of lists) {
+    expect(read.path).toMatch(new RegExp(`^/api/projects/${DISPATCH_NOORIGIN}/workflows/[^/]+/runs$`))
+    expect(read.search.has('cursor'), 'only first pages').toBe(false)
+  }
+})
+
+test(`The home read with nothing running or waiting polls every 60 s, never at 15 s, and a running run brings 15 s back; the live status never says "Not updating" between on-time polls (${phase})`, async ({ page }) => {
+  test.slow()
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.clock.install({ time: REVAMP_NOW })
+  let running = false
+  // Nothing running or waiting in every list; then, once told, one run of this module's workflow is running again.
+  await editHomeRows(page, (runs, url) => {
+    const quiet = quietRuns(runs)
+    if (!running || url.pathname !== `/api/projects/${PROJECT.project_id}/workflows/${UX_REVAMP_LISTS_WORKFLOW_ID}/runs`) return quiet
+    const live = runs.find(run => run.run_id === RUN_DESK_LIVE)!
+    return [live, ...quiet]
+  })
+  const seen = apiRequests(page)
+  await page.goto(triageUrl)
+  await expect(page.getByTestId('home-quiet')).toBeVisible({ timeout: 30_000 })
+  // The cadence restarts at 60 s when the first read finds nothing running: the clock stops there, and only `advance` moves it.
+  await pauseClock(page)
+  seen.length = 0
+  await advance(page, 15_000)
+  expect(homeReads(seen), 'no read at 15 s while nothing runs').toEqual([])
+  await advance(page, 15_000)
+  await advance(page, 15_000)
+  expect(homeReads(seen)).toEqual([])
+  await expect(page.getByTestId('live-status')).not.toHaveAttribute('data-state', 'stale')
+  await expect(page.getByTestId('live-status')).not.toContainText('Not updating')
+  running = true
+  await advance(page, 15_000)
+  expect(homeReads(seen).length, 'the read 60 s after the last').toBe(1)
+  expect(overviewReads(seen).length).toBe(1)
+  await expect(page.getByTestId('running-runs').locator(`a[data-run-id="${RUN_DESK_LIVE}"]`)).toHaveCount(1, { timeout: 15_000 })
+  await expect(page.getByTestId('live-status')).not.toContainText('Not updating')
+  // A run that runs again: the next read comes 15 s later.
+  seen.length = 0
+  await advance(page, 15_000)
+  expect(homeReads(seen).length, 'back to 15 s').toBe(1)
+})
+
+test(`A home read answered with an error keeps the last rows and says the runs were not read, with the reason (${phase})`, async ({ page }) => {
+  test.slow()
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.clock.install({ time: REVAMP_NOW })
+  await page.goto(triageUrl)
+  const decide = page.getByTestId('needs-you').locator(`a[data-run-id="${RUN_DECIDE}"]`)
+  await expect(decide).toHaveCount(1, { timeout: 30_000 })
+  await page.route(isHomeRuns, route => route.fulfill({ status: 503, json: { error: { code: 'RUNS_UNREADABLE', message: 'The registry could not be read' } } }))
+  await pauseClock(page)
+  await advance(page, 15_000)
+  await expect(page.getByTestId('home-not-read')).toHaveText('Runs not read: The registry could not be read (RUNS_UNREADABLE, HTTP 503) · showing the runs read before', { timeout: 15_000 })
+  await expect(decide).toHaveCount(1)
+  await expect(page.getByTestId('home-quiet')).toHaveCount(0)
+})
+
+// ---- Triage "All time" ------------------------------------------------------------------------------------------------------
+
+const OLD = (id: string, status: RunSummary['status'], moved: string, extra: Partial<Parameters<typeof bSummary>[2]> = {}) =>
+  bSummary(PROJECT.project_id, UX_REVAMP_LISTS_WORKFLOW_ID, { id, status, created: moved, moved, focus: status === 'succeeded' ? null : 'review', feature: 'Old work', ...extra })
+/** Two registry pages: the first holds a run the home read also holds and two old finished runs, the second an old one and a workflow it could not read. */
+const OLD_FAILED = 'zz-old-failed'
+const OLD_SUCCEEDED = 'zz-old-succeeded'
+const OLD_CANCELLED = 'zz-old-cancelled'
+const ALL_PAGES = (home: RunSummary) => ({
+  first: { contract_version: '1.0.0', read_at: REVAMP_NOW, runs: [home, OLD(OLD_FAILED, 'failed', '2026-01-02T10:00:00Z'), OLD(OLD_SUCCEEDED, 'succeeded', '2026-01-01T10:00:00Z')], next_cursor: 'page-2', unreadable: [] },
+  second: { contract_version: '1.0.0', read_at: REVAMP_NOW, runs: [OLD(OLD_CANCELLED, 'cancelled', '2025-12-01T10:00:00Z')], next_cursor: null, unreadable: [{ project_id: PROJECT.project_id, workflow_id: 'zz-gone', code: 'RUNS_UNREADABLE' }] },
+})
+
+/**
+ * Serves the two pages by cursor; `failSecond` answers the second page 500 while it returns true; `holdSecond` delays it. The run
+ * both reads hold is this module's newest, taken from the home read the page made (so no extra request is made for it).
+ */
+async function serveRegistryPages(page: Page, options: { failSecond?: () => boolean; holdSecond?: Promise<void> } = {}) {
+  const cursors: (string | null)[] = []
+  let home: RunSummary | null = null
+  page.on('response', response => {
+    if (!isHomeRuns(new URL(response.url())) || response.status() !== 200) return
+    void response.json().then((body: { projects: { project_id: string; runs: HomeEntry[] }[] }) => {
+      const entry = body.projects.find(project => project.project_id === PROJECT.project_id)?.runs.find(item => item.workflow_id === UX_REVAMP_LISTS_WORKFLOW_ID)
+      if (entry?.runs[0]) home = entry.runs[0]
+    }).catch(() => undefined)
+  })
+  await page.route(isRegistryPages, async route => {
+    try {
+      const cursor = new URL(route.request().url()).searchParams.get('cursor')
+      cursors.push(cursor)
+      for (let wait = 0; home === null && wait < 100; wait++) await new Promise(resolve => setTimeout(resolve, 100))
+      const pages = ALL_PAGES(home!)
+      if (cursor === null) { await route.fulfill({ json: pages.first }); return }
+      if (options.holdSecond) await options.holdSecond
+      if (options.failSecond?.()) { await route.fulfill({ status: 500, json: { error: { code: 'INTERNAL', message: 'The next page could not be read' } } }); return }
+      await route.fulfill({ json: pages.second })
+    } catch { /* the test ended */ }
+  })
+  return cursors
+}
+const allRuns = (page: Page) => page.getByTestId('all-runs')
+const allIds = (page: Page) => allRuns(page).locator('a[data-run-id]').evaluateAll(links => links.map(link => link.getAttribute('data-run-id')))
+const dateSelect = (page: Page) => bar(page).getByTestId('run-filter-date')
+
+test(`[scenario:triage-all-time] Triage's "All time" reads the registry's pages and lists every run once in one All runs list, filtered by the bar, with an honest scope line; leaving it restores the sections (${phase})`, async ({ page }, testInfo) => {
+  test.slow()
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.clock.setFixedTime(REVAMP_NOW)
+  let release = () => {}
+  const held = new Promise<void>(resolve => { release = resolve })
+  const cursors = await serveRegistryPages(page, { holdSecond: held })
+  const seen = apiRequests(page)
+  await page.goto(triageUrl)
+  const needs = page.getByTestId('needs-you')
+  await expect(needs.locator('.ui-section-header h2')).toHaveText(/^Needs you · \d+$/, { timeout: 30_000 })
+  await expect(dateSelect(page).locator('option')).toHaveText(['Any date', 'Today', '7 days', 'All time'])
+  // The old runs are in no section before.
+  for (const runId of [OLD_FAILED, OLD_SUCCEEDED, OLD_CANCELLED]) await expect(page.locator(`a[data-run-id="${runId}"]`)).toHaveCount(0)
+  const title = await page.title()
+  const railBadge = await page.getByTestId('rail-triage').textContent()
+  const pinned = await page.getByTestId('pinned-runs').count()
+  seen.length = 0
+  await dateSelect(page).selectOption('all')
+  await expect(page).toHaveURL(/[?&]date=all\b/)
+  // While the second page reads: the reading line with the runs read so far.
+  await expect(bar(page).getByTestId('run-filter-reading')).toHaveText(/^ · Reading older runs… \(\d+ read\)$/, { timeout: 15_000 })
+  release()
+  await expect(bar(page).getByTestId('run-filter-reading')).toHaveCount(0, { timeout: 15_000 })
+  // One request per page and no other read.
+  expect(cursors).toEqual([null, 'page-2'])
+  expect(registryReads(seen).length).toBe(2)
+  expect(workflowLists(seen)).toEqual([])
+  expect(runListReads(seen)).toEqual([])
+  // One All runs list replaces the state sections; Pinned stays above it.
+  await expect(allRuns(page)).toBeVisible()
+  for (const id of STATE_SECTIONS) await expect(page.getByTestId(id)).toHaveCount(0)
+  const ids = await allIds(page)
+  expect(new Set(ids).size, 'every run once').toBe(ids.length)
+  for (const runId of [OLD_FAILED, OLD_SUCCEEDED, OLD_CANCELLED, RUN_DECIDE, RUN_DESK_LIVE]) expect(ids).toContain(runId)
+  // The default order: what waits first, then what runs, then the rest.
+  const ranks = await allRuns(page).locator('a[data-run-id]').evaluateAll(links => links.map(link => (link.getAttribute('data-attention') ? 0 : link.getAttribute('data-status') === 'running' ? 1 : 2)))
+  expect(ranks, 'needs you and running first').toEqual([...ranks].sort((a, b) => a - b))
+  const scope = bar(page).getByTestId('run-filter-scope')
+  await expect(scope).toHaveText(`${ids.length} of ${ids.length} runs · every project, all loaded`)
+  if (pinned > 0) expect(await page.evaluate("Boolean(document.querySelector('[data-testid=\"pinned-runs\"]').compareDocumentPosition(document.querySelector('[data-testid=\"all-runs\"]')) & Node.DOCUMENT_POSITION_FOLLOWING)")).toBe(true)
+  // The tab title, the rail badge and Pinned do not change with the choice.
+  expect(await page.title()).toBe(title)
+  expect(await page.getByTestId('rail-triage').textContent()).toBe(railBadge)
+  await expect(page.getByTestId('pinned-runs')).toHaveCount(pinned)
+  // The unreadable workflow a page listed is named in Attention.
+  await expect(page.getByTestId('lists-errors').locator('li', { hasText: `${PROJECT.name} · zz-gone` })).toContainText('RUNS_UNREADABLE')
+  await attach(page, testInfo, 'triage-all-time')
+
+  // The bar filters the list: status, stopped-at and text.
+  await statusToggle(page, 'failed').click()
+  for (const status of await allRuns(page).locator('a[data-run-id]').evaluateAll(links => links.map(link => link.getAttribute('data-status')))) expect(status).toBe('failed')
+  expect(await allIds(page)).toContain(OLD_FAILED)
+  const failedCount = (await allIds(page)).length
+  await expect(scope).toHaveText(`${failedCount} of ${ids.length} runs · every project, all loaded`)
+  await statusToggle(page, 'failed').click()
+  await bar(page).getByTestId('run-filter-phase').selectOption('Review')
+  expect((await allIds(page)).length).toBeLessThan(ids.length)
+  expect(await allIds(page)).toContain(OLD_CANCELLED)
+  await bar(page).getByTestId('run-filter-phase').selectOption('')
+  await bar(page).getByTestId('run-filter-q').fill(OLD_SUCCEEDED)
+  await expect(allRuns(page).locator('a[data-run-id]')).toHaveCount(1)
+  await expect(allRuns(page).locator(`a[data-run-id="${OLD_SUCCEEDED}"]`)).toHaveCount(1)
+  await expect(scope).toHaveText(`1 of ${ids.length} runs · every project, all loaded`)
+  await bar(page).getByTestId('run-filter-q').fill('')
+  await expect(allRuns(page).locator('a[data-run-id]')).toHaveCount(ids.length)
+
+  // date=all survives opening a run and Back, and a reload reads the pages again.
+  await allRuns(page).locator(`a[data-run-id="${RUN_DESK_LIVE}"]`).click()
+  await expect(page).toHaveURL(new RegExp(`/runs/${RUN_DESK_LIVE}`))
+  await page.goBack()
+  await expect(page).toHaveURL(/[?&]date=all\b/)
+  await expect(allRuns(page)).toBeVisible({ timeout: 30_000 })
+  await page.reload()
+  await expect(allRuns(page).locator(`a[data-run-id="${OLD_CANCELLED}"]`)).toHaveCount(1, { timeout: 30_000 })
+  expect(cursors.filter(cursor => cursor === null).length).toBeGreaterThanOrEqual(2)
+
+  // Another date restores the sections with no request.
+  seen.length = 0
+  await dateSelect(page).selectOption('any')
+  await expect(needs).toBeVisible()
+  await expect(allRuns(page)).toHaveCount(0)
+  await page.waitForTimeout(300)
+  expect(registryReads(seen)).toEqual([])
+  expect(await page.title()).toBe(title)
+  expect(await page.getByTestId('rail-triage').textContent()).toBe(railBadge)
+})
+
+test(`Triage "All time" with a page that fails: the rows and filters stay, the panel offers Retry for that page only, and "all loaded" only once it answers; no Retry after leaving (${phase})`, async ({ page }) => {
+  test.slow()
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.clock.setFixedTime(REVAMP_NOW)
+  let fail = true
+  const cursors = await serveRegistryPages(page, { failSecond: () => fail })
+  await page.goto(`${triageUrl}?date=all`)
+  const panel = page.getByTestId('projects-error').filter({ hasText: 'The next page of runs could not be loaded.' })
+  await expect(panel).toBeVisible({ timeout: 30_000 })
+  const scope = bar(page).getByTestId('run-filter-scope')
+  await expect(scope).toHaveText(/^\d+ of \d+ runs · every project · Load more runs$/)
+  await expect(scope).not.toContainText('all loaded')
+  await expect(allRuns(page).locator(`a[data-run-id="${OLD_FAILED}"]`)).toHaveCount(1)
+  await statusToggle(page, 'failed').click()
+  await expect(statusToggle(page, 'failed')).toHaveAttribute('aria-pressed', 'true')
+  await expect(scope).not.toContainText('all loaded')
+  expect(cursors.filter(cursor => cursor === null).length).toBeGreaterThanOrEqual(1)
+  // Retry asks for the failed page only.
+  fail = false
+  const before = cursors.length
+  await panel.getByRole('button', { name: 'Retry' }).click()
+  await expect(scope).toHaveText(/^\d+ of \d+ runs · every project, all loaded$/, { timeout: 15_000 })
+  expect(cursors.slice(before)).toEqual(['page-2'])
+  await expect(statusToggle(page, 'failed')).toHaveAttribute('aria-pressed', 'true')
+  // A failure again, then leaving All time: no panel and no Retry remain that would do nothing.
+  fail = true
+  await statusToggle(page, 'failed').click()
+  await dateSelect(page).selectOption('any')
+  await dateSelect(page).selectOption('all')
+  await expect(panel).toBeVisible({ timeout: 15_000 })
+  await dateSelect(page).selectOption('any')
+  await expect(page.getByTestId('projects-error')).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Retry' })).toHaveCount(0)
+})
+
+test(`Triage "All time" whose home read failed: the registry's runs still list, with the bar, Attention and a way back to Any date (${phase})`, async ({ page }) => {
+  test.slow()
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.clock.setFixedTime(REVAMP_NOW)
+  await page.route(isHomeRuns, route => route.fulfill({ status: 503, json: { error: { code: 'RUNS_UNREADABLE', message: 'The registry could not be read' } } }))
+  // The pages answer on their own: the home read gives them no run to hold.
+  const pages = ALL_PAGES(OLD('zz-old-home', 'failed', '2026-01-03T10:00:00Z'))
+  await page.route(isRegistryPages, route => route.fulfill({ json: new URL(route.request().url()).searchParams.get('cursor') === null ? pages.first : pages.second }))
+  await page.goto(`${triageUrl}?date=all`)
+  await expect(page.getByTestId('home-not-read')).toHaveText('Runs not read: The registry could not be read (RUNS_UNREADABLE, HTTP 503)', { timeout: 30_000 })
+  await expect(allRuns(page).locator(`a[data-run-id="${OLD_CANCELLED}"]`)).toHaveCount(1, { timeout: 15_000 })
+  for (const runId of [OLD_FAILED, OLD_SUCCEEDED]) await expect(allRuns(page).locator(`a[data-run-id="${runId}"]`)).toHaveCount(1)
+  await expect(page.getByTestId('lists-errors').locator('li', { hasText: `${PROJECT.name} · zz-gone` })).toContainText('RUNS_UNREADABLE')
+  await expect(dateSelect(page)).toHaveValue('all')
+  await dateSelect(page).selectOption('any')
+  await expect(page).not.toHaveURL(/[?&]date=all\b/)
+  await expect(allRuns(page)).toHaveCount(0)
+  await expect(page.getByTestId('lists-errors')).toHaveCount(0)
+  await expect(page.getByTestId('home-not-read')).toBeVisible()
+  await expect(page.getByTestId('home-quiet')).toHaveCount(0)
+})
+
+// ---- Carried list fixes ------------------------------------------------------------------------------------------------------
+
+test(`"Lists incomplete" counts projects as its fraction, names unread workflows of read projects in its own clause, and links to Attention (${phase})`, async ({ page }) => {
+  test.slow()
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.clock.setFixedTime(REVAMP_NOW)
+  const answered = page.waitForResponse(response => isHomeRuns(new URL(response.url())))
+  await page.goto(triageUrl)
+  const home = await (await answered).json() as { projects: { project_id: string; error: unknown; runs: HomeEntry[] }[] }
+  // What the served read says: projects whose own read or every workflow failed, and failed workflows of the others.
+  const unread = home.projects.filter(project => project.error !== null || (project.runs.length > 0 && project.runs.every(entry => entry.error !== null)))
+  const workflows = home.projects.filter(project => !unread.includes(project)).reduce((sum, project) => sum + project.runs.filter(entry => entry.error !== null).length, 0)
+  const incomplete = page.getByTestId('lists-incomplete')
+  await expect(incomplete).toHaveText(`${home.projects.length - unread.length} of ${home.projects.length} projects read; lists incomplete`, { timeout: 30_000 })
+  if (workflows > 0) await expect(page.getByTestId('lists-incomplete-workflows')).toHaveText(` · ${workflows} ${workflows === 1 ? 'workflow' : 'workflows'} of read projects not read`)
+  else await expect(page.getByTestId('lists-incomplete-workflows')).toHaveCount(0)
+  // Each failed workflow is an Attention card; the banner's link goes there.
+  const attention = page.getByTestId('lists-errors')
+  await expect(attention.locator(':scope li')).toHaveCount(unread.filter(project => project.error !== null).length + home.projects.reduce((sum, project) => sum + (project.error !== null ? 0 : project.runs.filter(entry => entry.error !== null).length), 0))
+  const link = page.getByTestId('lists-incomplete-link')
+  await expect(link).toHaveAttribute('href', '#lists-attention')
+  await expect(attention).toHaveAttribute('id', 'lists-attention')
+  await link.click()
+  await expect(attention).toBeInViewport()
+})
+
+test(`The feature page under "All time" reads past the page cap; a page that fails there and then Any date leaves no Retry that does nothing, and says why the list stops (${phase})`, async ({ page }) => {
+  test.slow()
+  const cursors: string[] = []
+  await installListsWorld(page)
+  await page.route(url => url.pathname === `/api/projects/${B_FILTER.project_id}/workflows/filter-runs/runs`, async route => {
+    const cursor = new URL(route.request().url()).searchParams.get('cursor')
+    if (cursor !== null) cursors.push(cursor)
+    if (cursor === 'cap-22') { await route.fulfill({ status: 500, json: { error: { code: 'INTERNAL', message: 'The next page could not be read' } } }); return }
+    await route.fulfill({ json: cappedPage(cursor) })
+  })
+  await page.clock.setFixedTime(B_CLOCK)
+  await page.goto(`${workflowUrl(B_FILTER.project_id, 'filter-runs')}?date=all`)
+  const panel = page.getByTestId('projects-error').filter({ hasText: 'The next page of runs could not be loaded.' })
+  await expect(panel).toBeVisible({ timeout: 60_000 })
+  // "All time" reads past the cap of 20 pages until the failed one.
+  await expect(runList(page).locator('li')).toHaveCount(42)
+  await expect(panel.getByRole('button', { name: 'Retry' })).toHaveCount(1)
+  await bar(page).getByTestId('run-filter-date').selectOption('any')
+  // Outside "All time" at the cap, Retry could not read on: none is offered, and the cap says why and that All time reads on.
+  await expect(page.getByRole('button', { name: 'Retry' })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Load more runs' })).toHaveCount(0)
+  await expect(page.getByTestId('feature-page-cap')).toBeVisible()
+  await expect(runList(page).locator('li')).toHaveCount(42)
+  const asked = cursors.length
+  await page.waitForTimeout(500)
+  expect(cursors.length, 'nothing more is read outside All time').toBe(asked)
 })

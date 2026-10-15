@@ -1,15 +1,16 @@
-import { useEffect, useMemo, useSyncExternalStore, type MouseEvent, type ReactNode } from 'react'
-import { describeApiError, type Project, type ProjectRuns, type RunSummary, type WorkflowDefinition, type WorkflowRuns } from './api.ts'
+import { useEffect, useMemo, useState, useSyncExternalStore, type MouseEvent, type ReactNode } from 'react'
+import { describeApiError, fetchRegistryPage, type Project, type ProjectRuns, type RunSummary, type WorkflowDefinition, type WorkflowRuns } from './api.ts'
+import type { RegistryRuns } from '../../contracts/projects/dispatch.ts'
 import {
   PAUSED_SHOWN,
   classifyRuns, classOf, compareCreated, firstRows, groupByDay, groupByProject, homeSections, laneNamesOf, latestFeature, latestRun, movedAt, NEXT_STEP,
-  RECENT_SHOWN, rowSummary, sectionOrderWords, sortHomeSections, stepTally, workflowTitle,
+  mergeRunRows, RECENT_SHOWN, registryKey, rowSummary, sectionOrderWords, sortHomeSections, sortRuns, stepTally, workflowTitle,
   type HomeSections, type ListRow, type ListSort, type NeedKind, type RowGroup, type RunClasses,
 } from './lists.ts'
 import { FilterBar, NoMatch, type ListControl } from './FilterBar.tsx'
-import { matchesFilter, scopeLine, statusCounts, type FilterItem } from './runFilter.ts'
+import { filterItems, matchesFilter, offeredDate, scopeLine, statusCounts, type FilterItem } from './runFilter.ts'
 import { LiveStatus } from './LiveStatus.tsx'
-import { AppLink, LoadingPanel, StatusBadge } from './panels.tsx'
+import { AppLink, ErrorPanel, LoadingPanel, StatusBadge } from './panels.tsx'
 import { runPathname, workflowPathname } from './routes.ts'
 import { PinToggle, RunRow } from './RunRow.tsx'
 import { pinStore } from './pins.ts'
@@ -80,11 +81,76 @@ function NeedsCard({ row, kind, now, onNavigate }: { row: Row; kind: NeedKind; n
   )
 }
 
+/** What Triage's "All time" has read of the registry's pages: their runs, the workflows they could not read, and where it stopped. */
+type AllRead = {
+  runs: RunSummary[]
+  unreadable: RegistryRuns['unreadable']
+  /** The cursor of the next page to read: null before the first page and after the last. */
+  cursor: string | null
+  /** Every page answered and no cursor remains. */
+  done: boolean
+  loading: boolean
+  /** The failed page's error; Retry reads that page again, and only it. */
+  error: unknown
+}
+
+const NOTHING_READ: AllRead = { runs: [], unreadable: [], cursor: null, done: false, loading: false, error: null }
+
+/**
+ * Reads the registry's pages one after another while `active` ("All time" chosen), one request per page: from the first page
+ * each time it becomes active (a reload or choosing "All time" again), and from the failed page on Retry, never a page already
+ * read. Leaving "All time" stops the read and drops what it read, with no request.
+ */
+function useAllRuns(active: boolean): AllRead & { retry: () => void } {
+  const [read, setRead] = useState<AllRead>(NOTHING_READ)
+  // One pass reads pages until none remains or one fails, from the read it starts with (nothing, or what was read before Retry).
+  const [pass, setPass] = useState<{ id: number; from: AllRead } | null>(null)
+  const [seen, setSeen] = useState(false)
+  if (seen !== active) {
+    setSeen(active)
+    setRead(active ? { ...NOTHING_READ, loading: true } : NOTHING_READ)
+    setPass(previous => (active ? { id: (previous?.id ?? 0) + 1, from: NOTHING_READ } : null))
+  }
+  useEffect(() => {
+    if (pass === null) return
+    const controller = new AbortController()
+    let acc: AllRead = pass.from
+    let cursor = acc.cursor
+    void (async () => {
+      try {
+        do {
+          const page = await fetchRegistryPage(cursor, controller.signal)
+          if (controller.signal.aborted) return
+          const known = new Set(acc.unreadable.map(item => `${item.project_id}/${item.workflow_id}`))
+          cursor = page.next_cursor
+          acc = {
+            runs: [...acc.runs, ...page.runs], unreadable: [...acc.unreadable, ...page.unreadable.filter(item => !known.has(`${item.project_id}/${item.workflow_id}`))],
+            cursor, done: cursor === null, loading: cursor !== null, error: null,
+          }
+          setRead(acc)
+        } while (cursor !== null)
+      } catch (error) {
+        if (controller.signal.aborted) return
+        setRead({ ...acc, loading: false, error })
+      }
+    })()
+    return () => controller.abort()
+  }, [pass])
+  const retry = () => {
+    if (read.error === null || pass === null) return
+    setRead({ ...read, loading: true, error: null })
+    setPass({ id: pass.id + 1, from: { ...read, error: null } })
+  }
+  return { ...read, retry }
+}
+
 type HomeProps = {
   projects: readonly Project[]
   runs: Resource<ProjectRuns[]>
   meta: ResourceMeta
   now: number
+  /** The home read's cadence in force, so the live status reads stale only after a poll is late at that cadence. */
+  pollMs?: number
   /** The read-only note, said once at the rail's foot. */
   note?: string | null
   onNavigate: (pathname: string) => void
@@ -104,16 +170,34 @@ const itemOf = (row: Row, classes: RunClasses): FilterItem => ({ run: row.run, c
  * as cards and a searchable, filterable Recent grouped by day. Everything renders from the run lists' served activity; no run
  * detail is read for it.
  */
-export function RunsHome({ runs, meta, now, note = null, onNavigate, list, folds, onFold }: HomeProps) {
+export function RunsHome({ projects, runs, meta, now, pollMs, note = null, onNavigate, list, folds, onFold }: HomeProps) {
   const [zone] = useTimeZone()
   const loaded = runs.status === 'ready' ? runs.data : null
   const rows = useMemo(() => loaded?.flatMap(entry => rowsOf(entry.project, entry.workflows)) ?? [], [loaded])
+  // "All time" (a URL date the other lists do not offer reads as "Any date" here and there): the registry's pages, read on request.
+  const allTime = offeredDate('triage', list.filter.date) === 'all'
+  const allRead = useAllRuns(allTime)
+  // The pages' runs as rows, named by the workflow the home read holds (else by its id alone); each run once, the home row first.
+  const allRows = useMemo(() => {
+    if (!allTime) return rows
+    const workflows = new Map((loaded ?? []).flatMap(entry => entry.workflows.map(item => [`${entry.project.project_id}/${item.workflow.workflow_id}`, item] as const)))
+    const pageRows = allRead.runs.map((run): Row => {
+      const project = projects.find(candidate => candidate.project_id === run.project_id) ?? { project_id: run.project_id, name: run.project_id }
+      const known = workflows.get(`${run.project_id}/${run.workflow_id}`)
+      const workflow = known?.workflow ?? ({ workflow_id: run.workflow_id, name: run.workflow_id, nodes: [] } as unknown as WorkflowDefinition)
+      return { key: registryKey(run), run, project, workflow, title: workflowTitle(workflow, known ? latestFeature(known.runs) : null), labels: labelsOf(workflow) }
+    })
+    return mergeRunRows(rows, pageRows)
+  }, [allTime, rows, allRead.runs, loaded, projects])
   // The list's one classification, over every loaded run before any filter: every section, row, card and count below reads
-  // it, so hiding a run never changes what another needs.
-  const classes = useMemo(() => classifyRuns(rows.map(row => row.run)), [rows])
+  // it, so hiding a run never changes what another needs. Under "All time" it covers every run read; the tab title, the
+  // badges and Pinned still count the home read only.
+  const homeClasses = useMemo(() => classifyRuns(rows.map(row => row.run)), [rows])
+  const allClasses = useMemo(() => (allTime ? classifyRuns(allRows.map(row => row.run)) : homeClasses), [allTime, allRows, homeClasses])
+  const classes = homeClasses
   const all = homeSections(rows, now, zone, classes)
   // The one bar filters the full set before sectioning: each section keeps its runs that match, in the chosen sort.
-  const filter = list.filter
+  const filter = useMemo(() => ({ ...list.filter, date: offeredDate('triage', list.filter.date) }), [list.filter])
   const filtering = list.active
   const context = { now, zone }
   const keep = (items: Row[]) => (filtering ? items.filter(row => matchesFilter(itemOf(row, classes), filter, context)) : items)
@@ -125,11 +209,19 @@ export function RunsHome({ runs, meta, now, note = null, onNavigate, list, folds
   const matched = sections.needsYou.length + sections.running.length + sections.today.length + sections.paused.length + sections.superseded.length + sections.recent.length
   const counts = statusCounts(sectioned.map(row => itemOf(row, classes)), filter, context)
   const allPaused = folds['paused-all'] === true
-  const errors = (loaded ?? []).flatMap(entry => entry.error !== null
-    ? [{ what: entry.project.name, error: entry.error }]
-    : entry.workflows.filter(item => item.error !== null).map(item => ({ what: `${entry.project.name} · ${item.workflow.workflow_id}`, error: item.error })))
+  const homeErrors = (loaded ?? []).flatMap(entry => entry.error !== null
+    ? [{ what: entry.project.name, error: entry.error as unknown }]
+    : entry.workflows.filter(item => item.error !== null).map(item => ({ what: `${entry.project.name} · ${item.workflow.workflow_id}`, error: item.error as unknown })))
+  // Under "All time" a workflow the registry's pages could not read is named too, so "all loaded" never claims it.
+  const errors = allTime ? [...homeErrors, ...allRead.unreadable.flatMap(item => {
+    const what = `${projects.find(project => project.project_id === item.project_id)?.name ?? item.project_id} · ${item.workflow_id}`
+    return homeErrors.some(entry => entry.what === what) ? [] : [{ what, error: new Error(`Not read by All time (${item.code})`) as unknown }]
+  })] : homeErrors
   // A project is unread when its own read failed or every one of its workflows' run lists did.
   const unreadProjects = (loaded ?? []).filter(entry => entry.error !== null || (entry.workflows.length > 0 && entry.workflows.every(item => item.error !== null))).length
+  // Workflows not read inside projects that were: a separate clause, never mixed into the project fraction.
+  const unreadWorkflows = (loaded ?? []).filter(entry => entry.error === null && !entry.workflows.every(item => item.error !== null))
+    .reduce((sum, entry) => sum + entry.workflows.filter(item => item.error !== null).length, 0)
   // With nothing waiting, running or finished today, Paused is the only work left: it shows every paused run, unfolded. With no
   // run list read there is no evidence for that, so the quiet line needs one read list (a partial read says it is incomplete).
   // Under a filter the sections say what matched instead.
@@ -181,8 +273,8 @@ export function RunsHome({ runs, meta, now, note = null, onNavigate, list, folds
       <section className="runs-home" aria-labelledby="runs-home-title">
         <div className="runs-home-head">
           <h2 id="runs-home-title">Runs</h2>
-          {loaded !== null && <LiveStatus status="running" meta={meta} now={now} />}
-          {loaded !== null && (
+          {loaded !== null && <LiveStatus status="running" meta={meta} now={now} pollMs={pollMs} />}
+          {loaded !== null && !allTime && (
             <nav className="home-jumps" aria-label="Sections" data-testid="home-jumps">
               {jumps.map(jump => (
                 <a key={jump.id} href={`#${jump.id}`} className={jump.count ? 'has-rows' : ''} onClick={jumpTo(jump.id)} data-section={jump.id}>
@@ -194,14 +286,32 @@ export function RunsHome({ runs, meta, now, note = null, onNavigate, list, folds
         </div>
         {runs.status === 'loading' || runs.status === 'idle' ? <LoadingPanel>Loading the runs of every project…</LoadingPanel> : (
           <>
-            {unreadProjects > 0 && loaded !== null && (
-              <p className="home-incomplete" role="status" data-testid="lists-incomplete">
-                {loaded.length - unreadProjects} of {loaded.length} projects read; lists incomplete
+            {/* The one home read failed: never an empty or all-clear claim. A failed poll keeps the rows read before and says so. */}
+            {runs.status === 'error' && <p className="home-incomplete" role="status" data-testid="home-not-read">Runs not read: {describeApiError(runs.error)}</p>}
+            {runs.status === 'error' && <Pinned rows={[]} classes={classes} now={now} onNavigate={onNavigate} />}
+            {/* "All time" reads the registry's pages on its own: a failed home read still lists what they read, with the bar to leave. */}
+            {runs.status === 'error' && allTime && (
+              <AllRuns rows={allRows} classes={allClasses} read={allRead} filter={filter} filtering={filtering} context={context} list={list} now={now} onNavigate={onNavigate} />
+            )}
+            {runs.status === 'ready' && meta.lastError !== null && (
+              <p className="home-incomplete" role="status" data-testid="home-not-read">Runs not read: {describeApiError(meta.lastError)} · showing the runs read before</p>
+            )}
+            {runs.status === 'ready' && (<>
+            {(unreadProjects > 0 || unreadWorkflows > 0) && loaded !== null && (
+              <p className="home-incomplete" role="status">
+                <span data-testid="lists-incomplete">{loaded.length - unreadProjects} of {loaded.length} projects read; lists incomplete</span>
+                {unreadWorkflows > 0 && <span data-testid="lists-incomplete-workflows">{` · ${unreadWorkflows} ${unreadWorkflows === 1 ? 'workflow' : 'workflows'} of read projects not read`}</span>}
+                {' · '}<a href="#lists-attention" data-testid="lists-incomplete-link" onClick={jumpTo('lists-attention')}>See Attention</a>
               </p>
             )}
             <Pinned rows={rows} classes={classes} now={now} onNavigate={onNavigate} />
-            <FilterBar kind="triage" state={filter} counts={counts} scope={scopeLine('triage', matched, sectioned.length, false)} active={filtering}
-              onChange={(next, options) => list.change(next, options)} onCommit={list.flush} onClear={list.clear} />
+            {allTime ? (
+              <AllRuns rows={allRows} classes={allClasses} read={allRead} filter={filter} filtering={filtering} context={context} list={list} now={now} onNavigate={onNavigate} />
+            ) : (
+              <FilterBar kind="triage" state={filter} counts={counts} scope={scopeLine('triage', matched, sectioned.length, false)} active={filtering}
+                onChange={(next, options) => list.change(next, options)} onCommit={list.flush} onClear={list.clear} />
+            )}
+            {!allTime && (<>
             {quiet && <p className="home-quiet" data-testid="home-quiet">Nothing waits on you, moved today or runs</p>}
             <Section id="needs-you" headingId="needs-you-title" data-testid="needs-you" className="home-section" hidden={quiet} title={heading('Needs you', sections.needsYou, all.needsYou)}
               sub={filtering && sections.needsYou.length === 0 ? 'No run matches.' : all.needsYou.length === 0 ? 'nothing waits on you' : `${sectionOrderWords(filter.sort, true)}; the command is on the run page`}>
@@ -239,8 +349,10 @@ export function RunsHome({ runs, meta, now, note = null, onNavigate, list, folds
               )}
             </Section>
             <Recent rows={sections.recent} total={all.recent.length} filtering={filtering} sort={filter.sort} classes={classes} now={now} zone={zone} onNavigate={onNavigate} list={list} />
-            {errors.length > 0 && (
-              <Section headingId="attention-title" data-testid="lists-errors" role="alert" className="home-section" title={`Attention · ${errors.length}`}
+            </>)}
+            </>)}
+            {(runs.status === 'ready' || allTime) && errors.length > 0 && (
+              <Section id="lists-attention" headingId="attention-title" data-testid="lists-errors" role="alert" className="home-section" title={`Attention · ${errors.length}`}
                 sub="Some runs could not be loaded, so these lists may be incomplete.">
                 <ul className="home-cards">
                   {errors.map(({ what, error }) => (
@@ -257,6 +369,40 @@ export function RunsHome({ runs, meta, now, note = null, onNavigate, list, folds
         {note !== null && <p className="rail-note" data-testid="projects-info">{note}</p>}
       </section>
     </div>
+  )
+}
+
+/**
+ * Triage under "All time": one list of every run read (the home read and the registry's pages, each run once) in place of the
+ * sections, filtered by the bar's status, phase and text and in its sort. Its scope line says "all loaded" only once every page
+ * answered; a failed page keeps the rows and the filters and offers Retry, which reads that page only.
+ */
+function AllRuns({ rows, classes, read, filter, filtering, context, list, now, onNavigate }: {
+  rows: Row[]; classes: RunClasses; read: AllRead & { retry: () => void }; filter: ListControl['filter']; filtering: boolean
+  context: { now: number; zone: 'local' | 'utc' }; list: ListControl; now: number; onNavigate: (pathname: string) => void
+}) {
+  const items = rows.map(row => ({ ...itemOf(row, classes), row }))
+  const shown = sortRuns(filterItems(items, filter, context), filter.sort, classes)
+  const scope = scopeLine('all', shown.length, rows.length, !read.done)
+  const reading = read.loading ? `Reading older runs… (${rows.length} read)` : null
+  return (
+    <>
+      <FilterBar kind="triage" state={filter} counts={statusCounts(items, filter, context)} scope={scope} active={filtering}
+        onChange={(next, options) => list.change(next, options)} onCommit={list.flush} onClear={list.clear} reading={reading} />
+      <Section id="all-runs" headingId="all-runs-title" data-testid="all-runs" className="home-section" title={`All runs · ${filtering ? `${shown.length} of ${rows.length}` : rows.length}`}
+        sub={filtering && shown.length === 0 ? 'No run matches.' : `every project · ${sectionOrderWords(filter.sort)}`}>
+        {shown.length === 0 && rows.length > 0 && <NoMatch onClear={list.clear} />}
+        {shown.length > 0 && (
+          <ul className="run-rows">
+            {shown.map(({ row }) => (
+              <RunRow key={row.key} run={row.run} cls={classOf(classes, row.run)} labels={row.labels} context={contextOf(row)} lanes={laneNamesOf(row.workflow.nodes)}
+                now={now} onNavigate={onNavigate} href={hrefOf(row)} />
+            ))}
+          </ul>
+        )}
+        {read.error !== null && <ErrorPanel error={read.error} what="The next page of runs" onRetry={read.retry} />}
+      </Section>
+    </>
   )
 }
 

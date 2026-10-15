@@ -127,19 +127,21 @@ export type Outcome = {
   unpair: boolean
   /** The request never ran, so the dialog may send again with a new `request_id`. */
   retryable: boolean
+  /** The run moved on: once the controls are refreshed, the dialog drops its pinned token and adopts the refreshed one. */
+  repin: boolean
 }
 
 /** What a failed request means to the operator (PRD 5.2 codes); a 409 never resends by itself. */
 export function describeFailure(error: unknown): Outcome {
-  if (!(error instanceof ControlError)) return { message: 'The request failed.', refresh: false, unpair: false, retryable: false }
+  if (!(error instanceof ControlError)) return { message: 'The request failed.', refresh: false, unpair: false, retryable: false, repin: false }
   switch (error.code) {
-    case 'STATE_CHANGED': return { message: 'The run changed since you looked. The controls were refreshed; check them, then confirm again.', refresh: true, unpair: false, retryable: true }
-    case 'BUSY': return { message: 'Another control of this run is running. Wait for it to finish, then confirm again.', refresh: true, unpair: false, retryable: true }
-    case 'NOT_AVAILABLE': return { message: error.message, refresh: true, unpair: false, retryable: false }
+    case 'STATE_CHANGED': return { message: 'The run changed since you looked. The controls were refreshed; check them, then confirm again.', refresh: true, unpair: false, retryable: true, repin: true }
+    case 'BUSY': return { message: 'Another control of this run is running. Wait for it to finish, then confirm again.', refresh: true, unpair: false, retryable: true, repin: false }
+    case 'NOT_AVAILABLE': return { message: error.message, refresh: true, unpair: false, retryable: false, repin: false }
     case 'TOKEN_INVALID':
-    case 'TOKEN_REQUIRED': return { message: 'This browser is not paired any more. Pair it again to use the controls.', refresh: false, unpair: true, retryable: false }
-    case 'NETWORK': return { message: error.message, refresh: false, unpair: false, retryable: true }
-    default: return { message: error.message, refresh: false, unpair: false, retryable: false }
+    case 'TOKEN_REQUIRED': return { message: 'This browser is not paired any more. Pair it again to use the controls.', refresh: false, unpair: true, retryable: false, repin: false }
+    case 'NETWORK': return { message: error.message, refresh: false, unpair: false, retryable: true, repin: false }
+    default: return { message: error.message, refresh: false, unpair: false, retryable: false, repin: false }
   }
 }
 
@@ -194,4 +196,34 @@ export function shownRecord(running: readonly ControlRecord[], mine: ControlReco
 /** The run state token a dialog posts: the first one it saw (the token it was opened on), never a later poll's ([L6] 6c). */
 export function pinToken(pinned: string | null, latest: string | null): string | null {
   return pinned ?? latest
+}
+
+/**
+ * The relaunch dialog's dry run: asked for one lane under one run state token, then answered (or failed). `ask` numbers the
+ * request, so an answer to an earlier ask of the same lane and token (ui, adapter, ui again) is told from the current one's.
+ */
+export type RelaunchCheck =
+  | { lane: string; token: string; ask: number; state: 'asking' }
+  | { lane: string; token: string; ask: number; state: 'answered'; exitCode: number | null; line: string }
+  | { lane: string; token: string; ask: number; state: 'failed'; message: string }
+
+/** The check the dialog holds for the lane and token now chosen: one made for another choice is stale and reads as none. */
+export function currentCheck(check: RelaunchCheck | null, lane: string, token: string | null): RelaunchCheck | null {
+  return check !== null && token !== null && check.lane === lane && check.token === token ? check : null
+}
+
+/** The next ask for a lane and token: numbered after the one held, so no earlier request's answer can land on it. */
+export function askCheck(check: RelaunchCheck | null, lane: string, token: string): RelaunchCheck {
+  return { lane, token, ask: (check?.ask ?? 0) + 1, state: 'asking' }
+}
+
+/** An answer only lands on the ask that requested it: a late answer for an earlier ask, lane or token changes nothing. */
+export function answerCheck(check: RelaunchCheck | null, answer: Exclude<RelaunchCheck, { state: 'asking' }>): RelaunchCheck | null {
+  return check !== null && check.state === 'asking' && check.ask === answer.ask && check.lane === answer.lane && check.token === answer.token ? answer : check
+}
+
+/** Confirm is enabled only by an exit-0 dry run of the lane and token chosen now. */
+export function relaunchConfirmable(check: RelaunchCheck | null, lane: string, token: string | null): boolean {
+  const current = currentCheck(check, lane, token)
+  return current !== null && current.state === 'answered' && current.exitCode === 0
 }

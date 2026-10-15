@@ -27,14 +27,16 @@ export function useServedRun(): ServedRun | null {
  * controller's liveness (`data-controller`) while the run is running or paused: `controller running` as served, `▲
  * controller not running` only once that has held for 15 s. A failed or paused run leads with its state and its day ("Failed
  * Oct 9 · checked 2 s ago", "Paused since Oct 2 · checked …"), from the served run. The stale threshold follows the poll
- * cadence: a failed run and the lists (no served run) are re-read every 15 s, a live run every 5 s. The chip is not a live
+ * cadence: a failed run and the lists (no served run) are re-read every 15 s, a live run every 5 s, unless `pollMs` names the
+ * caller's own cadence. The chip is not a live
  * region, since its age changes every second; a separate polite status announces the stale state once.
  */
-export function LiveStatus({ status, meta, now }: { status: RunStatus; meta: ResourceMeta; now: number }) {
+export function LiveStatus({ status, meta, now, pollMs: cadence }: { status: RunStatus; meta: ResourceMeta; now: number; pollMs?: number }) {
   const { visible, since } = usePageVisibility()
   const [zone] = useTimeZone()
   const served = useServedRun()
-  const pollMs = served === null || status === 'failed' ? LISTS_POLL_MS : POLL_INTERVAL_MS
+  // A caller that polls at its own cadence (Triage's home read: 15 s or 60 s) says so; every other caller passes none.
+  const pollMs = cadence ?? (served === null || status === 'failed' ? LISTS_POLL_MS : POLL_INTERVAL_MS)
   const state = freshnessStateAt({ status, settledAt: meta.settledAt, failures: meta.failures, visible, visibleSince: since, now }, pollMs)
   const controller = served === null ? null : controllerSuffix(status, served.controller)
   const loadedAt = meta.settledAt === null ? null : new Date(meta.settledAt).toISOString()

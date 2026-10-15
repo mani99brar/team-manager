@@ -899,6 +899,7 @@ test('events are normalized to workflow v1 with graph attribution, redaction and
     assert.deepEqual(parsed.map(event => event.type), ['status_changed', 'status_changed', 'status_changed', 'status_changed', 'log', 'status_changed', 'status_changed', 'log'])
     assert.deepEqual(parsed.map(event => event.attempt), [1, 1, 1, 1, 1, 2, 2, 0])
     assert.equal(parsed[6].message, 'see <path> and <path>')
+    // This run has no reused candidate packet, so none of its events carries reuse (a reused one is retyped: see result_reused below).
     assert.ok(parsed.every(event => event.run_id === 'ev' && event.artifact === null && event.result_uri === null && event.reused_from_attempt === null))
     assert.equal(new Set(parsed.map(event => event.event_id)).size, 8)
     assert.ok(!response.body.includes(root))
@@ -3718,4 +3719,178 @@ test('[accepted] the engine\'s accepted*.json examples parse with the viewer\'s 
   // The candidate phase has the engine's example; an earlier phase may not have it yet.
   if (process.env.WORKFLOW_VERIFICATION_PHASE === 'candidate') assert.ok(files.length > 0, 'no contracts/workflow/examples/accepted*.json example exists')
   for (const name of files) acceptedRecordSchema.parse(JSON.parse(readFileSync(new URL(name, directory), 'utf8')))
+})
+
+// ---------------------------------------------------------------------------------------------------------------
+// Stage C: a contradictory passed packet, the next-step guard, a challenge rerun and reuse evidence
+
+test('a gate-passed packet whose result says it did not succeed, or carries an error, is served blocked with a redacted message', async () => {
+  await harness(async ({ app, runsRoot }) => {
+    const user = homedir()
+    const setResult = (fields: Record<string, unknown>) => (packet: Record<string, unknown>) => { Object.assign(packet.result as Record<string, unknown>, fields) }
+    await writeRun(runsRoot('alpha', 'main'), { runId: 'contra', values: { ui: receipt('ui'), adapter: receipt('adapter'), snapshots }, next: ['candidate'], events: launchEvents,
+      packets: [
+        { node: 'ui', mutate: setResult({ status: 'failed', error: { code: 'CHECK_FAILED', message: `npm failed in ${user}/dev/repo/worktree-ui and /home/someone/x/y.log`, retryable: false } }) },
+        { node: 'adapter', mutate: setResult({ error: { code: 'LATE', message: 'checks passed but the capture warned', retryable: true } }) },
+        { node: 'ui', attempt: 2, mutate: setResult({ status: 'cancelled', error: null }) },
+        { node: 'adapter', attempt: 2 },
+      ] })
+    const result = async (node: string, attempt: number) => {
+      const response = await get(app, url('alpha', 'main', 'contra', `/results/${node}/${attempt}`))
+      assert.equal(response.status, 200, response.body)
+      return { body: response.body, value: validateWorkerResult(response.json()) }
+    }
+    const failed = await result('ui', 1)
+    assert.equal(failed.value.status, 'failed')
+    assert.deepEqual(failed.value.error, { code: 'VERIFICATION_BLOCKED', message: 'The gate passed but the result says failed: npm failed in <path> and <path>', retryable: true })
+    assert.ok(!failed.body.includes(user) && !failed.body.includes('/home/'), 'no home path is forwarded')
+    const erred = await result('adapter', 1)
+    assert.equal(erred.value.status, 'failed', 'a non-null error is never served as succeeded')
+    assert.deepEqual(erred.value.error, { code: 'VERIFICATION_BLOCKED', message: 'The gate passed but the result says succeeded: checks passed but the capture warned', retryable: true })
+    const cancelled = await result('ui', 2)
+    assert.equal(cancelled.value.status, 'failed')
+    assert.deepEqual(cancelled.value.error, { code: 'VERIFICATION_BLOCKED', message: 'The gate passed but the result says cancelled', retryable: true })
+    // A consistent passed packet is served exactly as before: the same bytes as the projection without the contradiction rule.
+    const consistent = await result('adapter', 2)
+    assert.equal(consistent.value.status, 'succeeded')
+    assert.equal(consistent.value.error, null)
+    const packet = JSON.parse(await readFile(join(runsRoot('alpha', 'main'), 'contra', 'verification', 'worker', 'adapter', '2', 'packet.json'), 'utf8'))
+    const raw = packet.result
+    const expected = {
+      contract_version: '1.0.0', run_id: 'contra', node_id: 'adapter', attempt: 2, session_id: raw.session_id, status: 'succeeded', base_commit: BASE, output_commit: OUTPUT,
+      changed_files: raw.changed_files, checks: [], open_assumptions: [], artifacts: [], summary: raw.summary, error: null,
+    }
+    assert.equal(consistent.body, JSON.stringify(validateWorkerResult(expected)))
+  })
+})
+
+test('a lane check\'s task error fails it only while the task is in next; the passed-packet guard still holds for older exports', async () => {
+  await harness(async ({ app, runsRoot }) => {
+    const events = [...launchEvents,
+      { sequence: 5, time: T1, node: 'freeze', status: 'succeeded', message: 'Immutable snapshots captured' },
+      { sequence: 6, time: T1, node: 'verify_ui', status: 'running', message: `Attempt 1; revision ${OUTPUT}` },
+      { sequence: 7, time: T1, node: 'verify_adapter', status: 'running', message: `Attempt 1; revision ${OUTPUT}` }]
+    await writeRun(runsRoot('alpha', 'main'), { runId: 'nextonly', values: { ui: receipt('ui'), adapter: receipt('adapter'), snapshots }, next: ['verify_adapter'], events,
+      tasks: [
+        { node_id: 'verify_ui', error: 'ui verification blocked; retry explicitly', interrupts: [], result: null },
+        { node_id: 'verify_adapter', error: 'adapter verification blocked; retry explicitly', interrupts: [], result: null },
+      ] })
+    const detail = validateRunDetail((await get(app, url('alpha', 'main', 'nextonly'))).json())
+    const nodes = Object.fromEntries(detail.snapshot.nodes.map(node => [node.node_id, node.status]))
+    assert.notEqual(nodes.verify_ui, 'failed', 'an error on a task the graph moved past is stale')
+    assert.equal(nodes.verify_adapter, 'failed')
+    // An export written before the controller cleared stale errors: the task is still in next but its newest packet passed.
+    await writeRun(runsRoot('alpha', 'main'), { runId: 'oldguard', values: { ui: receipt('ui'), adapter: receipt('adapter'), snapshots }, next: ['verify_adapter'], events,
+      tasks: [{ node_id: 'verify_adapter', error: 'adapter verification blocked; retry raised the attempt', interrupts: [], result: null }],
+      packets: [{ node: 'adapter', gate: { status: 'blocked', reasons: ['backend-unit: exit 1'] } }, { node: 'adapter', attempt: 2 }] })
+    const guarded = validateRunDetail((await get(app, url('alpha', 'main', 'oldguard'))).json())
+    assert.notEqual(guarded.snapshot.nodes.find(node => node.node_id === 'verify_adapter')!.status, 'failed')
+  })
+})
+
+test('a design challenge rerun whose plan.json and run-state.json share base_commit loads with challenge.running.json present', async () => {
+  await harness(async ({ app, runsRoot }) => {
+    const nodes = [{ node_id: 'challenge', label: 'Design challenge', kind: 'review', depends_on: [] }, ...GRAPH_NODES.map(node => node.kind === 'worker' ? { ...node, depends_on: ['challenge'] } : node)]
+    const dir = await writeRun(runsRoot('alpha', 'main'), { runId: 'rerun', skipPlan: true, definition: { name: 'Feature implementation', nodes }, next: ['challenge'],
+      events: [
+        { sequence: 1, time: T0, node: 'challenge', status: 'running', message: 'Design challenge attempt 1: one print job, session s-1' },
+        { sequence: 2, time: T0, node: 'challenge', status: 'paused', message: 'Design challenge attempt 1 found a P1' },
+        { sequence: 3, time: T1, node: 'challenge', status: 'running', message: 'Design challenge attempt 2: one print job, session s-2' }],
+      files: { 'challenge.running.json': JSON.stringify({ attempt: 2, session_id: 's-2', started_at: T1 }) } })
+    await writeFile(join(dir, 'plan.json'), json({ run_id: 'rerun', repository: '/synthetic/repository', base_commit: BASE, challenge: true, created_at: T0, policy_sha256: 'c'.repeat(64) }))
+    const detail = await get(app, url('alpha', 'main', 'rerun'))
+    assert.equal(detail.status, 200, detail.body)
+    assert.equal(validateRunDetail(detail.json()).summary.run_id, 'rerun')
+    const list = await get(app, url('alpha', 'main'))
+    assert.equal(list.status, 200, list.body)
+    assert.deepEqual((list.json() as { runs: { run_id: string }[] }).runs.map(run => run.run_id), ['rerun'])
+  })
+})
+
+test('a reused candidate packet retypes its lane\'s gate event as result_reused, matched from the packet registry and event order only', async () => {
+  await harness(async ({ app, runsRoot }) => {
+    const oneLane = { name: 'Feature implementation', nodes: graphNodes(['ui']) }
+    const root = runsRoot('alpha', 'main')
+    // As reuse_packet records it: the worker packet's path and the digest of its bytes, which writeRun has already written.
+    const reuseOf = (runId: string, lane: string, attempt: number, digest?: string) => (packet: Record<string, unknown>) => {
+      const path = `verification/worker/${lane}/${attempt}/packet.json`
+      packet.reused_from = { path, sha256: digest ?? createHash('sha256').update(readFileSync(join(root, runId, path))).digest('hex') }
+    }
+    const uiLaunch: RawEvent[] = [
+      { sequence: 1, time: T0, node: 'ui', status: 'running', message: 'Launching or reconciling the exact native session' },
+      { sequence: 2, time: T1, node: 'freeze', status: 'succeeded', message: 'Immutable snapshots captured' },
+      { sequence: 3, time: T1, node: 'verify_ui', status: 'running', message: `Attempt 1; revision ${OUTPUT}` },
+      { sequence: 4, time: T1, node: 'verify_ui', status: 'passed', message: 'Required tests and artifacts passed' }]
+    const reusedMessage = `Combined revision ${OUTPUT}; worker checks reused from verification/worker/ui/1/packet.json (one lane, no browser check, the candidate is its snapshot)`
+    // One lane, the candidate packet reuses worker attempt 1.
+    await writeRun(root, { runId: 'reuse', definition: oneLane, values: { ui: receipt('ui') }, next: ['review'], updated: T1,
+      events: [...uiLaunch, { sequence: 5, time: T2, node: 'candidate_ui', status: 'passed', message: reusedMessage }, { sequence: 6, time: T2, node: 'controller', status: 'running', message: 'Review next' }],
+      packets: [{ node: 'ui' }, { node: 'ui', phase: 'candidate', mutate: reuseOf('reuse', 'ui', 1) }] })
+    // Several candidate attempts: attempt 1 reused, attempt 2 checked again; only attempt 1's gate row is retyped.
+    await writeRun(root, { runId: 'reuse2', definition: oneLane, values: { ui: receipt('ui') }, next: ['review'], updated: T1,
+      events: [...uiLaunch, { sequence: 5, time: T2, node: 'candidate_ui', status: 'passed', message: reusedMessage },
+        { sequence: 6, time: T2, node: 'candidate_ui', status: 'running', message: `Attempt 2; combined revision ${OUTPUT}` },
+        { sequence: 7, time: T2, node: 'candidate_ui', status: 'passed', message: `Combined revision ${OUTPUT}` }],
+      packets: [{ node: 'ui' }, { node: 'ui', phase: 'candidate', mutate: reuseOf('reuse2', 'ui', 1) }, { node: 'ui', phase: 'candidate', attempt: 2 }] })
+    // No reuse, but a message that reads like it: nothing is retyped.
+    await writeRun(root, { runId: 'plain', definition: oneLane, values: { ui: receipt('ui') }, next: ['review'], updated: T1,
+      events: [...uiLaunch, { sequence: 5, time: T2, node: 'candidate_ui', status: 'passed', message: reusedMessage }],
+      packets: [{ node: 'ui' }, { node: 'ui', phase: 'candidate' }] })
+    // Evidence naming another lane's worker packet, or a reused attempt after a checked one: never matched.
+    await writeRun(root, { runId: 'otherlane', values: { ui: receipt('ui'), adapter: receipt('adapter') }, next: ['review'], updated: T1,
+      events: [...uiLaunch, { sequence: 5, time: T2, node: 'candidate_ui', status: 'passed', message: reusedMessage }],
+      packets: [{ node: 'ui' }, { node: 'adapter' }, { node: 'ui', phase: 'candidate', mutate: reuseOf('otherlane', 'adapter', 1) }] })
+    await writeRun(root, { runId: 'late', definition: oneLane, values: { ui: receipt('ui') }, next: ['review'], updated: T1,
+      events: [...uiLaunch, { sequence: 5, time: T2, node: 'candidate_ui', status: 'running', message: `Attempt 1; combined revision ${OUTPUT}` },
+        { sequence: 6, time: T2, node: 'candidate_ui', status: 'passed', message: reusedMessage }],
+      packets: [{ node: 'ui' }, { node: 'ui', phase: 'candidate', mutate: reuseOf('late', 'ui', 1) }] })
+    // A reused packet of a later attempt, its earlier packet missing: attempt 1's gate row is not its own, so nothing is retyped.
+    await writeRun(root, { runId: 'laterattempt', definition: oneLane, values: { ui: receipt('ui') }, next: ['review'], updated: T1,
+      events: [...uiLaunch, { sequence: 5, time: T2, node: 'candidate_ui', status: 'passed', message: reusedMessage }],
+      packets: [{ node: 'ui' }, { node: 'ui', phase: 'candidate', attempt: 2, mutate: reuseOf('laterattempt', 'ui', 1) }] })
+    // The reused worker packet is not registered, or is registered with other bytes than the candidate packet hashed: never matched.
+    await writeRun(root, { runId: 'reuse-missing', definition: oneLane, values: { ui: receipt('ui') }, next: ['review'], updated: T1,
+      events: [...uiLaunch, { sequence: 5, time: T2, node: 'candidate_ui', status: 'passed', message: reusedMessage }],
+      packets: [{ node: 'ui', phase: 'candidate', mutate: reuseOf('reuse-missing', 'ui', 1, 'b'.repeat(64)) }] })
+    await writeRun(root, { runId: 'reuse-hash', definition: oneLane, values: { ui: receipt('ui') }, next: ['review'], updated: T1,
+      events: [...uiLaunch, { sequence: 5, time: T2, node: 'candidate_ui', status: 'passed', message: reusedMessage }],
+      packets: [{ node: 'ui' }, { node: 'ui', phase: 'candidate', mutate: reuseOf('reuse-hash', 'ui', 1, 'a'.repeat(64)) }] })
+
+    const events = async (runId: string, after?: number) => {
+      const response = await get(app, url('alpha', 'main', runId, after === undefined ? '/events' : `/events?after=${after}`))
+      assert.equal(response.status, 200, response.body)
+      return (response.json() as { events: unknown[] }).events.map(event => eventSchema.parse(event))
+    }
+    const unchanged = (event: WorkflowEvent) => ({ ...event, type: undefined, result_uri: undefined, reused_from_attempt: undefined })
+
+    const reuse = await events('reuse')
+    const reusedEvents = reuse.filter(event => event.type === 'result_reused')
+    assert.equal(reusedEvents.length, 1)
+    assert.equal(reusedEvents[0].sequence, 5)
+    assert.equal(reusedEvents[0].reused_from_attempt, 1)
+    assert.equal(reusedEvents[0].result_uri, '/api/projects/alpha/workflows/main/runs/reuse/results/ui/1')
+    assert.equal(reusedEvents[0].node_id, 'candidate')
+    assert.equal(reusedEvents[0].status, 'succeeded')
+    assert.equal(reusedEvents[0].message, `[ui] ${reusedMessage}`)
+    // The same rows as the run without reuse, but for the one retyped event: no event inserted, renumbered or reworded.
+    const plain = await events('plain')
+    assert.ok(plain.every(event => event.type !== 'result_reused' && event.reused_from_attempt === null && event.result_uri === null))
+    assert.deepEqual(reuse.map(event => event.sequence), [1, 2, 3, 4, 5, 6])
+    assert.deepEqual(reuse.slice(0, 5).map(unchanged).map(event => ({ ...event, run_id: undefined, event_id: undefined })),
+      plain.map(unchanged).map(event => ({ ...event, run_id: undefined, event_id: undefined })))
+    assert.equal(plain[4].type, 'status_changed', 'the retyped event was status_changed before')
+    // Paging keeps the count and the sequences at every boundary.
+    for (let after = 0; after <= 6; after++) {
+      const page = await events('reuse', after)
+      assert.deepEqual(page.map(event => event.sequence), reuse.filter(event => event.sequence > after).map(event => event.sequence))
+      assert.deepEqual(page, reuse.filter(event => event.sequence > after))
+    }
+
+    const several = await events('reuse2')
+    assert.deepEqual(several.filter(event => event.type === 'result_reused').map(event => [event.sequence, event.reused_from_attempt]), [[5, 1]])
+    assert.equal(several.length, 7)
+    for (const runId of ['plain', 'otherlane', 'late', 'laterattempt', 'reuse-missing', 'reuse-hash']) {
+      assert.deepEqual((await events(runId)).filter(event => event.type === 'result_reused' || event.reused_from_attempt !== null), [], runId)
+    }
+  })
 })

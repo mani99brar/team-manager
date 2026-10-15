@@ -1,7 +1,7 @@
 import type { WorkerResult } from '../workflow/v1.js'
 import type { Control, ControlId, ControlRecord, ControlRequest, ControlsStatus, ParamSpec, RunControls } from './controls.js'
 import type { AttackRecord, AttackResult, FixLoop, PanelRecord, PanelResults, ReviewFinding, RepairEntry, ReviewResult, RunDetail, RunInputs, SidecarLedger, SidecarLedgerFile } from './v1.js'
-import type { DispatchOverview, ProjectSteps, GithubRepoRead } from './dispatch.js'
+import type { DispatchOverview, HomeRuns, ProjectSteps, GithubRepoRead, RegistryRuns } from './dispatch.js'
 import type { Sessions } from './sessions.js'
 
 /**
@@ -715,9 +715,16 @@ export const fixLoopRestored: FixLoop = { ...fixLoopHeader, ...fixLoopRestoredRe
 /** A loop neither source could project: no repairs, no rounds, no repair nodes. */
 export const fixLoopError: FixLoop = { contract_version: '1.10.0', source: 'export', version: '1.0.0', error: 'repairs.json: repair 2 has a status the viewer does not know', rounds: null, repairs: [], review_rounds: [] }
 
-// ---- Run controls (docs/PRD_RUN_CONTROLS.md Appendix A, contract 1.0.0) -------------------------------------------------------
+// ---- Run controls (docs/PRD_RUN_CONTROLS.md Appendix A, contract 1.1.0) -------------------------------------------------------
 
 const PANE_REASON = 'Typing the answer needs the lane\'s Herdr pane; answer in your terminal'
+/** The two 1.1.0 controls' texts, as `server/controls.ts` serves them. */
+export const RETRY_ALL_EFFECT = 'Raises the attempt of every lane whose worker check failed or was left without a verdict, in one command; Restart supervisor then reruns them.'
+export const RETRY_ALL_NOT_EFFECT = 'It runs no check itself and never retries a combined (candidate) check.'
+export const RELAUNCH_EFFECT = 'Relaunches the lane\'s worker session once, after its dry run shows the controller allows it; continue with Reconcile launches and then Restart supervisor.'
+export const RELAUNCH_NOT_EFFECT = 'It reconciles and restarts nothing itself, and relaunches a lane at most once.'
+export const RETRY_ALL_FEWER = 'Fewer than two worker checks failed'
+export const RELAUNCH_NONE = 'No lane launch is waiting to be relaunched'
 
 type ControlBase = Omit<Control, 'available' | 'reason' | 'recommended' | 'params'>
 
@@ -747,6 +754,10 @@ const controlBases: ControlBase[] = [
     effect: 'Stops every recorded session of the run and closes it for good.', not_effect: 'Worktrees and evidence stay until the run is cleaned.' },
   { id: 'clean', label: 'Clean worktrees', command: '$PY -m workflow clean "$RUN" --by operator', runs: 'short', confirm: 'typed_run_id',
     effect: 'Removes the run\'s worktrees (and its source checkout once finished); a dry run shows what first.', not_effect: 'Evidence, packets, logs and every run file stay.' },
+  { id: 'retry_all', label: 'Retry all failed checks', command: '$PY -m workflow retry "$RUN" --phase worker --all-failed --by operator', runs: 'short', confirm: 'plain',
+    effect: RETRY_ALL_EFFECT, not_effect: RETRY_ALL_NOT_EFFECT },
+  { id: 'relaunch', label: 'Relaunch a lane', command: '$PY -m workflow relaunch "$RUN" <lane> --by operator', runs: 'short', confirm: 'plain',
+    effect: RELAUNCH_EFFECT, not_effect: RELAUNCH_NOT_EFFECT },
 ]
 
 const typedParam: ParamSpec = { name: 'confirm_run_id', kind: 'typed', required: true }
@@ -756,16 +767,18 @@ const noParams: Record<ControlId, ParamSpec[]> = {
   answer: [{ name: 'lane', kind: 'choice', choices: [], required: true }, { name: 'text', kind: 'text', min_length: 1, max_length: 4000, required: true }],
   approve: [typedParam], repair_session: [{ name: 'lane', kind: 'choice', choices: [], required: true }, typedParam],
   abandon: [{ name: 'reason', kind: 'text', min_length: 1, max_length: 500, required: true }, typedParam], clean: [typedParam],
+  retry_all: [], relaunch: [{ name: 'lane', kind: 'choice', choices: [], required: true }],
 }
+const DEFAULT_REASONS: Partial<Record<ControlId, string>> = { retry_all: RETRY_ALL_FEWER, relaunch: RELAUNCH_NONE }
 
 /** One RunControls: `offered` lists the available ids (with their parameter specs), `reasons` the reason of every other control. */
 function controlsExample(token: string, supervisor: RunControls['supervisor'], offered: Partial<Record<ControlId, ParamSpec[]>>, reasons: Partial<Record<ControlId, string>>, records: ControlRecord[] = [], commands: Partial<Record<ControlId, string>> = {}): RunControls {
   return {
-    version: '1.0.0', run_state_token: token, supervisor, supervisor_since: supervisor === 'running' ? '2026-10-10T10:42:07Z' : null,
+    version: '1.1.0', run_state_token: token, supervisor, supervisor_since: supervisor === 'running' ? '2026-10-10T10:42:07Z' : null,
     controls: controlBases.map(base => {
       const id = base.id
       const available = id in offered
-      return { ...base, command: commands[id] ?? base.command, available, reason: available ? null : reasons[id] ?? 'Not available', recommended: false, params: offered[id] ?? noParams[id] }
+      return { ...base, command: commands[id] ?? base.command, available, reason: available ? null : reasons[id] ?? DEFAULT_REASONS[id] ?? 'Not available', recommended: false, params: offered[id] ?? noParams[id] }
     }),
     records,
   }
@@ -778,8 +791,8 @@ const SUPERVISOR_RUNNING = 'A supervisor is running (since 10:42 UTC)'
 const NO_QUESTION = 'No lane has an unanswered question'
 const NOT_PAUSED = 'The design challenge is not paused, held or interrupted'
 
-export const controlsStatus: ControlsStatus = { version: '1.0.0', enabled: true, paired: true }
-export const controlsStatusOff: ControlsStatus = { version: '1.0.0', enabled: false, paired: false }
+export const controlsStatus: ControlsStatus = { version: '1.1.0', enabled: true, paired: true }
+export const controlsStatusOff: ControlsStatus = { version: '1.1.0', enabled: false, paired: false }
 
 export const controlRecordRunning: ControlRecord = {
   record_id: 'c-0a1b2c3d4e5f', request_id: '3f2504e0-4f89-41d3-9a0c-0305e82c3301', control: 'restart', params: {}, command: '$PY -m workflow automatic "$RUN" --live --by operator',
@@ -812,6 +825,7 @@ export const runControlsStates: Record<string, RunControls> = {
   runningSupervisor: controlsExample('rs-running', 'running', { pause: [] }, {
     restart: SUPERVISOR_RUNNING, retry: SUPERVISOR_RUNNING, reconcile: SUPERVISOR_RUNNING, resume: SUPERVISOR_RUNNING, accept_challenge: SUPERVISOR_RUNNING,
     release_hold: SUPERVISOR_RUNNING, answer: NO_QUESTION, approve: 'The run is not waiting for your approval', repair_session: SUPERVISOR_RUNNING, abandon: SUPERVISOR_RUNNING, clean: SUPERVISOR_RUNNING,
+    retry_all: SUPERVISOR_RUNNING, relaunch: SUPERVISOR_RUNNING,
   }, [controlRecordRunning]),
   failedVerify: controlsExample('rs-failed-verify', 'not_running', { restart: [], retry: [choice('lane', ['ui']), phases(['worker'])], abandon: [reasonSpec(1), typedParam] }, {
     pause: 'No supervisor is running', reconcile: 'No launch needs reconciling', resume: NOT_PAUSED, accept_challenge: 'The latest design challenge is not paused',
@@ -857,18 +871,28 @@ export const runControlsStates: Record<string, RunControls> = {
   abandoned: controlsExample('rs-abandoned', 'not_running', { clean: [typedParam] }, {
     restart: 'The run was abandoned', pause: 'No supervisor is running', retry: 'The run was abandoned', reconcile: 'The run was abandoned', resume: 'The run was abandoned',
     accept_challenge: 'The run was abandoned', release_hold: 'The run was abandoned', answer: NO_QUESTION, approve: 'The run is not waiting for your approval',
-    repair_session: 'The run was abandoned', abandon: 'The run was abandoned',
+    repair_session: 'The run was abandoned', abandon: 'The run was abandoned', retry_all: 'The run was abandoned',
   }),
   finished: controlsExample('rs-finished', 'not_running', { clean: [typedParam] }, {
     restart: 'The run is finished', pause: 'No supervisor is running', retry: 'The run is finished', reconcile: 'No launch needs reconciling', resume: NOT_PAUSED,
     accept_challenge: 'The latest design challenge is not paused', release_hold: 'The design challenge is not held', answer: NO_QUESTION, approve: 'The run is not waiting for your approval',
-    repair_session: 'The run is not blocked at a check verdict after freeze, before review', abandon: 'The run is already integrated',
+    repair_session: 'The run is not blocked at a check verdict after freeze, before review', abandon: 'The run is already integrated', retry_all: 'The run is finished',
   }),
 }
+// 1.1.0: a stopped automatic run with two failed worker checks and a lane launch that needs reconciliation.
+runControlsStates.recovery = controlsExample('rs-recovery', 'not_running', {
+  restart: [], retry: [choice('lane', ['ui', 'adapter']), phases(['worker'])], reconcile: [], abandon: [reasonSpec(1), typedParam], retry_all: [], relaunch: [choice('lane', ['ui'])],
+}, {
+  pause: 'No supervisor is running', resume: NOT_PAUSED, accept_challenge: 'The latest design challenge is not paused', release_hold: 'The design challenge is not held',
+  answer: NO_QUESTION, approve: 'The run is not waiting for your approval', repair_session: 'The run is not blocked at a check verdict after freeze, before review', clean: 'The run is not finished or abandoned',
+}, [], { relaunch: '$PY -m workflow relaunch "$RUN" <lane> --by operator' })
 export const runControls: RunControls = runControlsStates.stoppedAutomatic
 export const controlRequest: ControlRequest = { request_id: '3f2504e0-4f89-41d3-9a0c-0305e82c3306', run_state_token: 'rs-stopped', params: {} }
 export const cleanPreviewRequest = { run_state_token: 'rs-finished' }
 export const cleanPreviewResponse = { exitCode: 0, output: 'Would remove 2 worktrees\nWould keep evidence' }
+export const relaunchPreviewRequest = { run_state_token: 'rs-recovery', lane: 'ui' }
+export const relaunchPreviewResponse = { exitCode: 0, line: 'relaunch ui: allowed' }
+export const relaunchPreviewRefused = { exitCode: 1, line: 'relaunch ui: refused: session 6f1c2d3e-0000-4000-8000-000000000001 (\'done\') carries the launch name' }
 
 // --- Dispatch (Appendix A, contract 1.0.0) ---
 
@@ -924,6 +948,7 @@ export const dispatchOverview: DispatchOverview = {
         read_at: '2026-10-11T03:40:00Z',
       },
       github: { status: 'read', reason: null, repo: 'kleros/kleros-v2', ...githubRead },
+      spend: { claude_usd: 42.137512, priced_runs: 3, runs: 4 },
     },
     {
       project_id: 'kleros-v2-worktree',
@@ -934,6 +959,7 @@ export const dispatchOverview: DispatchOverview = {
         ahead_commits: [], ahead_naming_run: 0, landings: [], read_at: '2026-10-11T03:40:00Z',
       },
       github: { status: 'pending', reason: 'not read yet', repo: 'kleros/kleros-v2', read_at: null, visibility: null, default_branch: null, pushed_at: null, head: null, open_prs: null, open_issues: null, prs: [], issues: [] },
+      spend: { claude_usd: 0, priced_runs: 1, runs: 1 },
     },
     {
       project_id: 'team-manager',
@@ -943,6 +969,7 @@ export const dispatchOverview: DispatchOverview = {
         origin: null, ahead_commits: [], ahead_naming_run: 0, landings: [], read_at: '2026-10-11T03:40:00Z',
       },
       github: { status: 'off', reason: 'GitHub reads are turned off', repo: 'kleros/team-manager', read_at: null, visibility: null, default_branch: null, pushed_at: null, head: null, open_prs: null, open_issues: null, prs: [], issues: [] },
+      spend: { claude_usd: null, priced_runs: 0, runs: 2 },
     },
     {
       project_id: 'vendored',
@@ -953,6 +980,7 @@ export const dispatchOverview: DispatchOverview = {
         ahead_commits: [], ahead_naming_run: 0, landings: [], read_at: '2026-10-11T03:40:00Z',
       },
       github: { status: 'not_github', reason: 'not a GitHub remote', repo: null, read_at: null, visibility: null, default_branch: null, pushed_at: null, head: null, open_prs: null, open_issues: null, prs: [], issues: [] },
+      spend: { claude_usd: null, priced_runs: 0, runs: 0 },
     },
     {
       project_id: 'missing',
@@ -962,8 +990,40 @@ export const dispatchOverview: DispatchOverview = {
         origin: null, ahead_commits: [], ahead_naming_run: 0, landings: [], read_at: '2026-10-11T03:40:00Z',
       },
       github: { status: 'unavailable', reason: 'git not read', repo: null, read_at: null, visibility: null, default_branch: null, pushed_at: null, head: null, open_prs: null, open_issues: null, prs: [], issues: [] },
+      spend: null,
     },
   ],
+}
+
+/**
+ * The registry home read: one project with a workflow read to the cutoff (one more page remains), a workflow whose run list
+ * failed, and a project whose workflow list could not be read.
+ */
+export const homeRuns: HomeRuns = {
+  contract_version: '1.0.0',
+  read_at: '2026-10-11T03:40:00Z',
+  since: '2026-10-04T03:40:00Z',
+  projects: [
+    {
+      project_id: 'md-manager',
+      workflows: [runDetail.definition, { ...runDetail.definition, workflow_id: 'broken' }],
+      error: null,
+      runs: [
+        { workflow_id: 'feature-implementation', runs: [runDetail.summary], next_cursor: 'eyJ2IjoxfQ', error: null },
+        { workflow_id: 'broken', runs: [], next_cursor: null, error: { status: 500, code: 'RUN_STORAGE_INVALID', message: 'Run "run-000" has malformed or contradictory persisted state: plan.json is missing' } },
+      ],
+    },
+    { project_id: 'gone', workflows: [], error: { status: 404, code: 'PROJECT_NOT_FOUND', message: 'No project with that ID is registered.' }, runs: [] },
+  ],
+}
+
+/** One page of the registry's runs with more to read, and a workflow that could not be read. */
+export const registryRuns: RegistryRuns = {
+  contract_version: '1.0.0',
+  read_at: '2026-10-11T03:40:00Z',
+  runs: [runDetail.summary],
+  next_cursor: 'eyJ2IjoyfQ',
+  unreadable: [{ project_id: 'md-manager', workflow_id: 'broken', code: 'RUN_STORAGE_INVALID' }],
 }
 
 export const projectSteps: ProjectSteps = {

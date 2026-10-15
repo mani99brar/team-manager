@@ -3,14 +3,15 @@ import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { after, test } from 'node:test'
+import { after, mock, test } from 'node:test'
 import { createApp, type ProjectsConfig } from './app.ts'
-import { buildDispatch } from './dispatch.ts'
+import { buildDispatch, projectSpend } from './dispatch.ts'
 import { GitReader, discoverGithubRepos, parseGithubRemote, readGitState, realGitRunner, type ExecFileLike, type GitInput, type GitRunner } from './dispatchGit.ts'
 import { GH_REASONS, GITHUB_QUERY, GithubReader, githubArgv, githubReaderOptions, parseGithub, realGhRunner, type GhResult } from './dispatchGithub.ts'
 import { buildDigest } from './dispatchSteps.ts'
 import { ProjectApiError, RunStore, type LoadedRun } from './projects.ts'
-import { githubStateSchema } from '../contracts/projects/dispatch.ts'
+import { githubStateSchema, homeRunsSchema, registryRunsSchema, type RegistryRuns } from '../contracts/projects/dispatch.ts'
+import { readsNextPage } from '../src/projects/lists.ts'
 
 /**
  * server/dispatch.test.ts (PRD_PROJECTS_DISPATCH section 7): the git state over temporary repositories, the GitHub
@@ -1120,4 +1121,220 @@ test('S9: no absolute path appears in either route\'s whole JSON; per-run and wo
   assert.ok(message.includes('plan.json is missing'), 'the rest of the message survives verbatim')
   const wfFile = steps.workflows.find((w: { workflow_id: string }) => w.workflow_id === 'wfile')
   assert.ok(wfFile.error, 'the workflow whose runs_root is a file carries a workflow-level error (scanned for a path too)')
+})
+
+// ---- Stage C: the registry home read, the registry pages and the project spend ------------------------------------------
+
+/** A run whose export carries `costs` as the controller writes it (workflow/costs.py), or none. */
+function writeCostRun(runsRoot: string, runId: string, updated: string, costs?: unknown): void {
+  writeRunDir(runsRoot, runId, { updated })
+  if (costs === undefined) return
+  const path = join(runsRoot, runId, 'run-state.json')
+  writeFileSync(path, JSON.stringify({ ...JSON.parse(readFileSync(path, 'utf8')), costs }))
+}
+
+const minute = (n: number) => new Date(Date.parse('2026-01-01T00:00:00Z') + n * 60_000).toISOString()
+
+/**
+ * One registry with several pages per workflow: `big` holds 130 runs (ties at every tenth minute), `mid` 60, `bad` an
+ * invalid run, `gone` a missing runs root, and a second project with one small workflow.
+ */
+function pagedRegistry() {
+  const base = fresh('paged')
+  const roots = Object.fromEntries(['big', 'mid', 'bad', 'gone', 'small'].map(name => [name, join(base, name)]))
+  for (const name of ['big', 'mid', 'bad', 'small']) mkdirSync(roots[name], { recursive: true })
+  for (let i = 0; i < 130; i += 1) writeRunDir(roots.big, `big-${String(i).padStart(3, '0')}`, { updated: minute(i - (i % 10 === 0 ? 1 : 0)) })
+  for (let i = 0; i < 60; i += 1) writeRunDir(roots.mid, `mid-${String(i).padStart(3, '0')}`, { updated: minute(i * 2) })
+  writeRunDir(roots.bad, 'bad-001', { updated: minute(5) })
+  writeRunDir(roots.bad, 'bad-002', { badState: true })
+  for (let i = 0; i < 3; i += 1) writeRunDir(roots.small, `small-${i}`, { updated: minute(100 + i) })
+  const definition = { name: 'W', nodes: MIN_NODES }
+  const config = registry([
+    { project_id: 'alpha', name: 'Alpha', repository: fresh('repo'), workflows: ['big', 'mid', 'bad', 'gone'].map(id => ({ workflow_id: id, runs_root: roots[id], definition })) },
+    { project_id: 'beta', name: 'Beta', repository: fresh('repo'), workflows: [{ workflow_id: 'small', runs_root: roots.small, definition }] },
+  ])
+  return { config, roots }
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- the routes' bodies are read loosely here, then compared by deep equality
+type Inject = (url: string) => Promise<{ statusCode: number; json: () => any }>
+
+/** What the client assembled before the home route (`fetchRegistryRuns` with `readsNextPage(since)`), read over the per-workflow routes. */
+async function perWorkflowAssembly(get: Inject, since: string) {
+  const projects = (await get('/api/projects')).json().projects as { project_id: string }[]
+  return Promise.all(projects.map(async project => {
+    const listed = await get(`/api/projects/${project.project_id}/workflows`)
+    if (listed.statusCode !== 200) return { project_id: project.project_id, workflows: [], error: { status: listed.statusCode, ...listed.json().error }, runs: [] }
+    const workflows = listed.json().workflows as { workflow_id: string }[]
+    const runs = await Promise.all(workflows.map(async workflow => {
+      const read: unknown[] = []
+      let next: string | null = null
+      do {
+        const page = await get(`/api/projects/${project.project_id}/workflows/${workflow.workflow_id}/runs${next ? `?cursor=${next}` : ''}`)
+        if (page.statusCode !== 200) return { workflow_id: workflow.workflow_id, runs: [], next_cursor: null, error: { status: page.statusCode, ...page.json().error } }
+        read.push(...page.json().runs)
+        next = page.json().next_cursor
+      } while (next !== null && readsNextPage(read as { updated_at: string }[], next, Date.parse(since)))
+      return { workflow_id: workflow.workflow_id, runs: read, next_cursor: next, error: null }
+    }))
+    return { project_id: project.project_id, workflows, error: null, runs }
+  }))
+}
+
+test('home route: equals the per-workflow routes\' assembly for three cutoffs, the >= boundary included; every row of each page read, no count', async () => {
+  const { config } = pagedRegistry()
+  const app = createApp([], { projects: config, dispatch: { gitRunner: runner, now } })
+  after(() => app.close())
+  await app.ready()
+  const get: Inject = async url => app.inject({ method: 'GET', url })
+  const firstPage = (await get('/api/projects/alpha/workflows/big/runs')).json().runs as { updated_at: string }[]
+  const boundary = new Date(Date.parse(firstPage.at(-1)!.updated_at)).toISOString()
+  for (const since of ['2025-01-01T00:00:00Z', boundary, '2027-01-01T00:00:00Z']) {
+    const response = await get(`/api/dispatch/runs?since=${encodeURIComponent(since)}`)
+    assert.equal(response.statusCode, 200)
+    const body = homeRunsSchema.parse(response.json())
+    assert.equal(body.contract_version, '1.0.0')
+    assert.equal(body.since, new Date(since).toISOString())
+    assert.deepEqual(body.projects, await perWorkflowAssembly(get, since), `since ${since}`)
+    assert.deepEqual(Object.keys(body.projects[0].runs[0]).sort(), ['error', 'next_cursor', 'runs', 'workflow_id'], 'rows only, no server-computed count')
+  }
+  const at = (since: string) => get(`/api/dispatch/runs?since=${encodeURIComponent(since)}`).then(r => homeRunsSchema.parse(r.json()))
+  const old = await at('2025-01-01T00:00:00Z')
+  const big = old.projects[0].runs.find(entry => entry.workflow_id === 'big')!
+  assert.equal(big.runs.length, 130, 'an old cutoff reads every page')
+  assert.equal(big.next_cursor, null)
+  const future = await at('2027-01-01T00:00:00Z')
+  const firstOnly = future.projects[0].runs.find(entry => entry.workflow_id === 'big')!
+  assert.equal(firstOnly.runs.length, 50, 'a future cutoff still serves the whole first page, never filtered to the cutoff')
+  assert.ok(firstOnly.next_cursor)
+  const edge = await at(boundary)
+  assert.equal(edge.projects[0].runs.find(entry => entry.workflow_id === 'big')!.runs.length, 100, 'a last run exactly at the cutoff reads the next page')
+  const bad = old.projects[0].runs.find(entry => entry.workflow_id === 'bad')!
+  assert.deepEqual([bad.runs, bad.next_cursor, bad.error?.code, bad.error?.status], [[], null, 'RUN_STORAGE_INVALID', 500], 'an invalid run fails its workflow only')
+  assert.equal(old.projects[0].runs.find(entry => entry.workflow_id === 'gone')!.error?.code, 'RUNS_ROOT_UNAVAILABLE')
+  assert.equal(old.projects[1].runs[0].runs.length, 3)
+})
+
+test('home route: since is required and must be an ISO time with Z; only GET and HEAD', async () => {
+  const { config } = pagedRegistry()
+  const app = createApp([], { projects: config, dispatch: { gitRunner: runner, now } })
+  after(() => app.close())
+  await app.ready()
+  for (const query of ['', '?since=', '?since=yesterday', '?since=2026-10-11', '?since=2026-10-11T00:00:00%2B02:00', '?since=2026-10-11T00:00:00Z&since=2026-10-12T00:00:00Z']) {
+    const response = await app.inject({ method: 'GET', url: `/api/dispatch/runs${query}` })
+    assert.equal(response.statusCode, 400, query)
+    assert.equal(response.json().error.code, 'INVALID_SINCE', query)
+  }
+  assert.equal((await app.inject({ method: 'HEAD', url: '/api/dispatch/runs?since=2026-10-11T00:00:00Z' })).statusCode, 200)
+  for (const url of ['/api/dispatch/runs?since=2026-10-11T00:00:00Z', '/api/dispatch/runs/all']) {
+    for (const method of ['POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'] as const) {
+      const response = await app.inject({ method, url })
+      assert.equal(response.statusCode, 405, `${method} ${url}`)
+      assert.equal(response.headers.allow, 'GET, HEAD')
+    }
+  }
+})
+
+test('registry pages: every run exactly once in the total order across page boundaries and ties, unreadable listed; bad cursors and limits are 400', async () => {
+  const { config } = pagedRegistry()
+  const app = createApp([], { projects: config, dispatch: { gitRunner: runner, now } })
+  after(() => app.close())
+  await app.ready()
+  const page = async (query: string) => {
+    const response = await app.inject({ method: 'GET', url: `/api/dispatch/runs/all${query}` })
+    assert.equal(response.statusCode, 200, response.body)
+    return registryRunsSchema.parse(response.json())
+  }
+  for (const limit of [undefined, 1, 7, 100]) {
+    const read: { project_id: string; workflow_id: string; run_id: string; updated_at: string }[] = []
+    let cursor: string | null = null
+    let pages = 0
+    do {
+      const body: RegistryRuns = await page(`?${limit === undefined ? '' : `limit=${limit}&`}${cursor ? `cursor=${cursor}` : ''}`)
+      assert.ok(body.runs.length <= (limit ?? 50))
+      assert.deepEqual(body.unreadable, [{ project_id: 'alpha', workflow_id: 'bad', code: 'RUN_STORAGE_INVALID' }, { project_id: 'alpha', workflow_id: 'gone', code: 'RUNS_ROOT_UNAVAILABLE' }])
+      read.push(...body.runs)
+      cursor = body.next_cursor
+      pages += 1
+    } while (cursor !== null && pages < 500)
+    assert.equal(read.length, 130 + 60 + 3, `limit ${limit}`)
+    assert.equal(new Set(read.map(run => `${run.project_id}/${run.workflow_id}/${run.run_id}`)).size, read.length, 'no run twice')
+    for (let i = 1; i < read.length; i += 1) {
+      const [a, b] = [read[i - 1], read[i]]
+      const text = (x: string, y: string) => (x < y ? -1 : x > y ? 1 : 0)
+      const order = Date.parse(b.updated_at) - Date.parse(a.updated_at) || text(a.project_id, b.project_id) || text(a.workflow_id, b.workflow_id) || text(a.run_id, b.run_id)
+      assert.ok(order < 0, `order at ${i}: ${a.run_id} then ${b.run_id}`)
+    }
+  }
+  const workflowCursor = (await app.inject({ method: 'GET', url: '/api/projects/alpha/workflows/big/runs' })).json().next_cursor
+  const forged = Buffer.from(JSON.stringify({ v: 2, u: 'yesterday', p: 'alpha', w: 'big', r: 'x' })).toString('base64url')
+  for (const query of [`?cursor=${workflowCursor}`, '?cursor=', '?cursor=%%%', '?cursor=bm90IGpzb24', `?cursor=${forged}`, `?cursor=${Buffer.from(JSON.stringify({ v: 2, u: '2026-01-01T00:00:00Z', p: 'a', w: 'b', r: 'c', extra: 1 })).toString('base64url')}`]) {
+    const response = await app.inject({ method: 'GET', url: `/api/dispatch/runs/all${query}` })
+    assert.equal(response.statusCode, 400, query)
+    assert.equal(response.json().error.code, 'INVALID_CURSOR', query)
+  }
+  for (const query of ['?limit=0', '?limit=500', '?limit=abc', '?limit=101', '?limit=', '?limit=1.5', '?limit=-1', '?limit=1&limit=2']) {
+    const response = await app.inject({ method: 'GET', url: `/api/dispatch/runs/all${query}` })
+    assert.equal(response.statusCode, 400, query)
+    assert.equal(response.json().error.code, 'INVALID_LIMIT', query)
+  }
+})
+
+test('overview spend: the whole directory of every readable workflow, per project, recorded totals only; a warm poll reads no export; a change invalidates', async () => {
+  const base = fresh('spend')
+  const roots = Object.fromEntries(['many', 'mixed', 'broken', 'other'].map(name => [name, join(base, name)]))
+  for (const root of Object.values(roots)) mkdirSync(root, { recursive: true })
+  // 60 runs priced at 0.5 each: a page-limited total would read 50 of them.
+  for (let i = 0; i < 60; i += 1) writeCostRun(roots.many, `many-${String(i).padStart(2, '0')}`, minute(i), { total_usd: 0.5, by_role: {}, nodes: [] })
+  writeCostRun(roots.mixed, 'priced', minute(1), { total_usd: 1.234567, by_role: {}, nodes: [] })
+  writeCostRun(roots.mixed, 'zero', minute(2), { total_usd: 0, by_role: {}, nodes: [] })
+  writeCostRun(roots.mixed, 'nulltotal', minute(3), { total_usd: null, by_role: {}, nodes: [] })
+  writeCostRun(roots.mixed, 'none', minute(4))
+  writeCostRun(roots.mixed, 'covered', minute(5), { total_usd: null, covered_usd: 9.99, by_role: {}, nodes: [{ node: 'panel', role: 'panel', transport: 'pi', cost_usd: null, covered_usd: 9.99 }] })
+  writeCostRun(roots.broken, 'fine', minute(1), { total_usd: 100, by_role: {}, nodes: [] })
+  writeRunDir(roots.broken, 'corrupt', { badState: true })
+  writeCostRun(roots.other, 'o1', minute(1), { total_usd: 7, by_role: {}, nodes: [] })
+  const definition = { name: 'W', nodes: MIN_NODES }
+  const config = registry([
+    { project_id: 'p1', name: 'P1', repository: fresh('repo'), workflows: [{ workflow_id: 'many', runs_root: roots.many, definition }, { workflow_id: 'mixed', runs_root: roots.mixed, definition }, { workflow_id: 'broken', runs_root: roots.broken, definition }] },
+    { project_id: 'p2', name: 'P2', repository: fresh('repo'), workflows: [{ workflow_id: 'other', runs_root: roots.other, definition }] },
+    { project_id: 'p3', name: 'P3', repository: fresh('repo'), workflows: [] },
+  ])
+  const app = createApp([], { projects: config, dispatch: { gitRunner: runner, now } })
+  after(() => app.close())
+  await app.ready()
+  const overview = async () => {
+    const response = await app.inject({ method: 'GET', url: '/api/dispatch/projects' })
+    assert.equal(response.statusCode, 200)
+    return Object.fromEntries((response.json().projects as { project_id: string; spend: unknown }[]).map(entry => [entry.project_id, entry.spend]))
+  }
+  const first = await overview()
+  assert.deepEqual(first.p1, { claude_usd: 31.234567, priced_runs: 62, runs: 65 }, '60 x 0.5 + 1.234567 + 0; null, absent and covered-only totals are unpriced; the unreadable workflow counts nowhere')
+  assert.deepEqual(first.p2, { claude_usd: 7, priced_runs: 1, runs: 1 }, 'totals never mix across projects')
+  assert.deepEqual(first.p3, { claude_usd: null, priced_runs: 0, runs: 0 })
+  // A warm poll reads no run-state.json (the summary cache keeps the total). The invalid run is never cached by listRuns (its
+  // workflow's list fails as before), so it is removed first and the cache primed once.
+  rmSync(join(roots.broken, 'corrupt'), { recursive: true, force: true })
+  const primed = await overview()
+  assert.deepEqual(primed.p1, { claude_usd: 131.234567, priced_runs: 63, runs: 66 }, 'the workflow read again counts once it is readable')
+  const fsPromises = (await import('node:fs/promises')).default
+  const opened: string[] = []
+  const original = fsPromises.open
+  const spy = mock.method(fsPromises, 'open', function (this: unknown, ...args: Parameters<typeof original>) { opened.push(String(args[0])); return original.apply(this, args) })
+  try {
+    assert.deepEqual(await overview(), primed)
+    assert.deepEqual(opened.filter(path => path.endsWith('run-state.json')), [], 'no export is read on a warm poll')
+  } finally { spy.mock.restore() }
+  // A changed export invalidates its cached summary: the new total is served, never the stale one.
+  await new Promise(resolve => setTimeout(resolve, 20))
+  writeCostRun(roots.other, 'o1', minute(1), { total_usd: 8.5, by_role: {}, nodes: [] })
+  assert.deepEqual((await overview()).p2, { claude_usd: 8.5, priced_runs: 1, runs: 1 })
+})
+
+test('overview spend is null only when the workflow list cannot be read', async () => {
+  const project = { project_id: 'p', name: 'P', repository: fresh('repo'), workflows: [] } as unknown as Parameters<typeof projectSpend>[1]
+  const store = { workflows: () => { throw new ProjectApiError(404, 'PROJECT_NOT_FOUND', 'No project with that ID is registered.') } } as unknown as RunStore
+  assert.equal(await projectSpend(store, project), null)
+  const readable = { workflows: () => [{ workflow_id: 'w' }], scope: () => ({}), listRunEntries: async () => { throw new ProjectApiError(503, 'RUNS_ROOT_UNAVAILABLE', 'x') } } as unknown as RunStore
+  assert.deepEqual(await projectSpend(readable, project), { claude_usd: null, priced_runs: 0, runs: 0 })
 })

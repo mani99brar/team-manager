@@ -19,6 +19,8 @@ import { stateTone, statusTone, type Tone } from './tone.ts'
 export const RECENT_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
 /** Runs home and the project page re-read their run lists this often. */
 export const LISTS_POLL_MS = 15_000
+/** The registry home read and the overview re-read this often while no row read runs or needs the operator. */
+export const LISTS_IDLE_POLL_MS = 60_000
 /** How many controller readings a run page keeps; the debounce needs only the latest run of equal values. */
 const READINGS_KEPT = 50
 
@@ -275,6 +277,31 @@ export function stepTally<T extends { run: RunSummary }>(rows: readonly T[]): st
 export function readsNextPage(runs: readonly Pick<RunSummary, 'updated_at'>[], nextCursor: string | null, cutoff: number): boolean {
   const last = runs.at(-1)
   return nextCursor !== null && last !== undefined && ms(last.updated_at) >= cutoff
+}
+
+/**
+ * The registry home read's cadence: every `LISTS_POLL_MS` while any row read is running or needs the operator (its class in
+ * the one classification), else every `LISTS_IDLE_POLL_MS`. A run that starts running brings the fast cadence back on the
+ * next read.
+ */
+export function listsPollMs(runs: readonly RunSummary[], classes: RunClasses = classifyRuns(runs)): number {
+  return runs.some(run => (!isFinished(run) && run.status === 'running') || classOf(classes, run).needs !== null) ? LISTS_POLL_MS : LISTS_IDLE_POLL_MS
+}
+
+/** A run's identity across the registry: project, workflow and run id. */
+export const registryKey = (run: Pick<RunSummary, 'project_id' | 'workflow_id' | 'run_id'>) => `${run.project_id}/${run.workflow_id}/${run.run_id}`
+
+/** Every run read once, by project, workflow and run id: a run in both lists keeps its row from the first (the home read). */
+export function mergeRunRows<T extends { run: Pick<RunSummary, 'project_id' | 'workflow_id' | 'run_id'> }>(first: readonly T[], second: readonly T[]): T[] {
+  const seen = new Set(first.map(row => registryKey(row.run)))
+  const merged = [...first]
+  for (const row of second) {
+    const key = registryKey(row.run)
+    if (seen.has(key)) continue
+    seen.add(key)
+    merged.push(row)
+  }
+  return merged
 }
 
 // ---- Row wording (4.1, 6.4) --------------------------------------------------------------------------------------------

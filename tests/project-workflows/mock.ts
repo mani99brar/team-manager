@@ -12,8 +12,9 @@ import { artifactFiles, attackResults, panelResults, projectList, reviewResults,
 import './fixtures/index.ts'
 import { sessionsByRun } from './fixtures/index.ts'
 import { injectSessionNodes } from './sessionProjection.ts'
-import { CONTROLS_TOKEN, controlsFor } from './fixtures/controls.ts'
-import { dispatchOverview, dispatchSteps, DISPATCH_UNLISTABLE_WORKFLOWS } from './fixtures/dispatch.ts'
+import { CONTROLS_TOKEN, controlsFor, RELAUNCH_ALLOWED, RELAUNCH_LINES, RELAUNCH_REFUSED, RETRY_ALL_LINES } from './fixtures/controls.ts'
+import { dispatchOverview, dispatchSteps, DISPATCH_RUN_COSTS, DISPATCH_UNLISTABLE_WORKFLOWS } from './fixtures/dispatch.ts'
+import type { RunSummary } from '../../contracts/projects/v1.ts'
 import type { ControlId, ControlRecord } from '../../src/projects/controls/types.ts'
 
 const json = (body: unknown, status = 200) => ({ status, contentType: 'application/json', body: JSON.stringify(body) })
@@ -24,7 +25,87 @@ export function isProjectsRequest(url: URL): boolean {
 }
 
 export function isDispatchRequest(url: URL): boolean {
-  return url.pathname === '/api/dispatch/projects' || url.pathname.startsWith('/api/dispatch/projects/')
+  return url.pathname === '/api/dispatch/projects' || url.pathname.startsWith('/api/dispatch/projects/') || url.pathname === '/api/dispatch/runs' || url.pathname === '/api/dispatch/runs/all'
+}
+
+type Mocked = { status: number; contentType: string; body: string | Buffer }
+const parsed = (response: Mocked) => JSON.parse(String(response.body))
+/** A per-workflow route's failure as the home read reports it: its status, code and message. */
+const readError = (response: Mocked) => ({ status: response.status, ...(parsed(response).error as { code: string; message: string }) })
+
+/**
+ * The registry home read, assembled from the per-workflow routes this mock serves exactly as the client assembled it before
+ * (`fetchRegistryRuns` with `readsNextPage(since)`): each project's workflow list, each workflow's pages back to `since`.
+ */
+function mockHomeRuns(since: number) {
+  return projectList.projects.map(project => {
+    const listed = mockResponse(new URL(`http://mock/api/projects/${encodeURIComponent(project.project_id)}/workflows`))
+    if (listed.status !== 200) return { project_id: project.project_id, workflows: [], error: readError(listed), runs: [] }
+    const workflows = parsed(listed).workflows as { workflow_id: string }[]
+    return {
+      project_id: project.project_id, workflows, error: null,
+      runs: workflows.map(workflow => {
+        const runs: RunSummary[] = []
+        let next: string | null = null
+        for (let pages = 0; pages < 100; pages++) {
+          const page = mockResponse(new URL(`http://mock/api/projects/${encodeURIComponent(project.project_id)}/workflows/${encodeURIComponent(workflow.workflow_id)}/runs${next ? `?cursor=${encodeURIComponent(next)}` : ''}`))
+          if (page.status !== 200) return { workflow_id: workflow.workflow_id, runs: [], next_cursor: null, error: readError(page) }
+          const body = parsed(page) as { runs: RunSummary[]; next_cursor: string | null }
+          runs.push(...body.runs)
+          next = body.next_cursor
+          const last = runs.at(-1)
+          if (next === null || last === undefined || Date.parse(last.updated_at) < since) break
+        }
+        return { workflow_id: workflow.workflow_id, runs, next_cursor: next, error: null }
+      }),
+    }
+  })
+}
+
+/** Every run of every workflow the mock lists, in the registry order, paged by a version-2 registry cursor. */
+function mockRegistryRuns(url: URL): Mocked {
+  const unreadable: { project_id: string; workflow_id: string; code: string }[] = []
+  const all: RunSummary[] = []
+  for (const project of mockHomeRuns(Number.NEGATIVE_INFINITY)) {
+    for (const entry of project.runs) {
+      if (entry.error !== null) unreadable.push({ project_id: project.project_id, workflow_id: entry.workflow_id, code: entry.error.code })
+      else all.push(...entry.runs)
+    }
+  }
+  const text = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0)
+  const order = (a: RunSummary, b: RunSummary) => Date.parse(b.updated_at) - Date.parse(a.updated_at) || text(a.project_id, b.project_id) || text(a.workflow_id, b.workflow_id) || text(a.run_id, b.run_id)
+  all.sort(order)
+  const cursor = url.searchParams.get('cursor')
+  let start = 0
+  if (cursor !== null) {
+    let position: { u: string; p: string; w: string; r: string } | null
+    try { position = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8')) } catch { position = null }
+    if (position === null || (position as { v?: number }).v !== 2) return json({ error: { code: 'INVALID_CURSOR', message: 'The cursor is not a paging token issued for the registry run list.' } }, 400)
+    const at = { updated_at: position.u, project_id: position.p, workflow_id: position.w, run_id: position.r } as RunSummary
+    start = all.findIndex(run => order(run, at) > 0)
+    if (start < 0) start = all.length
+  }
+  const limit = Number(url.searchParams.get('limit') ?? '50')
+  const runs = all.slice(start, start + limit)
+  const last = runs.at(-1)
+  const next_cursor = start + limit < all.length && last ? Buffer.from(JSON.stringify({ v: 2, u: last.updated_at, p: last.project_id, w: last.workflow_id, r: last.run_id })).toString('base64url') : null
+  return json({ contract_version: '1.0.0', read_at: new Date().toISOString(), runs, next_cursor, unreadable })
+}
+
+/** A project's Claude spend from the same fixture runs the per-workflow routes serve, and the costs the seed writes for them. */
+function mockSpend(projectId: string) {
+  let runs = 0
+  let priced = 0
+  let total = 0
+  for (const entry of mockHomeRuns(Number.NEGATIVE_INFINITY).find(project => project.project_id === projectId)?.runs ?? []) {
+    if (entry.error !== null) continue
+    for (const run of entry.runs) {
+      runs += 1
+      const cost = DISPATCH_RUN_COSTS[`${run.project_id}/${run.workflow_id}/${run.run_id}`]
+      if (typeof cost === 'number') { priced += 1; total += cost }
+    }
+  }
+  return { claude_usd: priced === 0 ? null : Math.round(total * 1e6) / 1e6, priced_runs: priced, runs }
 }
 
 /**
@@ -34,7 +115,17 @@ export function isDispatchRequest(url: URL): boolean {
  */
 export function mockDispatchResponse(url: URL): { status: number; contentType: string; body: string | Buffer } {
   const segments = url.pathname.split('/').filter(Boolean).slice(2).map(decodeURIComponent) // after /api/dispatch
-  if (segments.length === 1 && segments[0] === 'projects') return json(dispatchOverview(projectList.projects.map(project => project.project_id)))
+  if (segments.length === 1 && segments[0] === 'projects') {
+    const overview = dispatchOverview(projectList.projects.map(project => project.project_id))
+    return json({ ...overview, projects: overview.projects.map(entry => ({ ...entry, spend: mockSpend(entry.project_id) })) })
+  }
+  if (segments.length === 1 && segments[0] === 'runs') {
+    const since = url.searchParams.get('since')
+    const time = since === null || !/Z$/.test(since) ? Number.NaN : Date.parse(since)
+    if (!Number.isFinite(time)) return json({ error: { code: 'INVALID_SINCE', message: 'The since parameter must be an ISO 8601 time with a Z offset.' } }, 400)
+    return json({ contract_version: '1.0.0', read_at: new Date().toISOString(), since: new Date(time).toISOString(), projects: mockHomeRuns(time) })
+  }
+  if (segments.length === 2 && segments[0] === 'runs' && segments[1] === 'all') return mockRegistryRuns(url)
   if (segments.length === 3 && segments[0] === 'projects' && segments[2] === 'steps') {
     const steps = dispatchSteps(segments[1])
     return steps ? json(steps) : notFound(`Project "${segments[1]}" is not registered.`, 'NOT_FOUND')
@@ -136,8 +227,10 @@ export type ControlMock = {
   posts: { control: string; body: { request_id?: string; run_state_token?: string; params?: Record<string, unknown> } }[]
   /** The clean-preview POSTs and their bodies. */
   previews: unknown[]
-  /** Answer the next POST of a control with an error instead of running it. */
-  failNext: (control: ControlId, status: number, code: string, message: string) => void
+  /** The relaunch-preview POSTs and their bodies (`{ run_state_token, lane }`). */
+  relaunchPreviews: unknown[]
+  /** Answer the next POST of a control (or of the relaunch dry run) with an error instead of running it; STATE_CHANGED also moves the run. */
+  failNext: (control: ControlId | 'relaunch-preview', status: number, code: string, message: string) => void
   /** The run moved: the next controls read carries a new state token. */
   bump: () => void
 }
@@ -147,14 +240,14 @@ export type ControlMock = {
  * preview, a control POST and the record read. A long control reads `running` for 2.5 s and then `succeeded`; any command on
  * a run whose id contains `refuse` fails with the controller's `Blocked:` line, as the fake controller does.
  */
-export async function installControlMocks(page: Page, options: { enabled?: boolean; token?: string } = {}): Promise<ControlMock> {
+export async function installControlMocks(page: Page, options: { enabled?: boolean; token?: string; older?: boolean } = {}): Promise<ControlMock> {
   const enabled = options.enabled ?? true
   const token = options.token ?? CONTROLS_TOKEN
   const records: ControlRecord[] = []
   const failures = new Map<string, { status: number; code: string; message: string }>()
   let generation = 1
   const mock: ControlMock = {
-    posts: [], previews: [],
+    posts: [], previews: [], relaunchPreviews: [],
     failNext: (control, status, code, message) => { failures.set(control, { status, code, message }) },
     bump: () => { generation += 1 },
   }
@@ -167,16 +260,16 @@ export async function installControlMocks(page: Page, options: { enabled?: boole
     const parts = url.pathname.split('/').filter(Boolean).slice(2).map(decodeURIComponent)
     const header = request.headers()['x-mdm-control-token']
     if (!enabled) {
-      await route.fulfill(parts[0] === 'status' ? json({ version: '1.0.0', enabled: false, paired: false }) : error(404, 'CONTROLS_DISABLED', 'Run controls are off.'))
+      await route.fulfill(parts[0] === 'status' ? json({ version: '1.1.0', enabled: false, paired: false }) : error(404, 'CONTROLS_DISABLED', 'Run controls are off.'))
       return
     }
-    if (parts[0] === 'status') { await route.fulfill(json({ version: '1.0.0', enabled: true, paired: header === token })); return }
+    if (parts[0] === 'status') { await route.fulfill(json({ version: '1.1.0', enabled: true, paired: header === token })); return }
     if (header === undefined) { await route.fulfill(error(403, 'TOKEN_REQUIRED', 'The pairing token is required.')); return }
     if (header !== token) { await route.fulfill(error(403, 'TOKEN_INVALID', 'The pairing token was refused.')); return }
     const [, , runId, tail, extra] = parts
     const state = `rs-${generation}`
     if (request.method() === 'GET' && tail === undefined) {
-      const controls = controlsFor(runId, state, records.map(record => settled(record, true)).reverse())
+      const controls = controlsFor(runId, state, records.map(record => settled(record, true)).reverse(), { older: options.older })
       await route.fulfill(controls ? json(controls) : error(404, 'NOT_FOUND', 'The run was not found.'))
       return
     }
@@ -191,23 +284,44 @@ export async function installControlMocks(page: Page, options: { enabled?: boole
       await route.fulfill(json({ exitCode: 0, output: 'Would remove worktree-ui\nWould remove worktree-adapter\n' }))
       return
     }
+    if (tail === 'relaunch-preview') {
+      mock.relaunchPreviews.push(body)
+      const failed = failures.get('relaunch-preview')
+      if (failed) {
+        failures.delete('relaunch-preview')
+        if (failed.code === 'STATE_CHANGED') generation += 1
+        await route.fulfill(error(failed.status, failed.code, failed.message))
+        return
+      }
+      const lane = (body as { lane?: string }).lane ?? ''
+      const relaunch = controlsFor(runId, state, [], { older: options.older })?.controls.find(item => item.id === 'relaunch')
+      if (!relaunch?.available) { await route.fulfill(error(422, 'NOT_AVAILABLE', relaunch?.reason ?? 'Not available.')); return }
+      const choices = relaunch.params.find(param => param.name === 'lane')
+      if (!choices || !(choices.choices as string[]).includes(lane)) { await route.fulfill(error(400, 'INVALID_PARAMS', 'The lane is not one of the offered choices.')); return }
+      const refused = runId.includes('refuse')
+      await route.fulfill(json({ exitCode: refused ? 1 : 0, line: (refused ? RELAUNCH_REFUSED : RELAUNCH_ALLOWED).replace(' ui', ` ${lane}`) }))
+      return
+    }
     const id = tail as ControlId
     mock.posts.push({ control: id, body })
     const failure = failures.get(id)
     if (failure) { failures.delete(id); await route.fulfill(error(failure.status, failure.code, failure.message)); return }
-    const controls = controlsFor(runId, state)
+    const controls = controlsFor(runId, state, [], { older: options.older })
     const control = controls?.controls.find(item => item.id === id)
     if (!control || !control.available) { await route.fulfill(error(422, 'NOT_AVAILABLE', control?.reason ?? 'Not available.')); return }
     const refused = runId.includes('refuse')
     const long = control.runs === 'long' && !refused
+    // The two 1.1.0 commands print the engine's lines (the fake controller's in the candidate phase).
+    const engine = (lines: readonly string[]) => lines.map(line => line.replace('{python}', '$PY').replace('{run}', `~/runs/${runId}`))
+    const recovered = id === 'retry_all' ? engine(RETRY_ALL_LINES) : id === 'relaunch' ? engine(RELAUNCH_LINES) : null
     const now = new Date().toISOString()
     const { confirm_run_id: _typed, ...params } = (body.params ?? {}) as Record<string, unknown>
     void _typed
     const record: ControlRecord = {
-      record_id: `c-${String(records.length + 1).padStart(12, '0')}`, request_id: body.request_id ?? '', control: id, params, command: control.command,
+      record_id: `c-${String(records.length + 1).padStart(12, '0')}`, request_id: body.request_id ?? '', control: id, params, command: id === "relaunch" && typeof params.lane === "string" ? control.command.replace("<lane>", params.lane) : control.command,
       status: refused ? 'failed' : long ? 'running' : 'succeeded', exit_code: refused ? 1 : long ? null : 0, started_at: now, ended_at: long ? null : now,
       output_tail: refused ? [`Blocked: ${id} refused for this run (the fake controller refuses every run named refuse)`, 'Nothing was changed.']
-        : [long ? 'Supervisor starting' : id === 'answer' ? `Answer by the operator: recorded and typed into the lane's pane` : `${control.label} by the operator`],
+        : recovered ?? [long ? 'Supervisor starting' : id === 'answer' ? `Answer by the operator: recorded and typed into the lane's pane` : `${control.label} by the operator`],
     }
     records.push(record)
     generation += 1

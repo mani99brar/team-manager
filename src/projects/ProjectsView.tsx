@@ -2,13 +2,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Breadcrumbs, type PathCrumb } from '../graph/Breadcrumbs.tsx'
 import type { ControllerReading } from '../../contracts/projects/triage.ts'
 import {
-  describeApiError, fetchProjects, fetchRegistryRuns, fetchReviewResult, fetchRunDetail, fetchRuns, fetchWorkflowRuns, fetchWorkflows, ProjectsApiError,
+  describeApiError, fetchHomeRuns, fetchProjects, fetchReviewResult, fetchRunDetail, fetchRuns, fetchWorkflowRuns, fetchWorkflows, ProjectsApiError,
   type RunPage, type RunSummary,
 } from './api.ts'
-import { classifyRuns, classOf, endedAt, isFinished, laneNamesOf, latestFeature, LISTS_POLL_MS, readsNextPage, RECENT_WINDOW_MS, recordReading, reviewStepsOf, sortRuns, workflowTitle, type ServedRun } from './lists.ts'
+import { classifyRuns, classOf, endedAt, isFinished, laneNamesOf, latestFeature, LISTS_POLL_MS, listsPollMs, RECENT_WINDOW_MS, recordReading, reviewStepsOf, sortRuns, workflowTitle, type ServedRun } from './lists.ts'
 import { FilterBar, NoMatch } from './FilterBar.tsx'
 import { useListState } from './dispatch/listState.ts'
-import { filterItems, scopeLine, statusCounts } from './runFilter.ts'
+import { cappedScopeLine, filterItems, scopeLine, statusCounts } from './runFilter.ts'
 import './theme.css'
 import './lists.css'
 import { ServedRunContext } from './LiveStatus.tsx'
@@ -141,15 +141,20 @@ export function ProjectsView({ route, refreshToken, onRefreshingChange, onNaviga
   const [zone] = useTimeZone()
   const listClock = useNow(railLevel, LISTS_POLL_MS)
   const projectsData = projects.status === 'ready' ? projects.data : null
-  const homePoll = usePoll(railLevel, LISTS_POLL_MS)
-  const loadHome = useCallback((signal: AbortSignal) => {
-    const cutoff = Date.now() - RECENT_WINDOW_MS
-    return fetchRegistryRuns(projectsData ?? [], (runs, cursor) => readsNextPage(runs, cursor, cutoff), signal)
-  }, [projectsData])
+  // One request reads every project's runs back to the Recent cutoff (the registry home read); it and the overview poll every
+  // 15 s while any row read runs or needs the operator, else every 60 s. The key never carries the cadence, so the last rows
+  // stay shown while a poll reads.
+  const [homeCadence, setHomeCadence] = useState(LISTS_POLL_MS)
+  const homePoll = usePoll(railLevel, homeCadence)
+  const loadHome = useCallback((signal: AbortSignal) => fetchHomeRuns(projectsData ?? [], Date.now() - RECENT_WINDOW_MS, signal), [projectsData])
   const homeKey = railLevel && projectsData !== null ? `home:${projectsData.map(project => project.project_id).join('\u0000')}` : null
   const { state: homeRuns, meta: homeMeta } = useResource(homeKey, loadHome, refreshToken, homePoll)
-  // The dispatch overview (git and GitHub per project) for the rail badges, the cards and the project page; polled at the list rate.
-  const overviewPoll = usePoll(railLevel, LISTS_POLL_MS)
+  const homeRows = homeRuns.status === 'ready' ? homeRuns.data : null
+  useEffect(() => {
+    if (homeRows !== null) setHomeCadence(listsPollMs(homeRows.flatMap(entry => entry.workflows.flatMap(item => item.runs))))
+  }, [homeRows])
+  // The dispatch overview (git and GitHub per project) for the rail badges, the cards and the project page; at the home read's cadence.
+  const overviewPoll = usePoll(railLevel, homeCadence)
   const { state: overview, meta: overviewMeta } = useResource(railLevel ? 'dispatch-overview' : null, fetchDispatchOverview, refreshToken, overviewPoll)
   const overviewData = overview.status === 'ready' ? overview.data : null
   // The project page's step chart, one read per project.
@@ -399,7 +404,7 @@ export function ProjectsView({ route, refreshToken, onRefreshingChange, onNaviga
           <p>The backend's project registry is empty. Projects are registered by the operator in the server configuration, not from this page.</p>
         </EmptyPanel>
       )
-    } else content = <RunsHome projects={projects.data} runs={homeRuns} meta={homeMeta} now={listClock} note={info} onNavigate={onNavigate} list={list} folds={folds} onFold={setFold} />
+    } else content = <RunsHome projects={projects.data} runs={homeRuns} meta={homeMeta} now={listClock} pollMs={homeCadence} note={info} onNavigate={onNavigate} list={list} folds={folds} onFold={setFold} />
   } else if (route.level === 'project') {
     if (workflows.status === 'loading' || workflows.status === 'idle') content = <LoadingPanel>Loading workflows of {projectName}…</LoadingPanel>
     else if (workflows.status === 'error' && notFound(workflows.error)) {
@@ -444,7 +449,9 @@ export function ProjectsView({ route, refreshToken, onRefreshingChange, onNaviga
       const context = { now: listClock, zone }
       const shown = sortRuns(filterItems(items, list.filter, context), list.filter.sort, featureClasses)
       const order = FEATURE_ORDER[list.filter.sort]
-      const scope = scopeLine('feature', shown.length, runs.length, nextCursor !== null)
+      // At the page cap (outside "All time") a cursor remains that this list cannot follow: it says why, never "Load more runs".
+      const capped = atPageCap && nextCursor !== null
+      const scope = capped ? cappedScopeLine(shown.length, runs.length, MAX_LIST_PAGES) : scopeLine('feature', shown.length, runs.length, nextCursor !== null)
       const readingOlder = allTime && extra.loading ? `Reading older runs… (${runs.length} read)` : null
       content = (
         <div className="workflow-view">
@@ -502,15 +509,21 @@ export function ProjectsView({ route, refreshToken, onRefreshingChange, onNaviga
                 </ul>
               )
             )}
-            {nextCursor && (
+            {nextCursor && !capped && (
               <div className="projects-actions">
-                <button type="button" className="button" disabled={extra.loading || atPageCap} aria-busy={extra.loading}
-                  onClick={() => { if (atPageCap) return; list.change({ pages: Math.min(MAX_LIST_PAGES, pages.length + 1) }); void loadMore() }}>
+                <button type="button" className="button" disabled={extra.loading} aria-busy={extra.loading}
+                  onClick={() => { list.change({ pages: Math.min(MAX_LIST_PAGES, pages.length + 1) }); void loadMore() }}>
                   {extra.loading ? 'Loading more runs…' : 'Load more runs'}
                 </button>
               </div>
             )}
-            {extra.error !== null && <ErrorPanel error={extra.error} what="The next page of runs" onRetry={() => void loadMore()} />}
+            {capped && (
+              <p className="projects-muted lists-empty" data-testid="feature-page-cap">
+                {`This list stops after ${MAX_LIST_PAGES} pages, the most a link can restore; choose "All time" in Date to read every older run.`}
+              </p>
+            )}
+            {/* Retry reads the failed page again; at the cap it cannot, so the panel says what failed and offers none. */}
+            {extra.error !== null && <ErrorPanel error={extra.error} what="The next page of runs" onRetry={capped ? undefined : () => void loadMore()} />}
           </Section>
           <section aria-label="Current definition" className="workflow-definition">
             {workflows.status === 'loading' && <LoadingPanel>Loading the current definition…</LoadingPanel>}

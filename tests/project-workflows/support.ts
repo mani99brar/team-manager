@@ -9,6 +9,48 @@ import { apiRunPath, PROJECT, WORKFLOW_ID } from './fixtures.ts'
 import { verificationPhase } from './harness.ts'
 import { installProjectMocks, mockDispatchResponse, mockResponse } from './mock.ts'
 import { B_PROJECTS, bDefinition, bSummary } from './fixtures/ux-lists.ts'
+import type { RunSummary } from '../../contracts/projects/v1.ts'
+
+/** The registry home read the rail, the cards and Triage make in one request (`GET /api/dispatch/runs?since=`). */
+export const isHomeRuns = (url: URL) => url.pathname === '/api/dispatch/runs'
+/** Triage's "All time" pages (`GET /api/dispatch/runs/all`). */
+export const isRegistryPages = (url: URL) => url.pathname === '/api/dispatch/runs/all'
+/** One workflow's entry in the home read: its rows, its remaining cursor, or why it could not be read. */
+export type HomeEntry = { workflow_id: string; runs: RunSummary[]; next_cursor: string | null; error: { status: number; code: string; message: string } | null }
+type HomeBody = { contract_version: string; read_at: string; since: string; projects: { project_id: string; workflows: unknown[]; error: unknown; runs: HomeEntry[] }[] }
+
+/** The phase's own answer to a dispatch read: the mocks' in the worker phase, the real API's in the candidate phase. */
+export async function originalDispatch(route: Route): Promise<{ status: number; body: unknown }> {
+  if (phase === 'worker') {
+    const answer = mockDispatchResponse(new URL(route.request().url()))
+    return { status: answer.status, body: JSON.parse(String(answer.body)) }
+  }
+  const response = await route.fetch()
+  return { status: response.status(), body: await response.json().catch(() => null) }
+}
+
+/**
+ * Answers the home read with `edit` applied to every workflow's entry, as the specs once edited each workflow's run list: `url`
+ * is that workflow's run-list URL, so an edit keyed on it reads the same. A read in flight when the test ends is dropped.
+ */
+export async function editHomeRuns(page: Page, edit: (entry: HomeEntry, url: URL) => HomeEntry) {
+  await page.route(isHomeRuns, async route => {
+    try {
+      const { status, body } = await originalDispatch(route)
+      if (status !== 200 || body === null || !Array.isArray((body as HomeBody).projects)) { await route.fulfill({ status, json: body }); return }
+      const home = body as HomeBody
+      const base = new URL(route.request().url())
+      for (const project of home.projects) {
+        project.runs = project.runs.map(entry => edit(entry, new URL(`/api/projects/${encodeURIComponent(project.project_id)}/workflows/${encodeURIComponent(entry.workflow_id)}/runs`, base)))
+      }
+      await route.fulfill({ json: home })
+    } catch { /* the test ended */ }
+  })
+}
+
+/** `editHomeRuns` for the rows only: an entry that could not be read is passed on as it is. */
+export const editHomeRows = (page: Page, edit: (runs: RunSummary[], url: URL) => RunSummary[]) =>
+  editHomeRuns(page, (entry, url) => (entry.error === null ? { ...entry, runs: edit(entry.runs, url) } : entry))
 
 export const phase = verificationPhase()
 
@@ -175,6 +217,29 @@ export async function installListsWorld(page: Page, options: { page2Error?: () =
     const project = projects.get(projectId)
     await route.fulfill(json({ contract_version: '1.0.0', project_id: projectId, workflows: (project?.workflows ?? []).map(workflow => ({ workflow_id: workflow.workflow_id, error: null, runs: [], errors: [] })) }))
   })
+  // The registry home read gains the lists' projects, assembled as the client once read them: each workflow's first page, then
+  // page 2 while page 1's last run is at or after the cutoff; an unreadable workflow answers its error.
+  await page.route(isHomeRuns, ended(async route => {
+    const { status, body } = await originalDispatch(route)
+    if (status !== 200) { await route.fulfill({ status, json: body }); return }
+    const home = body as HomeBody
+    const since = Date.parse(home.since)
+    const entries = B_PROJECTS.map(project => ({
+      project_id: project.project_id, workflows: project.workflows.map(workflow => bDefinition(project.project_id, workflow.workflow_id)), error: null,
+      runs: project.workflows.map((workflow): HomeEntry => {
+        if (workflow.unreadable) return { workflow_id: workflow.workflow_id, runs: [], next_cursor: null, error: { status: 500, code: 'RUNS_UNREADABLE', message: 'The runs directory of this workflow could not be listed.' } }
+        const first = workflow.runs.map(run => bSummary(project.project_id, workflow.workflow_id, run))
+        const last = first.at(-1)
+        const more = workflow.page2 !== undefined && last !== undefined && Date.parse(last.updated_at) >= since && !options.page2Error?.()
+        return {
+          workflow_id: workflow.workflow_id, error: null,
+          runs: more ? [...first, ...workflow.page2!.map(run => bSummary(project.project_id, workflow.workflow_id, run))] : first,
+          next_cursor: workflow.page2 !== undefined && !more ? 'page-2' : null,
+        }
+      }),
+    }))
+    await route.fulfill(json({ ...home, projects: [...home.projects, ...entries] }))
+  }))
   await page.route(url => url.pathname === '/api/dispatch/projects', ended(async route => {
     const body = phase === 'worker' ? JSON.parse(String(mockDispatchResponse(new URL(route.request().url())).body)) : await (await route.fetch()).json()
     const readAt = body.read_at as string

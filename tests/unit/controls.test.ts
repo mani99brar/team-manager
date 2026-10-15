@@ -8,7 +8,8 @@ import { afterEach, describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { ControlError, controlPaths, postCleanPreview, postControl } from '../../src/projects/controls/client.ts'
 import {
-  buildParams, canOpen, controlRows, describeFailure, dialogValid, headlineOf, initialValues, matchStep, newRequestId, paramProblem, pinToken, reasonOf, recordLine, shownRecord, stepControl,
+  answerCheck, askCheck, buildParams, canOpen, controlRows, currentCheck, describeFailure, dialogValid, headlineOf, initialValues, matchStep, newRequestId, paramProblem, pinToken, reasonOf, recordLine,
+  relaunchConfirmable, shownRecord, stepControl,
 } from '../../src/projects/controls/model.ts'
 import { waitingQuestions } from '../../src/projects/controls/questions.ts'
 import { CONTROL_ORDER, type Control, type ControlId, type ControlRecord, type RunControls } from '../../src/projects/controls/types.ts'
@@ -24,7 +25,7 @@ const control = (id: ControlId, patch: Partial<Control> = {}): Control => ({
 const record = (patch: Partial<ControlRecord> = {}): ControlRecord => ({
   record_id: 'c-000000000001', request_id: 'r', control: 'restart', params: {}, command: '$PY', status: 'running', exit_code: null, started_at: '2026-03-02T09:00:00Z', ended_at: null, output_tail: [], ...patch,
 })
-const payload = (controls: Control[], records: ControlRecord[] = []): RunControls => ({ version: '1.0.0', run_state_token: 'rs-1', supervisor: 'not_running', supervisor_since: null, controls, records })
+const payload = (controls: Control[], records: ControlRecord[] = []): RunControls => ({ version: '1.1.0', run_state_token: 'rs-1', supervisor: 'not_running', supervisor_since: null, controls, records })
 
 describe('the dialog model', () => {
   test('a text parameter needs its length, a typed one the run id, a choice a listed value', () => {
@@ -135,6 +136,15 @@ describe('the record and the refusals', () => {
     const gone = describeFailure(new ControlError(422, 'NOT_AVAILABLE', 'A supervisor is running'))
     assert.deepEqual([gone.message, gone.refresh, gone.retryable], ['A supervisor is running', true, false])
   })
+
+  test('only STATE_CHANGED drops the pinned token once the controls are refreshed; BUSY, NOT_AVAILABLE and NETWORK keep it', () => {
+    assert.equal(describeFailure(new ControlError(409, 'STATE_CHANGED', 'x')).repin, true)
+    assert.equal(describeFailure(new ControlError(409, 'BUSY', 'x')).repin, false)
+    assert.equal(describeFailure(new ControlError(422, 'NOT_AVAILABLE', 'x')).repin, false)
+    assert.equal(describeFailure(new ControlError(0, 'NETWORK', 'x')).repin, false)
+    // The dropped pin adopts the refreshed token the next poll brought.
+    assert.equal(pinToken(null, 'rs-2'), 'rs-2')
+  })
 })
 
 describe('which step gets Run', () => {
@@ -228,5 +238,58 @@ describe('decisions [L6]', () => {
     for (const form of [['answer', R, 'ui', '--by', 'operator', '-x'], ['abandon', R, '--reason', '-x', '--by', 'operator']]) {
       assert.equal(spawnSync('python3', [fake, '-m', 'workflow', ...form], { encoding: 'utf8' }).status, 2, form.join(' '))
     }
+  })
+})
+
+describe('the relaunch dry run (1.1.0)', () => {
+  const asking = (lane: string, token: string, ask = 1) => ({ lane, token, ask, state: 'asking' as const })
+  const answered = (lane: string, token: string, exitCode: number | null, line = `relaunch ${lane}: allowed`, ask = 1) => ({ lane, token, ask, state: 'answered' as const, exitCode, line })
+  test('Confirm needs an exit-0 dry run of the lane and token chosen now', () => {
+    assert.equal(relaunchConfirmable(null, 'ui', 'rs-1'), false)
+    assert.equal(relaunchConfirmable(asking('ui', 'rs-1'), 'ui', 'rs-1'), false, 'not before the answer')
+    assert.equal(relaunchConfirmable(answered('ui', 'rs-1', 0), 'ui', 'rs-1'), true)
+    assert.equal(relaunchConfirmable(answered('ui', 'rs-1', 1, 'relaunch ui: refused: session x (\'done\') carries the launch name'), 'ui', 'rs-1'), false, 'a refusal keeps it off')
+    assert.equal(relaunchConfirmable(answered('ui', 'rs-1', null), 'ui', 'rs-1'), false)
+    assert.equal(relaunchConfirmable({ lane: 'ui', token: 'rs-1', ask: 1, state: 'failed', message: 'x' }, 'ui', 'rs-1'), false)
+  })
+  test('a change of lane or token invalidates the preview', () => {
+    const check = answered('ui', 'rs-1', 0)
+    assert.equal(relaunchConfirmable(check, 'adapter', 'rs-1'), false, 'another lane')
+    assert.equal(relaunchConfirmable(check, 'ui', 'rs-2'), false, 'another token')
+    assert.equal(relaunchConfirmable(check, 'ui', null), false)
+    assert.equal(currentCheck(check, 'adapter', 'rs-1'), null)
+    assert.equal(currentCheck(check, 'ui', 'rs-2'), null)
+  })
+  test('a late answer for an earlier choice never enables Confirm', () => {
+    // Asked for ui, then the operator chose adapter: the dialog asks again, and ui's late "allowed" lands nowhere.
+    let check: ReturnType<typeof answerCheck> = asking('adapter', 'rs-1')
+    check = answerCheck(check, answered('ui', 'rs-1', 0))
+    assert.deepEqual(check, asking('adapter', 'rs-1'))
+    assert.equal(relaunchConfirmable(check, 'adapter', 'rs-1'), false)
+    assert.equal(relaunchConfirmable(check, 'ui', 'rs-1'), false)
+    // An answer under an earlier token is late too.
+    check = answerCheck(asking('ui', 'rs-2'), answered('ui', 'rs-1', 0))
+    assert.equal(relaunchConfirmable(check, 'ui', 'rs-2'), false)
+    // A second answer to an answered check changes nothing either.
+    check = answerCheck(answered('ui', 'rs-1', 1, 'relaunch ui: refused: x'), answered('ui', 'rs-1', 0))
+    assert.equal(relaunchConfirmable(check, 'ui', 'rs-1'), false)
+    // The answer to the current ask lands.
+    assert.equal(relaunchConfirmable(answerCheck(asking('ui', 'rs-2'), answered('ui', 'rs-2', 0)), 'ui', 'rs-2'), true)
+  })
+  test('an answer to an earlier ask of the same lane and token never enables Confirm', () => {
+    // ui (ask 1), then adapter (ask 2), then ui again (ask 3) before ask 1 answers: ask 1's "allowed" is not ask 3's.
+    let check = askCheck(null, 'ui', 'rs-1')
+    check = askCheck(check, 'adapter', 'rs-1')
+    check = askCheck(check, 'ui', 'rs-1')
+    assert.deepEqual(check, asking('ui', 'rs-1', 3))
+    const late = answerCheck(check, answered('ui', 'rs-1', 0, 'relaunch ui: allowed', 1))
+    assert.deepEqual(late, check)
+    assert.equal(relaunchConfirmable(late, 'ui', 'rs-1'), false)
+    assert.equal(relaunchConfirmable(answerCheck(check, answered('ui', 'rs-1', 0, 'relaunch ui: allowed', 3)), 'ui', 'rs-1'), true)
+  })
+  test('the preview path is the run\'s relaunch-preview route; the control ids end with retry_all and relaunch', () => {
+    assert.equal(controlPaths.relaunchPreview(SCOPE), '/api/run-controls/alpha-project/controls/controls-stopped/relaunch-preview')
+    assert.equal(CONTROL_ORDER.length, 14)
+    assert.deepEqual(CONTROL_ORDER.slice(12), ['retry_all', 'relaunch'])
   })
 })

@@ -2,7 +2,7 @@ import type { KeyboardEvent } from 'react'
 import { PHASES, type Phase } from './dispatch/phases.ts'
 import type { ListSort } from './lists.ts'
 import {
-  DATE_CHOICES, DATE_FILTER_LABEL, SORT_CHOICES, STATUS_FILTER_LABEL, STATUS_FILTERS,
+  DATE_CHOICES, DATE_FILTER_LABEL, SORT_CHOICES, STATUS_FILTER_LABEL, STATUS_FILTERS, offeredDate,
   type DateFilter, type RunFilterState, type ScopeKind, type StatusFilter,
 } from './runFilter.ts'
 import { FilterButton } from './ui/index.tsx'
@@ -56,7 +56,7 @@ export function FilterBar({ kind, state, counts, scope, active, onChange, onComm
         </span>
         <span className="run-filter-field">
           <label htmlFor={id('date')}>Date</label>
-          <select id={id('date')} value={state.date} data-testid="run-filter-date" onChange={event => onChange({ date: event.target.value as DateFilter })}>
+          <select id={id('date')} value={offeredDate(kind, state.date)} data-testid="run-filter-date" onChange={event => onChange({ date: event.target.value as DateFilter })}>
             {DATE_CHOICES[kind].map(date => <option key={date} value={date}>{DATE_FILTER_LABEL[date]}</option>)}
           </select>
         </span>

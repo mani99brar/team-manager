@@ -160,3 +160,21 @@ describe('a list\'s state in the URL search', () => {
     for (const pathname of ['/', '/pi/', '/claude/agents/x.md', '/projects/alpha/bogus']) assert.equal(canonicalPathname(pathname), pathname, pathname)
   })
 })
+
+describe('the kind-aware date read (ux-critique-fixes-c)', () => {
+  test('date=all stays "All time" on Triage and reads as "Any date" on the project page, which does not offer it', async () => {
+    const { offeredDate, DATE_CHOICES } = await import('../../src/projects/runFilter.ts')
+    const search = parseListSearch('?date=all')
+    assert.equal(search.date, 'all', 'the shared URL key keeps the value for every list')
+    assert.equal(offeredDate('triage', search.date), 'all')
+    assert.equal(offeredDate('project', search.date), 'any')
+    assert.equal(offeredDate('feature', search.date), 'all')
+    // A date Triage does not offer reads as any there, and every offered date passes unchanged.
+    assert.equal(offeredDate('triage', parseListSearch('?date=30d').date), 'any')
+    for (const kind of ['triage', 'project', 'feature'] as const) for (const date of DATE_CHOICES[kind]) assert.equal(offeredDate(kind, date), date)
+    // Triage writes date=all to its URL, and the URL reads it back after a reload.
+    const written = listSearchString({ ...DEFAULT_LIST_SEARCH, date: 'all' })
+    assert.match(written, /date=all/)
+    assert.equal(parseListSearch(written).date, 'all')
+  })
+})

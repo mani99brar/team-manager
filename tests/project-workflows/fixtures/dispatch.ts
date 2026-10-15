@@ -11,6 +11,7 @@
  * `dispatch-noorigin` (no origin ref), and `dispatch-unreadable` (its run state cannot be read).
  */
 import { execFileSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Project, RunDetail, RunSummary, WorkflowDefinition } from '../../../contracts/projects/v1.ts'
@@ -42,7 +43,28 @@ export const DISPATCH_TRIO_LOCKED = 'trio-locked'
 /** Workflows whose runs the worker-phase mock answers with a listing error, mirroring the candidate's unlistable `runs_root`. */
 /** The unreadable project's sole workflow, whose runs also cannot be listed ([L1]), so the project reads "cannot be read". */
 export const DISPATCH_UNREADABLE_WORKFLOW = 'x'
-export const DISPATCH_UNLISTABLE_WORKFLOWS = new Set<string>([DISPATCH_TRIO_LOCKED, DISPATCH_UNREADABLE_WORKFLOW])
+/**
+ * The project whose runs record Claude costs: five integrated runs of `ledger` (two priced, one
+ * recorded 0, one with a null total, one with no `costs` section) and a `ledger-broken` workflow whose only run cannot be read.
+ */
+export const DISPATCH_SPEND = 'dispatch-spend'
+export const SPEND_WORKFLOW = 'ledger'
+export const SPEND_BROKEN_WORKFLOW = 'ledger-broken'
+export const DISPATCH_UNLISTABLE_WORKFLOWS = new Set<string>([DISPATCH_TRIO_LOCKED, DISPATCH_UNREADABLE_WORKFLOW, SPEND_BROKEN_WORKFLOW])
+/** Each seeded run's export `costs.total_usd`, keyed `<project>/<workflow>/<run>`: a number, null (a section with a null total) or absent (no section). */
+export const SPEND_RUN_COSTS: Record<string, number | null> = {
+  'ledger-001': 1.234567, 'ledger-002': 2.5, 'ledger-003': 0, 'ledger-004': null,
+}
+export const SPEND_RUNS = ['ledger-001', 'ledger-002', 'ledger-003', 'ledger-004', 'ledger-005'] as const
+/**
+ * Reuse evidence (GH7): Spend's `reuse` workflow holds a one-lane run whose candidate packet reuses its worker packet of attempt
+ * 1 (`reused_from`, as workflow/checks.py reuse_packet writes it) and a twin whose candidate checks ran again. Neither records costs.
+ */
+export const REUSE_WORKFLOW = 'reuse'
+export const RUN_REUSED = 'reuse-001'
+export const RUN_NOT_REUSED = 'reuse-002'
+export const REUSE_GATE_MESSAGE = 'Combined revision {commit}; worker checks reused from verification/worker/ui/1/packet.json (one lane, no browser check, the candidate is its snapshot)'
+export const DISPATCH_RUN_COSTS: Record<string, number | null> = Object.fromEntries(Object.entries(SPEND_RUN_COSTS).map(([runId, cost]) => [`${DISPATCH_SPEND}/${SPEND_WORKFLOW}/${runId}`, cost]))
 
 export const DISPATCH_PROJECTS: Project[] = [
   { project_id: DISPATCH_LOCAL, name: 'Local only' },
@@ -52,6 +74,7 @@ export const DISPATCH_PROJECTS: Project[] = [
   { project_id: DISPATCH_NOORIGIN, name: 'No origin' },
   { project_id: DISPATCH_BUSY, name: 'Busy' },
   { project_id: DISPATCH_UNREADABLE, name: 'Unreadable' },
+  { project_id: DISPATCH_SPEND, name: 'Spend' },
 ]
 
 const PIPELINE: { node_id: string; label: string; kind: WorkflowDefinition['nodes'][number]['kind'] }[] = [
@@ -159,6 +182,8 @@ const trioRuns = {
   'beta-feature-001': summary(DISPATCH_TRIO, 'beta-feature', 'beta-feature-001', { status: 'cancelled', stop: 'review', feature: 'Beta' }),
   'gamma-feature-001': summary(DISPATCH_TRIO, 'gamma-feature', 'gamma-feature-001', { status: 'failed', stop: 'verify_ui', feature: 'Gamma' }),
 }
+const reuseRuns = Object.fromEntries([RUN_REUSED, RUN_NOT_REUSED].map(runId => [runId, summary(DISPATCH_SPEND, REUSE_WORKFLOW, runId, { status: 'succeeded', stop: 'integrate', feature: 'Reuse' })]))
+const spendRuns = Object.fromEntries(SPEND_RUNS.map(runId => [runId, summary(DISPATCH_SPEND, SPEND_WORKFLOW, runId, { status: 'succeeded', stop: 'integrate', feature: 'Ledger' })]))
 const nooriginRuns = {
   'main-001': summary(DISPATCH_NOORIGIN, 'main', 'main-001', { status: 'succeeded', stop: 'integrate', feature: 'Main' }),
 }
@@ -297,6 +322,8 @@ export const DISPATCH_RUN_LISTS: Record<string, { runs: RunSummary[]; next_curso
   'gamma-feature': { runs: [trioRuns['gamma-feature-001']], next_cursor: null },
   main: { runs: [nooriginRuns['main-001']], next_cursor: null },
   ship: { runs: [busyRuns['ship-002'], busyRuns['ship-001']], next_cursor: null },
+  [SPEND_WORKFLOW]: { runs: SPEND_RUNS.map(runId => spendRuns[runId]), next_cursor: null },
+  [REUSE_WORKFLOW]: { runs: [reuseRuns[RUN_REUSED], reuseRuns[RUN_NOT_REUSED]], next_cursor: null },
   ...m2Lists,
 }
 
@@ -313,6 +340,7 @@ export const DISPATCH_WORKFLOW_LISTS: Record<string, { workflows: WorkflowDefini
   // The unreadable project lists one workflow whose runs cannot be listed, so its run state reads "cannot be read" while its
   // project page still renders (git unavailable → "git not read", V10). The candidate seeds the same workflow with an unreadable run.
   [DISPATCH_UNREADABLE]: { workflows: [def(DISPATCH_UNREADABLE, DISPATCH_UNREADABLE_WORKFLOW)] },
+  [DISPATCH_SPEND]: { workflows: [def(DISPATCH_SPEND, SPEND_WORKFLOW), def(DISPATCH_SPEND, SPEND_BROKEN_WORKFLOW), def(DISPATCH_SPEND, REUSE_WORKFLOW)] },
 }
 
 // ---- Run details the reading pane reads for its NextStep ([P31], V2) -------------------------------------------------
@@ -540,7 +568,7 @@ type RunShape =
  * event message), a run awaiting approval (a review interrupt), a cancelled run (a controller `cancelled` row) and an
  * unreadable run (its `plan.json` left out, so the server reads `RUN_STORAGE_INVALID: plan.json is missing`).
  */
-function writeDispatchRun(runsRootDir: string, runId: string, updatedAt: string, shape: RunShape): void {
+function writeDispatchRun(runsRootDir: string, runId: string, updatedAt: string, shape: RunShape, costs?: { total_usd: number | null }): void {
   const dir = join(runsRootDir, runId)
   mkdirSync(dir, { recursive: true })
   const event = (sequence: number, node: string, status: string, message: string) => ({ sequence, time: RUN_CREATED, node, status, message })
@@ -575,11 +603,60 @@ function writeDispatchRun(runsRootDir: string, runId: string, updatedAt: string,
     version: '1.0.0', run_id: runId, base_commit: RUN_BASE, created_at: RUN_CREATED, updated_at: updatedAt,
     definition: { name: 'Feature implementation', nodes: nodes.map(node => ({ ...node, depends_on: [] })) },
     values, next, tasks, events, verification_packets: [],
+    // The `costs` section as workflow/costs.py writes it (the viewer reads only `total_usd`).
+    ...(costs !== undefined ? { costs: { total_usd: costs.total_usd, by_role: { workers: costs.total_usd }, nodes: [] } } : {}),
   }
   writeFileSync(join(dir, 'run-state.json'), `${JSON.stringify(state, null, 2)}\n`)
   if (events.length) writeFileSync(join(dir, 'events.jsonl'), events.map(entry => JSON.stringify(entry)).join('\n') + '\n')
   // The unreadable run keeps its run-state but no plan.json, so the server reads it as RUN_STORAGE_INVALID "plan.json is missing".
   if (shape.kind !== 'unreadable') writeFileSync(join(dir, 'plan.json'), `${JSON.stringify({ run_id: runId, base_commit: RUN_BASE }, null, 2)}\n`)
+}
+
+/**
+ * Writes a one-lane integrated run with its two verification packets in the workflow/checks.py layout (only the keys the server
+ * reads: phase, result, gate and, for a reused candidate packet, `reused_from` naming the worker packet and its sha256), and the
+ * controller's rows: the lane's check, then its `candidate_ui` gate row, which says it reused the worker checks when it did.
+ */
+function writeReuseRun(runsRootDir: string, runId: string, reused: boolean): void {
+  const dir = join(runsRootDir, runId)
+  const commit = sha(`out-${runId}`)
+  const digest = (text: string) => createHash('sha256').update(text).digest('hex')
+  const result = (phase: 'worker' | 'candidate') => ({
+    contract_version: '1.0.0', run_id: runId, node_id: 'ui', attempt: 1, session_id: 'sess-ui', status: 'succeeded', base_commit: RUN_BASE, output_commit: commit,
+    changed_files: ['src/ui.ts'], checks: [], open_assumptions: [], artifacts: [],
+    summary: phase === 'candidate' && reused ? 'Worker check capture verification/worker/ui/1/packet.json reused for the candidate gate; not integration approval' : `Trusted ${phase} check capture; not integration approval`,
+    error: null,
+  })
+  const registrations: { phase: string; node_id: string; attempt: number; path: string; sha256: string }[] = []
+  const writePacketFile = (phase: 'worker' | 'candidate', extra: Record<string, unknown>) => {
+    const relative = `verification/${phase}/ui/1/packet.json`
+    mkdirSync(join(dir, 'verification', phase, 'ui', '1'), { recursive: true })
+    const text = `${JSON.stringify({ phase, result: result(phase), gate: { status: 'passed', reasons: [] }, ...extra }, null, 2)}\n`
+    writeFileSync(join(dir, relative), text)
+    registrations.push({ phase, node_id: 'ui', attempt: 1, path: relative, sha256: digest(text) })
+    return digest(text)
+  }
+  const workerDigest = writePacketFile('worker', {})
+  writePacketFile('candidate', reused ? { reused_from: { path: 'verification/worker/ui/1/packet.json', sha256: workerDigest } } : {})
+  const time = (minute: number) => `2025-01-01T08:${String(minute).padStart(2, '0')}:00Z`
+  const rows: [string, string, string][] = [
+    ['challenge', 'succeeded', 'Design challenge accepted'], ['ui', 'running', 'Launching or reconciling the exact native session'],
+    ['freeze', 'succeeded', 'Immutable snapshots captured; worker-reported checks are not trusted'],
+    ['verify_ui', 'running', `Attempt 1; revision ${commit}`], ['verify_ui', 'passed', 'Required tests and artifacts passed'],
+    ...(reused ? [] : [['candidate_ui', 'running', `Attempt 1; combined revision ${commit}`] as [string, string, string]]),
+    ['candidate_ui', 'passed', reused ? REUSE_GATE_MESSAGE.replace('{commit}', commit) : `Combined revision ${commit}`],
+    ['review', 'approved', 'Independent reviewer approved the candidate'], ['integrate', 'succeeded', `Fast-forwarded to ${commit}`],
+  ]
+  const events = rows.map(([node, status, message], index) => ({ sequence: index + 1, time: time(index + 1), node, status, message }))
+  const state = {
+    version: '1.0.0', run_id: runId, base_commit: RUN_BASE, created_at: RUN_CREATED, updated_at: '2025-01-01T09:00:00Z',
+    definition: { name: 'Feature implementation', nodes: PIPELINE_NODES.map(node => ({ ...node, depends_on: [] })) },
+    values: { run_id: runId, ui: { session_id: 'sess-ui' }, snapshots: { ui: commit }, ui_packet: 'verification/worker/ui/1/packet.json', bundle: { run_id: runId, base_commit: RUN_BASE, candidate_commit: commit }, review: { run_id: runId, verdict: 'approved' }, approved_bundle: sha('bundle'), integrated_commit: commit },
+    next: [], tasks: [], events, verification_packets: registrations,
+  }
+  writeFileSync(join(dir, 'run-state.json'), `${JSON.stringify(state, null, 2)}\n`)
+  writeFileSync(join(dir, 'events.jsonl'), events.map(entry => JSON.stringify(entry)).join('\n') + '\n')
+  writeFileSync(join(dir, 'plan.json'), `${JSON.stringify({ run_id: runId, base_commit: RUN_BASE }, null, 2)}\n`)
 }
 
 /** Writes one of the runs that need the operator, or not (`M2_RUNS`) in the storage format, its rows as given, so the server derives the same state. */
@@ -686,6 +763,15 @@ export function seedDispatchCandidate(root: string): DispatchSeed {
   for (const run of M2_RUNS) writeM2Run(runsRoot(run.projectId, run.workflowId), run)
   // The unreadable project's only run is unreadable too, so its whole run list fails and the project reads "cannot be read".
   writeDispatchRun(runsRoot(DISPATCH_UNREADABLE, 'x'), 'x-001', '2025-01-01T09:00:00Z', { kind: 'unreadable' })
+  // Spend: the ledger runs with their recorded costs (one without a section), and a workflow whose only run cannot be read.
+  const spendRepo = join(base, 'spend'); initRepo(spendRepo); commit(spendRepo, 'ledger')
+  for (const runId of SPEND_RUNS) {
+    const cost = SPEND_RUN_COSTS[runId]
+    writeDispatchRun(runsRoot(DISPATCH_SPEND, SPEND_WORKFLOW), runId, '2025-01-01T09:00:00Z', { kind: 'integrated', integratedSha: sha(`land-${runId}`) }, cost === undefined ? undefined : { total_usd: cost })
+  }
+  writeDispatchRun(runsRoot(DISPATCH_SPEND, SPEND_BROKEN_WORKFLOW), 'ledger-broken-001', '2025-01-01T09:00:00Z', { kind: 'unreadable' })
+  writeReuseRun(runsRoot(DISPATCH_SPEND, REUSE_WORKFLOW), RUN_REUSED, true)
+  writeReuseRun(runsRoot(DISPATCH_SPEND, REUSE_WORKFLOW), RUN_NOT_REUSED, false)
 
   const repos: Record<string, GithubRepoRead> = {
     'acme/widgets': { read_at: READ_AT, visibility: 'PUBLIC', default_branch: 'main', pushed_at: '2026-10-10T10:00:00Z', head: { sha: sha('ghhead'), committed_at: '2026-10-10T09:30:00Z' }, open_prs: 3, open_issues: 3, prs: prList('acme/widgets'), issues: issueList('acme/widgets') },
@@ -707,6 +793,7 @@ export function seedDispatchCandidate(root: string): DispatchSeed {
       { project_id: DISPATCH_NOORIGIN, name: 'No origin', repository: noorigin, workflows: workflowsFor(DISPATCH_NOORIGIN, ['main', ...M2_WORKFLOWS[DISPATCH_NOORIGIN]]) },
       { project_id: DISPATCH_BUSY, name: 'Busy', repository: busy, workflows: workflowsFor(DISPATCH_BUSY, ['ship']) },
       { project_id: DISPATCH_UNREADABLE, name: 'Unreadable', repository: unreadable, workflows: workflowsFor(DISPATCH_UNREADABLE, ['x']) },
+      { project_id: DISPATCH_SPEND, name: 'Spend', repository: spendRepo, workflows: workflowsFor(DISPATCH_SPEND, [SPEND_WORKFLOW, SPEND_BROKEN_WORKFLOW, REUSE_WORKFLOW]) },
     ],
     githubFixture: { viewer_login: VIEWER_LOGIN, repos },
   }
