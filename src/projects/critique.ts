@@ -9,7 +9,7 @@
  */
 import type { FixLoop, FixLoopFinding, FixLoopReviewRound, ReviewFinding } from '../../contracts/projects/v1.ts'
 import { isBlockingFinding, paths, type ReviewResult, type RunScope } from './api.ts'
-import { blockingReason, type Reviewer } from './reviewers.ts'
+import { blockingReason, reviewerRole, type Reviewer } from './reviewers.ts'
 
 /** The reviewer id the controller gives the critique (decisions.md [L1]); the prefix `critique-` names its screenshots. */
 export const CRITIQUE_REVIEWER_ID = 'critique'
@@ -53,9 +53,10 @@ function listWording(items: readonly string[]): string {
  * review deadline expired or its completion file was rejected". Kept here because `reviewers.ts` is another lane's file; the
  * native path is delegated to `blockingReason` so the two stay in step.
  */
-export function reviewBlockedBy(review: Pick<ReviewResult, 'verdict' | 'reviewers'>): string | null {
+export function reviewBlockedBy(review: Pick<ReviewResult, 'verdict' | 'reviewers' | 'judged_panel'>): string | null {
   if (review.verdict !== 'blocked') return null
-  const reasons = review.reviewers.flatMap(reviewer => {
+  // On a judged review the built-in reviewers are advisory: only the judge and critique can block it.
+  const reasons = review.reviewers.filter(reviewer => reviewerRole(review, reviewer.reviewer_id) !== 'advisory').flatMap(reviewer => {
     const reason = isCritiqueReviewer(reviewer.reviewer_id) ? critiqueBlockingReason(reviewer) : blockingReason(reviewer)
     return reason === null ? [] : [`${reviewer.reviewer_id} (${reason})`]
   })

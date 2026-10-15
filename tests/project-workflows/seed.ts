@@ -205,6 +205,8 @@ export type RunOptions = {
   skills?: Record<string, { name: string; sha256: string }[]>
   /** Export 1.10.0: `plan.automatic.fix_rounds`, injected into `inputs.automatic`. */
   fixRounds?: number
+  /** Further `plan.json` keys (a judged run's `panels`, features/review-panel-registry/prd.md Appendix B), merged over the rest. */
+  plan?: Record<string, unknown>
 }
 
 function writeRun(runsRoot: string, repository: string, runId: string, options: RunOptions) {
@@ -223,6 +225,7 @@ function writeRun(runsRoot: string, repository: string, runId: string, options: 
     ...(options.reviewers ? { reviewers: options.reviewers.map(reviewer => ({ reviewer_id: reviewer, prompt: `Review the candidate as the ${reviewer} reviewer.` })) } : {}),
     mode: 'live', policy_sha256: 'e'.repeat(64), created_at: options.createdAt, source_branch: inputs?.source_branch ?? 'feature/synthetic',
     ...(inputs === null || inputs.automatic !== null ? { automatic: inputs?.automatic ?? { worker_timeout_seconds: 14400, review_timeout_seconds: 1800 } } : {}),
+    ...options.plan,
   }
   writeJson(join(runDir, 'plan.json'), plan)
   writeFileSync(join(runDir, 'events.jsonl'), options.events.map(event => JSON.stringify(event)).join('\n') + '\n')

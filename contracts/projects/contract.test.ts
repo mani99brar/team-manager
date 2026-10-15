@@ -7,7 +7,9 @@ import { dispatchSchemas, gitStateSchema, githubStateSchema } from './dispatch.j
 import {
   CONTROL_IDS, RECORD_STATUSES, cleanPreviewRequestSchema, cleanPreviewResponseSchema, controlErrorSchema, controlRecordSchema, controlRequestSchema, controlsStatusSchema, runControlsSchema,
 } from './controls.js'
-import type { RunInputs } from './v1.js'
+import type { JudgedPanelRecord, PanelRecord, RunInputs } from './v1.js'
+import { anyPanelRecordSchema, judgeDecided, panelJudgeSchema, reviewPlanContext, servedReviewContext } from './v1.js'
+import * as judged from './judgedExamples.ts'
 import { validateWorkerResult } from '../workflow/v1.js'
 import {
   ATTACK_ATTACKER_STATUSES, ATTACK_FINDING_STATUSES, ATTACK_PASS_STATUSES, ATTACK_RERUN_REASONS, ATTACK_SKEPTIC_STATUSES, attackRecordSchema,
@@ -947,4 +949,152 @@ test('dispatch (Appendix A): the schemas refuse what the routes never send', () 
   // GitHub: only the five states, and no extra keys.
   assert.throws(() => githubStateSchema.parse({ ...overview.projects[0].github, status: 'loading' }))
   assert.throws(() => githubStateSchema.parse({ ...overview.projects[0].github, extra: true }))
+})
+
+// ---- Panel record 1.1.0 and the judged review (features/review-panel-registry/prd.md 7.4, 8, Appendix A and B) ----------
+
+test('panel record 1.1.0: the judged and fallback examples validate as records and as served panelResults, keeping the judge', () => {
+  for (const example of [judged.panelJudgedExample(), judged.panelFallbackExample()]) {
+    const record = anyPanelRecordSchema.parse(example)
+    assert.equal(record.version, '1.1.0')
+    // Every field the viewer reads survives the parse: the seats, the findings and the judge object as written.
+    assert.deepEqual(record.panels[0].providers, example.panels[0].providers)
+    assert.deepEqual(record.panels[0].findings, example.panels[0].findings)
+    assert.deepEqual('judge' in record.panels[0] ? record.panels[0].judge : null, example.panels[0].judge)
+    for (const source of ['live', 'export'] as const) {
+      const served = validatePanelResults({ ...example, contract_version: '1.9.0', source })
+      assert.equal(served.version, '1.1.0')
+      assert.equal(served.source, source)
+    }
+  }
+  const served = validatePanelResults({ ...judged.panelJudgedExample(), contract_version: '1.9.0', source: 'export' })
+  assert.ok(served.version === '1.1.0')
+  const panel = served.panels[0]
+  assert.deepEqual(panel.providers.map(seat => [seat.name, seat.prefix, seat.transport, seat.status]), [['claude', 'C', 'claude', 'ok'], ['gpt', 'G', 'pi', 'ok'], ['muse', 'M', 'cli', 'ok']])
+  assert.deepEqual(panel.judge?.rulings.map(ruling => [ruling.id, ruling.ruling]), [['J1', 'confirmed'], ['J2', 'confirmed'], ['J3', 'refuted'], ['J4', 'deferred']])
+  const fallback = validatePanelResults({ ...judged.panelFallbackExample(), contract_version: '1.9.0', source: 'live' })
+  assert.ok(fallback.version === '1.1.0')
+  assert.deepEqual(fallback.panels[0].providers.map(seat => seat.status), ['ok', 'timed_out', 'auth_required', 'unavailable'])
+  assert.equal(fallback.panels[0].judge?.fallback, true)
+})
+
+test('panel record 1.1.0: a transport outside claude|pi|cli, a seat status outside PRD 8 and a ruling outside confirmed|refuted|deferred are refused', () => {
+  const refused: [string, (record: JudgedPanelRecord) => void][] = [
+    ['transport foo', record => { (record.panels[0].providers[2] as { transport: string }).transport = 'foo' }],
+    ['seat status sleeping', record => { (record.panels[0].providers[0] as { status: string }).status = 'sleeping' }],
+    ['seat status quota (not a PRD 8 word)', record => { (record.panels[0].providers[1] as { status: string }).status = 'quota' }],
+    ['ruling maybe', record => { (record.panels[0].judge!.rulings[0] as { ruling: string }).ruling = 'maybe' }],
+    ['judge status asleep', record => { (record.panels[0].judge as { status: string }).status = 'asleep' }],
+    ['a report-only (not judged) panel inside 1.1.0', record => { (record.panels[0] as { judged: boolean }).judged = false }],
+    ['an overlap threshold on a judged panel', record => { (record.panels[0] as { overlap_threshold: unknown }).overlap_threshold = 2 }],
+    ['duplicate ruling ids', record => { record.panels[0].judge!.rulings[1].id = 'J1' }],
+    ['duplicate seat prefixes', record => { record.panels[0].providers[1].prefix = 'C' }],
+  ]
+  for (const [label, mutate] of refused) {
+    const record = judged.panelJudgedExample()
+    mutate(record)
+    assert.throws(() => validatePanelResults({ ...record, contract_version: '1.9.0', source: 'export' }), label)
+    if (!label.startsWith('duplicate')) assert.equal(anyPanelRecordSchema.safeParse(record).success, false, label)
+  }
+  // A 1.0.0 record keeps its own schema: `cli` and the new statuses are not 1.0.0 words.
+  const old = structuredClone(examples.panelRecord) as PanelRecord
+  ;(old.panels[0].providers[0] as { transport: string }).transport = 'cli'
+  assert.equal(anyPanelRecordSchema.safeParse(old).success, false)
+})
+
+test('panel record 1.0.0 still validates unchanged beside 1.1.0', () => {
+  assert.deepEqual(anyPanelRecordSchema.parse(examples.panelRecord), examples.panelRecord)
+  assert.deepEqual(anyPanelRecordSchema.parse(examples.panelPendingRecord), examples.panelPendingRecord)
+  const served = validatePanelResults(examples.panelResults)
+  assert.equal(served.version, '1.0.0')
+})
+
+test('panel record 1.1.0: the judge-states block of PRD Appendix B (pending, running, incomplete) validates as the judge object ([L2])', () => {
+  const states = judged.judgeStates()
+  assert.deepEqual(Object.keys(states).sort(), ['incomplete', 'pending', 'running'])
+  for (const [name, judge] of Object.entries(states)) {
+    assert.deepEqual(panelJudgeSchema.parse(judge), judge, name)
+    const record = judged.panelJudgedExample()
+    record.panels[0].judge = judge
+    if (name !== 'incomplete') Object.assign(record.panels[0], { status: 'running', ended_at: null })
+    assert.doesNotThrow(() => validatePanelResults({ ...record, contract_version: '1.9.0', source: 'live' }), name)
+  }
+  assert.equal(states.running.ended_at, null)
+  assert.equal(states.incomplete.fallback, true)
+  // A judged record before the judge's first write (no judge object yet) is not dropped either.
+  const before = judged.panelJudgedExample()
+  delete before.panels[0].judge
+  assert.doesNotThrow(() => validatePanelResults({ ...before, contract_version: '1.9.0', source: 'export' }))
+})
+
+test('validateReviewResult: the judged review example passes only with judged-plan context; legacy, report-only and missing plan context refuse it', () => {
+  const judgedPlan = reviewPlanContext(judged.judgedPlan())
+  assert.deepEqual(judgedPlan, { judgedPanel: true })
+  const review = judged.servedReview(judged.reviewJudgedExample())
+  const accepted = validateReviewResult(review, judgedPlan)
+  assert.equal(accepted.verdict, 'blocked')
+  assert.ok(judgeDecided(accepted, judgedPlan))
+  // The served flag carries the same context to the client.
+  assert.doesNotThrow(() => validateReviewResult(judged.servedReview(judged.reviewJudgedExample(), { judgedPanel: true }), servedReviewContext({ judged_panel: true })))
+  for (const [label, context] of [
+    ['legacy plan', reviewPlanContext(judged.legacyPlan())],
+    ['report-only plan', reviewPlanContext(judged.reportOnlyPlan())],
+    ['missing plan', reviewPlanContext(null)],
+    ['no context at all', undefined],
+  ] as const) {
+    assert.throws(() => validateReviewResult(review, context), /judged panel/, label)
+  }
+  // The same record with the judge entry removed fails on every context: its findings name a reviewer it does not list.
+  const withoutJudge = judged.reviewJudgedExample()
+  withoutJudge.reviewers = withoutJudge.reviewers.filter(entry => entry.reviewer_id !== 'judge')
+  for (const context of [judgedPlan, reviewPlanContext(judged.legacyPlan()), undefined]) {
+    assert.throws(() => validateReviewResult(judged.servedReview(withoutJudge), context))
+  }
+  // A served flag the context does not back is refused.
+  assert.throws(() => validateReviewResult(judged.servedReview(judged.reviewJudgedExample(), { judgedPanel: true }), reviewPlanContext(judged.legacyPlan())))
+})
+
+test('validateReviewResult: on a judged review the built-in verdicts do not gate; the verdict follows the judge and critique', () => {
+  const context = { judgedPanel: true }
+  // The judge approved (no confirmed P0/P1) while both built-in reviewers blocked: approved.
+  const approved = judged.reviewJudgedExample()
+  approved.verdict = 'approved'
+  approved.reviewers = approved.reviewers.map(entry => entry.reviewer_id === 'judge' ? { ...entry, verdict: 'approved' } : entry)
+  approved.findings = approved.findings.filter(finding => finding.severity === 'P2')
+  assert.equal(validateReviewResult(judged.servedReview(approved), context).verdict, 'approved')
+  // Not without context: today's rule wants every reviewer's approval (and `judge` is reserved).
+  assert.throws(() => validateReviewResult(judged.servedReview(approved)))
+  // A verdict that does not follow the judge is refused.
+  const contradicts = structuredClone(approved)
+  contradicts.verdict = 'blocked'
+  assert.throws(() => validateReviewResult(judged.servedReview(contradicts), context), /follows the judge/)
+  // A judged review carries only the judge's (and critique's) findings.
+  const builtinFinding = judged.reviewJudgedExample()
+  builtinFinding.findings.push({ severity: 'P2', message: 'a general finding', disposition: 'open', worker: 'engine', reviewer: 'general' })
+  assert.throws(() => validateReviewResult(judged.servedReview(builtinFinding), context), /only the judge/)
+  // Critique still blocks on its own: the judge approved, critique blocked → blocked.
+  const critique = structuredClone(approved)
+  critique.reviewers.push({ reviewer_id: 'critique', session_id: '0a1b2c3d-3333-4444-8555-666677778888', verdict: 'blocked', accepted_at: '2026-10-15T10:32:00Z' })
+  critique.findings.push({ severity: 'P1', message: 'The fallback banner is cut off at 390 px.', disposition: 'open', worker: 'viewer', reviewer: 'critique' })
+  assert.throws(() => validateReviewResult(judged.servedReview(critique), context))
+  critique.verdict = 'blocked'
+  assert.equal(validateReviewResult(judged.servedReview(critique), context).verdict, 'blocked')
+  // The judge sits after the built-ins and before critique.
+  const misordered = judged.reviewJudgedExample()
+  misordered.reviewers = [misordered.reviewers[2], misordered.reviewers[0], misordered.reviewers[1]]
+  assert.throws(() => validateReviewResult(judged.servedReview(misordered), context), /then judge/)
+})
+
+test('validateReviewResult: a fallback record on a judged run (no judge entry) validates exactly as today', () => {
+  const fallback = judged.servedReview(judged.fallbackReview())
+  for (const context of [{ judgedPanel: true }, { judgedPanel: false }, undefined]) {
+    const review = validateReviewResult(fallback, context)
+    assert.equal(review.verdict, 'blocked')
+    assert.equal(judgeDecided(review, context), false)
+  }
+  // Today's rule still holds on it: an approved fallback needs every built-in reviewer's approval.
+  const approved = judged.fallbackReview()
+  approved.verdict = 'approved'
+  approved.findings = []
+  assert.throws(() => validateReviewResult(judged.servedReview(approved), { judgedPanel: true }), /every reviewer/)
 })

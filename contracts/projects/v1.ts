@@ -267,6 +267,11 @@ export const reviewResultSchema = z.strictObject({
   delta_from: commit.nullable().optional(),
   /** 1.10.0: `review.delta.diff` as a bounded patch artifact, served as `diff` is; null without the file. */
   delta_diff: artifactSchema.nullable().optional(),
+  /**
+   * Panel record 1.1.0 (features/review-panel-registry/prd.md 7.4): present, `true`, exactly when the run's plan pins a judged
+   * panel; the client passes it back to `validateReviewResult` as the plan context. Absent for every other run.
+   */
+  judged_panel: z.literal(true).optional(),
 })
 
 // ---- Run inputs (1.2.0, worker lanes from configuration in 1.3.0, guardrails in 1.4.0) --------------------------
@@ -826,15 +831,130 @@ export const panelRecordSchema = z.object({
   panels: z.array(panelEntrySchema),
 })
 
+// ---- The judged review panel (panel record 1.1.0, features/review-panel-registry/prd.md 7.3, 8, Appendix A) ----------------
+
+/**
+ * Panel record 1.1.0 ([G22]): the judged run-review panel. Its providers are the seats pinned from the shared reviewer list
+ * (`name`, `prefix`, transport `claude | pi | cli`, the model the CLI reported serving and its version), with the statuses a
+ * subscription CLI adds (`unavailable` when disabled or its probe failed, `auth_required` when not logged in, `usage_limit`,
+ * `model_mismatch`); the panel is `judged`, has no overlap threshold, and carries the `judge` object: its status, inputs, the
+ * built-in reviewers' findings it read and one ruling per merged finding. In step 1 a 1.1.0 record holds only the judged
+ * panel ([L5]); a 1.0.0 record (report-only) keeps its own schema above, unchanged. Like 1.0.0, nothing is resolved by
+ * reference (a ruling's `sources` and a seat's `finding_ids` are not looked up), so a live record mid-write never fails.
+ */
+export const PANEL_RECORD_VERSIONS = ['1.0.0', '1.1.0'] as const
+export const SEAT_TRANSPORTS = ['claude', 'pi', 'cli'] as const
+export const SEAT_STATUSES = [...PANEL_PROVIDER_STATUSES, 'unavailable', 'auth_required', 'usage_limit', 'model_mismatch'] as const
+/** `pending → running → judged | failed | timed_out | incomplete` (PRD 7.3); the last three fall back to today's rule. */
+export const JUDGE_STATUSES = ['pending', 'running', 'judged', 'failed', 'timed_out', 'incomplete'] as const
+export const JUDGE_RULINGS = ['confirmed', 'refuted', 'deferred'] as const
+export const JUDGE_INPUT_KINDS = ['reviewer', 'seat'] as const
+
+export const panelSeatSchema = z.object({
+  /** The reviewer list's entry name (`claude`, `gpt`, `muse`): what a finding's `providers_raised` names. */
+  name: panelText,
+  /** The seat's finding-id prefix (`C` for C1, C2...). */
+  prefix: z.string().regex(/^[A-Z]$/),
+  transport: z.enum(SEAT_TRANSPORTS),
+  model: z.string().nullable(),
+  /** The model a `cli` seat reported serving; null when its entry reads none. */
+  served_model: z.string().nullable(),
+  /** A `cli` seat's `version_argv` first line, pinned at launch; null otherwise. */
+  cli_version: z.string().nullable(),
+  effort: z.string().nullable(),
+  status: z.enum(SEAT_STATUSES),
+  /** Null for a `cli` seat (no usage data) and for a seat that never ran. */
+  cost_usd: z.number().nonnegative().nullable(),
+  context_bytes: z.number().int().nonnegative().nullable(),
+  finding_ids: z.array(panelText),
+  error: z.string().nullable(),
+})
+
+/** One source the judge read: a built-in reviewer or a seat, its own status word and the finding ids it contributed. */
+export const judgeInputSchema = z.object({
+  source: panelText,
+  kind: z.enum(JUDGE_INPUT_KINDS),
+  status: z.string(),
+  finding_ids: z.array(panelText),
+})
+
+/** A built-in reviewer's finding as the judge read it: `<reviewer_id>-<n>` in review order. */
+export const judgeReviewerFindingSchema = z.object({
+  id: panelText,
+  reviewer: panelText,
+  severity: z.enum(PANEL_SEVERITIES),
+  worker: z.string().nullable(),
+  message: z.string(),
+})
+
+/** One ruling: `J<n>`, its re-graded severity, the finding ids it merges, the lane owning its file, reason and evidence. */
+export const judgeRulingSchema = z.object({
+  id: panelText,
+  ruling: z.enum(JUDGE_RULINGS),
+  severity: z.enum(PANEL_SEVERITIES),
+  sources: z.array(panelText),
+  file: z.string().nullable(),
+  line: z.number().int().nonnegative().nullable(),
+  title: z.string(),
+  detail: z.string(),
+  requirement: z.string().nullable(),
+  worker: z.string().nullable(),
+  reason: z.string(),
+  evidence: z.string().nullable(),
+})
+
+/** The judge object (PRD 7.3, Appendix A and B): `pending` and `running` have no end, cost or rulings yet. */
+export const panelJudgeSchema = z.object({
+  status: z.enum(JUDGE_STATUSES),
+  /** True when today's rule decided (the judge failed, timed out, was incomplete or its input was over the cap). */
+  fallback: z.boolean(),
+  /** The run's pinned judge model; null when the run pinned none. */
+  model: z.string().nullable(),
+  effort: z.string().nullable(),
+  session_id: z.string().nullable(),
+  started_at: panelTime.nullable(),
+  ended_at: panelTime.nullable(),
+  cost_usd: z.number().nonnegative().nullable(),
+  error: z.string().nullable(),
+  inputs: z.array(judgeInputSchema),
+  reviewer_findings: z.array(judgeReviewerFindingSchema),
+  rulings: z.array(judgeRulingSchema),
+})
+
+export const judgedPanelEntrySchema = z.object({
+  id: panelText,
+  stage: z.enum(PANEL_STAGES),
+  status: z.enum(PANEL_STATUSES),
+  judged: z.literal(true),
+  overlap_threshold: z.null(),
+  context_bytes: z.number().int().nonnegative().nullable(),
+  providers: z.array(panelSeatSchema),
+  findings: z.array(panelFindingSchema),
+  started_at: panelTime.nullable(),
+  ended_at: panelTime.nullable(),
+  budget_usd: z.number().nonnegative().nullable().optional(),
+  error: z.string().nullable(),
+  /** Absent only before the seats lane writes its `pending` object: the viewer then reads the judge as not started. */
+  judge: panelJudgeSchema.optional(),
+})
+
+/** `<run>/panel.json` 1.1.0, or the export's `panels` section holding it. */
+export const judgedPanelRecordSchema = z.object({
+  version: z.literal('1.1.0'),
+  panels: z.array(judgedPanelEntrySchema),
+})
+
+/** Either record version, told apart by its own `version` (a 1.1.0 record outside this schema is refused whole). */
+export const anyPanelRecordSchema = z.discriminatedUnion('version', [panelRecordSchema, judgedPanelRecordSchema])
+
 /**
  * The panel record, served at `.../runs/{run_id}/panels` (1.9.0): the record's own fields plus where it was read, `live`
  * (`<run>/panel.json`, rewritten while the panel runs) or `export` (the export's `panels` section, the fallback). No `node_id`:
- * the panel has no graph node this slice (decisions L4); its section opens from the run page.
+ * the panel has no graph node this slice (decisions L4); its section opens from the run page. The record's own `version`
+ * tells a report-only 1.0.0 record from a judged 1.1.0 one; the route's contract version stays 1.9.0 ([G22]).
  */
-export const panelResultsSchema = panelRecordSchema.extend({
-  contract_version: z.literal('1.9.0'),
-  source: z.enum(['live', 'export']),
-})
+const panelServedFields = { contract_version: z.literal('1.9.0'), source: z.enum(['live', 'export']) }
+export const panelResultsSchema = z.discriminatedUnion('version', [panelRecordSchema.extend(panelServedFields), judgedPanelRecordSchema.extend(panelServedFields)])
 
 // ---- The in-run fix loop (1.10.0, docs/PRD_VIEWER_REFINE.md Appendix A) ------------------------------------------------
 
@@ -985,6 +1105,14 @@ export type PanelEntry = z.infer<typeof panelEntrySchema>
 export type PanelProvider = z.infer<typeof panelProviderSchema>
 export type PanelFinding = z.infer<typeof panelFindingSchema>
 export type PanelOverlapThreshold = z.infer<typeof panelOverlapThresholdSchema>
+export type JudgedPanelRecord = z.infer<typeof judgedPanelRecordSchema>
+export type JudgedPanelEntry = z.infer<typeof judgedPanelEntrySchema>
+export type PanelSeat = z.infer<typeof panelSeatSchema>
+export type PanelJudge = z.infer<typeof panelJudgeSchema>
+export type JudgeRuling = z.infer<typeof judgeRulingSchema>
+export type JudgeInput = z.infer<typeof judgeInputSchema>
+export type JudgeReviewerFinding = z.infer<typeof judgeReviewerFindingSchema>
+export type AnyPanelRecord = z.infer<typeof anyPanelRecordSchema>
 
 export function validateDefinition(input: unknown): WorkflowDefinition {
   const definition = definitionSchema.parse(input)
@@ -1064,8 +1192,76 @@ export function isBlockingFinding(finding: ReviewFinding): boolean {
   return (finding.severity === 'P0' || finding.severity === 'P1') && finding.disposition !== 'resolved'
 }
 
-export function validateReviewResult(input: unknown): ReviewResult {
+/** The reviewer id the judge's entry carries in a judged review (reserved, [G24]). */
+export const JUDGE_REVIEWER_ID = 'judge'
+/** The critique reviewer's id: it keeps its own blocking on a judged run ([O4], PRD 7.4). */
+const CRITIQUE_REVIEWER_ID = 'critique'
+
+/**
+ * What the run's plan says about the review (PRD 7.4, [G26]): `judgedPanel` is true exactly when `plan.json` pins a judged
+ * panel (a `panels` item with `report_only: false`). A legacy plan (no `panels`), a report-only panel or no plan at all is
+ * not judged.
+ */
+export type ReviewPlanContext = { judgedPanel: boolean }
+
+export function reviewPlanContext(plan: unknown): ReviewPlanContext {
+  const panels = plan !== null && typeof plan === 'object' ? (plan as { panels?: unknown }).panels : undefined
+  const judgedPanel = Array.isArray(panels) && panels.some(item => item !== null && typeof item === 'object' && (item as { report_only?: unknown }).report_only === false)
+  return { judgedPanel }
+}
+
+/**
+ * The plan context a served review result carries: its `judged_panel` flag, which the server sets from the run's plan after
+ * validating with it. The client and the route's re-check validate a served result with this.
+ */
+export function servedReviewContext(input: unknown): ReviewPlanContext {
+  return { judgedPanel: input !== null && typeof input === 'object' && (input as { judged_panel?: unknown }).judged_panel === true }
+}
+
+/**
+ * Whether the judge decided this review: the caller's plan pins a judged panel and the record lists the `judge` reviewer. A
+ * fallback record on a judged run (no `judge` entry) keeps the built-in reviewers' decision, as today.
+ */
+export function judgeDecided(result: Pick<ReviewResult, 'reviewers'>, context?: ReviewPlanContext): boolean {
+  return context?.judgedPanel === true && result.reviewers.some(entry => entry.reviewer_id === JUDGE_REVIEWER_ID)
+}
+
+/**
+ * The judged rule (PRD 7.4): the reviewers are the built-ins, then `judge`, then `critique` when declared; the combined
+ * findings are the judge's confirmed rulings and critique's; the built-in entries keep their own verdicts for the record and
+ * do not gate; the review's verdict is the judge's, combined with critique's (critique still blocks on its own).
+ */
+function checkJudgedReview(result: ReviewResult): void {
+  const ids = result.reviewers.map(entry => entry.reviewer_id)
+  const judgeAt = ids.indexOf(JUDGE_REVIEWER_ID)
+  const critiqueAt = ids.indexOf(CRITIQUE_REVIEWER_ID)
+  const builtins = ids.filter(reviewer => reviewer !== JUDGE_REVIEWER_ID && reviewer !== CRITIQUE_REVIEWER_ID)
+  if (builtins.length === 0) throw new Error('A judged review lists the built-in reviewers before the judge')
+  if (ids.slice(judgeAt + 1).some(reviewer => reviewer !== CRITIQUE_REVIEWER_ID) || (critiqueAt !== -1 && critiqueAt < judgeAt))
+    throw new Error('A judged review lists the built-in reviewers, then judge, then critique')
+  const judge = result.reviewers[judgeAt]
+  if (judge.verdict === null) throw new Error('The judge entry of a judged review carries no verdict')
+  if (judge.verdict === 'approved' && judge.findings.some(isBlockingFinding)) throw new Error('The judge approved with an unresolved P0/P1 finding')
+  const critique = critiqueAt === -1 ? null : result.reviewers[critiqueAt]
+  const expected = judge.verdict === 'approved' && (critique === null || critique.verdict === 'approved') ? 'approved' : 'blocked'
+  if (result.verdict !== expected) throw new Error(`A judged review's verdict follows the judge and critique (${expected}), not ${result.verdict}`)
+  for (const finding of result.findings) {
+    if (finding.reviewer !== JUDGE_REVIEWER_ID && finding.reviewer !== CRITIQUE_REVIEWER_ID) throw new Error(`A judged review carries only the judge's and critique's findings, not ${finding.reviewer}'s`)
+  }
+}
+
+/**
+ * The review result's cross-field rules. `context` is the run's plan context ([G26]): the judged rule applies only when it
+ * says the plan pins a judged panel **and** the record lists `judge`; a record listing `judge` without that context is
+ * refused (the id is reserved), and every other record is validated exactly as before.
+ */
+export function validateReviewResult(input: unknown, context?: ReviewPlanContext): ReviewResult {
   const result = reviewResultSchema.parse(input)
+  const judged = judgeDecided(result, context)
+  if (!judged && result.reviewers.some(entry => entry.reviewer_id === JUDGE_REVIEWER_ID))
+    throw new Error('Reviewer "judge" decides only on a run whose plan pins a judged panel')
+  if (result.judged_panel === true && context?.judgedPanel !== true)
+    throw new Error('The review says its run pins a judged panel, but the plan context does not')
   if (result.verdict === 'approved' && result.findings.some(isBlockingFinding))
     throw new Error('An approved review cannot carry an unresolved P0/P1 finding')
   if (result.diff !== null && result.diff.kind !== 'patch') throw new Error('The review diff must be a patch artifact')
@@ -1074,9 +1270,12 @@ export function validateReviewResult(input: unknown): ReviewResult {
   const sessions = result.reviewers.map(entry => entry.session_id).filter(session => session !== null)
   if (new Set(sessions).size !== sessions.length) throw new Error('Reviewers must be distinct sessions')
   if (result.reviewers.some(entry => entry.transport !== result.reviewer.transport)) throw new Error('Every reviewer uses the run-wide transport')
-  if (result.verdict === 'approved' && result.reviewers.some(entry => entry.verdict !== 'approved')) throw new Error('An approved review requires every reviewer\'s approval')
+  // On a judged review the built-in entries are advisory: their verdicts are kept for the record and gate nothing.
+  const gating = judged ? result.reviewers.filter(entry => entry.reviewer_id === JUDGE_REVIEWER_ID || entry.reviewer_id === CRITIQUE_REVIEWER_ID) : result.reviewers
+  if (result.verdict === 'approved' && gating.some(entry => entry.verdict !== 'approved')) throw new Error('An approved review requires every reviewer\'s approval')
+  if (judged) checkJudgedReview(result)
   for (const entry of result.reviewers) {
-    if (entry.verdict === 'approved' && entry.findings.some(isBlockingFinding) && result.verdict === 'approved') throw new Error(`Reviewer ${entry.reviewer_id} approved with an unresolved P0/P1 finding`)
+    if (gating.includes(entry) && entry.verdict === 'approved' && entry.findings.some(isBlockingFinding) && result.verdict === 'approved') throw new Error(`Reviewer ${entry.reviewer_id} approved with an unresolved P0/P1 finding`)
     if (entry.status === 'accepted' && entry.verdict === null) throw new Error(`Reviewer ${entry.reviewer_id} was accepted without a verdict`)
     const own = result.findings.filter(finding => finding.reviewer === entry.reviewer_id)
     if (JSON.stringify(own) !== JSON.stringify(entry.findings)) throw new Error(`Reviewer ${entry.reviewer_id} findings differ from the combined list`)
@@ -1204,6 +1403,15 @@ export function validatePanelResults(input: unknown): PanelResults {
   for (const panel of result.panels) {
     unique(panel.findings.map(finding => finding.id), `finding ids in panel ${panel.id}`)
     if (panel.status === 'pending' && (panel.findings.length > 0 || panel.started_at !== null)) throw new Error(`Panel ${panel.id}: a pending panel has no findings and no start time yet`)
+    // 1.1.0: one seat per name and prefix, one ruling per J id, one reviewer finding per id.
+    if ('judged' in panel) {
+      unique(panel.providers.map(seat => seat.name), `seat names in panel ${panel.id}`)
+      unique(panel.providers.map(seat => seat.prefix), `seat prefixes in panel ${panel.id}`)
+      if (panel.judge) {
+        unique(panel.judge.rulings.map(ruling => ruling.id), `ruling ids in panel ${panel.id}`)
+        unique(panel.judge.reviewer_findings.map(finding => finding.id), `reviewer finding ids in panel ${panel.id}`)
+      }
+    }
   }
   return result
 }

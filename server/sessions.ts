@@ -1,7 +1,7 @@
 import fs, { type FileHandle } from 'node:fs/promises'
 import { isAbsolute, join, relative, sep } from 'node:path'
 import { z } from 'zod'
-import { DEFAULT_REVIEWER_ID, type FixLoop, type PanelResults, type ReviewResult, type WorkflowDefinition } from '../contracts/projects/v1.ts'
+import { DEFAULT_REVIEWER_ID, JUDGE_REVIEWER_ID, type FixLoop, type PanelResults, type ReviewResult, type WorkflowDefinition } from '../contracts/projects/v1.ts'
 import type { RunSnapshot } from '../contracts/workflow/v1.ts'
 import {
   laneReviewSchema, nightShiftDecisionSchema, sessionRowSchema, validateSessions,
@@ -221,6 +221,11 @@ export function projectedReviewerIds(input: Pick<SessionNodeInput, 'reviewSectio
 }
 
 function drawnReviewerIds(input: Pick<SessionNodeInput, 'reviewSection' | 'exportAtLeast140' | 'rawReviewers' | 'planReviewerIds' | 'reviewNodeStatus'>): string[] {
+  // The judge of a judged review gets no card ([L12] B2): it is reached through the Panel and Review surfaces, as its one row is the panel's.
+  return reviewerIdsToDraw(input).filter(reviewerId => reviewerId !== JUDGE_REVIEWER_ID)
+}
+
+function reviewerIdsToDraw(input: Pick<SessionNodeInput, 'reviewSection' | 'exportAtLeast140' | 'rawReviewers' | 'planReviewerIds' | 'reviewNodeStatus'>): string[] {
   if (input.reviewSection) return (input.rawReviewers ?? []).map(entry => entry.reviewer_id)
   if (input.reviewNodeStatus === null || input.reviewNodeStatus === 'pending') return []
   if (input.planReviewerIds.length > 0) return [...input.planReviewerIds]
@@ -554,6 +559,11 @@ export type SessionsInput = {
   nodes: SessionNodeInput
   fixLoop: FixLoop | null
   panels: PanelResults | null
+  /**
+   * The archived round `k`'s panel record (`panel.round-<k>.json`, where `archive_review` moved that round's `panel.json`),
+   * validated as the panels route validates a live record; null when absent or invalid. Omitted: no archived judge rows.
+   */
+  archivedPanel?: (round: number) => Promise<PanelResults | null>
   /** The `lane_review:` event's words on `verify_<lane>`, keyed `<lane>:<round>` (the latest per round); for the no-fix reason. */
   laneReviewEventWords: ReadonlyMap<string, string>
   nightShift: NightShiftRead[]
@@ -741,6 +751,8 @@ async function reviewerRows(input: SessionsInput): Promise<SessionRow[]> {
   const round = decided ? input.review!.round ?? input.review!.attempt : archived + 1
   const ids = decided ? input.review!.reviewers.map(entry => entry.reviewer_id) : drawnReviewerIds(input.nodes)
   for (const id of ids) {
+    // The judge of a judged review is a panel print job: its one row is the panel's judge row (panelRows), never a reviewer's.
+    if (id === JUDGE_REVIEWER_ID) continue
     const entry = decided ? input.review!.reviewers.find(candidate => candidate.reviewer_id === id) ?? null : null
     const files = reviewFiles(id)
     const auto = automaticReviewSchema.safeParse(await readJson(input.directory, [files.auto]))
@@ -773,6 +785,7 @@ async function reviewerRows(input: SessionsInput): Promise<SessionRow[]> {
     if (!parsed.success) continue
     for (const previous of parsed.data.reviewers ?? []) {
       const id = previous.reviewer_id
+      if (id === JUDGE_REVIEWER_ID) continue
       const auto = automaticReviewSchema.safeParse(await readJson(input.directory, [reviewFiles(id, k).auto]))
       const receipt = auto.success ? auto.data : null
       const tagged = (parsed.data.findings ?? []).filter(finding => finding.reviewer === id)
@@ -820,10 +833,15 @@ async function printJobRows(input: SessionsInput, prefix: 'sidecar' | 'attack'):
   return rows
 }
 
-function panelRows(input: SessionsInput): SessionRow[] {
+async function panelRows(input: SessionsInput): Promise<SessionRow[]> {
   const rows: SessionRow[] = []
   const node = input.nodes.panelStatus !== null && input.definition.nodes.some(candidate => candidate.node_id === 'review') ? PANEL_NODE_ID : null
-  ;(input.panels?.panels ?? []).forEach((panel, panelIndex) => {
+  const panels: readonly AnyPanel[] = input.panels?.panels ?? []
+  for (const [panelIndex, panel] of panels.entries()) {
+    if ('judged' in panel) {
+      rows.push(...await judgedPanelRows(input, panel, panelIndex, node))
+      continue
+    }
     panel.providers.forEach((provider, providerIndex) => {
       const name = provider.model ?? provider.transport
       // The cost kind follows the provider's transport: a `claude` provider is metered even with an explicit model ([P11]).
@@ -841,8 +859,85 @@ function panelRows(input: SessionsInput): SessionRow[] {
         cost_usd: cost, cost_kind: costKind(cost, covered),
       }))
     })
-  })
+  }
+  // Earlier review rounds: each archived round's judge keeps its row (a judged or a fallback judge alike), from that round's
+  // `panel.round-<k>.json` judge object whenever it names a session ([L9] T1; PRD 8, "every session of a run is listed").
+  // The archived `review.round-<k>.json` is not the source: a fallback round's record lists no `judge` entry.
+  if (input.archivedPanel) {
+    const archived = await archivedRoundCount(input)
+    for (let k = 1; k <= archived; k += 1) {
+      const record = await input.archivedPanel(k)
+      for (const [panelIndex, panel] of (record?.panels ?? []).entries()) {
+        if (!('judged' in panel) || !panel.judge || sessionIdOf(panel.judge.session_id) === null) continue
+        rows.push(await judgeRow(input, panel.judge, node, {
+          key: `panel:round-${k}:${panelIndex}:judge`, label: `Panel · ${panel.stage} · judge · round ${k}`, round: k,
+        }))
+      }
+    }
+  }
   return rows
+}
+
+type AnyPanel = PanelResults['panels'][number]
+type JudgedPanel = Extract<AnyPanel, { judged: true }>
+
+/** A seat's status in the panel's words (features/review-panel-registry/prd.md 8), kept beside its normalised row status. */
+const SEAT_WORDS: Record<JudgedPanel['providers'][number]['status'], string> = {
+  pending: 'pending', running: 'running', ok: 'ok', timed_out: 'timed out', error: 'error', parse_failed: 'parse failed',
+  unavailable: 'unavailable', auth_required: 'not logged in', usage_limit: 'usage limit reached', model_mismatch: 'wrong model served',
+}
+
+/**
+ * A judged panel's rows (panel record 1.1.0, PRD 8): one per seat, none with a resume command (the record keeps no seat
+ * session, and a `cli` seat is no Claude session), and one for the judge, a Claude print job whose throwaway worktree is
+ * removed, so its resume command is the bare form without a `cd`. The record keeps no per-seat times: a seat that ran spans
+ * the seats' wait (the panel's start to the judge's start), as a report-only provider spans its panel.
+ */
+async function judgedPanelRows(input: SessionsInput, panel: JudgedPanel, panelIndex: number, node: string | null): Promise<SessionRow[]> {
+  const rows: SessionRow[] = []
+  const judge = panel.judge
+  const seatsStarted = iso(panel.started_at)
+  const seatsEnded = iso(judge?.started_at ?? panel.ended_at)
+  panel.providers.forEach((seat, seatIndex) => {
+    const ran = seat.status !== 'pending' && seat.status !== 'unavailable'
+    const findings = panel.findings.filter(finding => seat.finding_ids.includes(finding.id))
+    const cost = nonNeg(seat.cost_usd)
+    const startedAt = ran ? seatsStarted : null
+    const endedAt = ran && seat.status !== 'running' ? seatsEnded : null
+    rows.push(row({
+      key: `panel:${panelIndex}:${seatIndex}`, role: 'panel_provider', label: `Panel · ${panel.stage} · ${seat.name}`, node_id: node,
+      transport: seat.transport, model: seat.model,
+      status: seat.status === 'ok' ? 'succeeded' : seat.status === 'running' ? 'running' : seat.status === 'pending' || seat.status === 'unavailable' ? 'unknown' : seat.status === 'timed_out' ? 'stopped' : 'failed',
+      verdict: seat.status === 'ok' || seat.status === 'pending' || seat.status === 'running' ? null : seat.status === 'unavailable' && seat.error ? `unavailable: ${seat.error}` : SEAT_WORDS[seat.status],
+      findings: ran ? countSeverities(findings) : null, started_at: startedAt, ended_at: endedAt, duration_seconds: spanSeconds(startedAt, endedAt),
+      cost_usd: cost, cost_kind: costKind(cost, isCovered(seat.transport)),
+    }))
+  })
+  if (judge) rows.push(await judgeRow(input, judge, node, { key: `panel:${panelIndex}:judge`, label: `Panel · ${panel.stage} · judge` }))
+  return rows
+}
+
+/** The judge's row: a Claude print job whose throwaway worktree is removed, so its resume command is the bare form. */
+async function judgeRow(
+  input: SessionsInput, judge: NonNullable<JudgedPanel['judge']>, node: string | null,
+  fields: Pick<SessionRow, 'key' | 'label'> & { round?: number },
+): Promise<SessionRow> {
+  const sessionId = sessionIdOf(judge.session_id)
+  const cost = nonNeg(judge.cost_usd)
+  const startedAt = iso(judge.started_at)
+  const endedAt = iso(judge.ended_at)
+  const confirmed = judge.rulings.filter(ruling => ruling.ruling === 'confirmed')
+  const decided = judge.status === 'judged' && !judge.fallback
+  return row({
+    ...fields, role: 'panel_provider', node_id: node,
+    transport: 'print', model: judge.model,
+    status: judge.status === 'judged' ? 'succeeded' : judge.status === 'running' ? 'running' : judge.status === 'pending' ? 'unknown' : judge.status === 'timed_out' ? 'stopped' : 'failed',
+    verdict: decided ? (confirmed.some(ruling => ruling.severity !== 'P2') ? 'blocked' : 'approved') : judge.fallback ? 'fallback: today\'s rule decided' : null,
+    findings: decided ? countSeverities(confirmed) : null, started_at: startedAt, ended_at: endedAt, duration_seconds: spanSeconds(startedAt, endedAt),
+    cost_usd: cost, cost_kind: costKind(cost, false), session_id: sessionId,
+    // The judge's worktree is removed after it ends: the bare resume form, never a `cd` into it.
+    resume: await composeResume(sessionId, null, input.resume),
+  })
 }
 
 /**
@@ -938,7 +1033,7 @@ export async function readSessions(raw: SessionsInput): Promise<Sessions> {
     ...(await reviewerRows(input)),
     ...(await printJobRows(input, 'sidecar')),
     ...(await printJobRows(input, 'attack')),
-    ...panelRows(input),
+    ...(await panelRows(input)),
     ...nightShiftRows(input),
   ]
   const seen = new Set<string>()

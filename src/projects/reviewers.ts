@@ -4,6 +4,7 @@
  * a single-reviewer case: the combined verdict is unanimous, and a blocked run is explained by the reviewers that caused it.
  * Pure helpers, kept out of the component file so it only exports components.
  */
+import { judgeDecided, JUDGE_REVIEWER_ID, servedReviewContext } from '../../contracts/projects/v1.ts'
 import { isBlockingFinding, type ReviewFinding, type ReviewResult } from './api.ts'
 
 export type Reviewer = ReviewResult['reviewers'][number]
@@ -88,4 +89,24 @@ export function blockedByWording(review: Pick<ReviewResult, 'verdict' | 'reviewe
     : `Blocked by ${list(reasons)}.`
   const tail = stopped.length === 0 ? '' : ` ${list(stopped)} ${stopped.length === 1 ? 'was' : 'were'} superseded: stopped after that decision, no verdict recorded.`
   return head + tail
+}
+
+/** The label of a built-in reviewer on a judged review (features/review-panel-registry/prd.md 8). */
+export const ADVISORY_WORDING = 'advisory (the judge decided)'
+/** The label of the judge entry on a judged review. */
+export const DECIDING_WORDING = 'deciding reviewer'
+
+/**
+ * Whether the judge decided the review: the served result says its run pins a judged panel and it lists `judge`. A fallback
+ * record on a judged run (no `judge` entry) is decided by its built-in reviewers, as today, and labels none advisory.
+ */
+export function isJudgedReview(review: Pick<ReviewResult, 'reviewers' | 'judged_panel'>): boolean {
+  return judgeDecided(review, servedReviewContext(review))
+}
+
+/** A reviewer's part in a judged review: the judge decides, critique keeps its own blocking, the built-ins are advisory; null otherwise. */
+export function reviewerRole(review: Pick<ReviewResult, 'reviewers' | 'judged_panel'>, reviewerId: string): 'deciding' | 'advisory' | null {
+  if (!isJudgedReview(review)) return null
+  if (reviewerId === JUDGE_REVIEWER_ID) return 'deciding'
+  return reviewerId === 'critique' ? null : 'advisory'
 }

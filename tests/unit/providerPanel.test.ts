@@ -124,6 +124,7 @@ describe('providers: name, cost line, context and duration', () => {
 describe('panelsAtStage', () => {
   test('the challenge view shows only the challenge-stage panels; the run page every panel', () => {
     const record = PANEL_RESULTS[RUN_PANEL_CHALLENGE]
+    assert.ok(record.version === '1.0.0')
     assert.deepEqual(panelsAtStage(record.panels, 'challenge').map(panel => panel.id), ['challenge-panel'])
     assert.deepEqual(panelsAtStage(record.panels, 'review').map(panel => panel.id), ['review-panel'])
     assert.deepEqual(panelsAtStage(panelRecord.panels, 'challenge'), [])

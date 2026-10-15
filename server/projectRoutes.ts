@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyReply } from 'fastify'
 import { z } from 'zod'
-import { schemas, validateAttackResult, validatePanelResults, validateReviewResult, validateRunInputs, validateSidecarLedger } from '../contracts/projects/v1.ts'
+import { schemas, servedReviewContext, validateAttackResult, validatePanelResults, validateReviewResult, validateRunInputs, validateSidecarLedger } from '../contracts/projects/v1.ts'
 import { validateSessions } from '../contracts/projects/sessions.ts'
 import { eventSchema, workerResultSchema } from '../contracts/workflow/v1.ts'
 import { ID_PATTERN } from './projectsConfig.ts'
@@ -177,7 +177,7 @@ export async function projectRoutes(scope: FastifyInstance, options: ProjectRout
     const runId = requireId(params.run_id, 'run')
     const attempt = parseAttempt(params.attempt)
     const review = await store.reviewResult(runScope, runId, attempt)
-    return conform(schemas.reviewResult, crossChecked(() => validateReviewResult(review), log), log)
+    return conform(schemas.reviewResult, crossChecked(() => validateReviewResult(review, servedReviewContext(review)), log), log)
   })
 
   scope.get(paths.inputs, async request => {

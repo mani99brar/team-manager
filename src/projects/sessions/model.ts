@@ -4,7 +4,9 @@
  * night-shift block read. Every value comes from the served payload; where it holds nothing a value is null and the UI says
  * "not recorded". Pure, so the unit tests read the same cards. Nothing here renders a transcript or an absolute path.
  */
-import type { LaneReview, NightShiftDecision, PanelResults, SessionRow, Sessions, SessionTotals } from '../api.ts'
+import type { JudgedPanelEntry, PanelEntry, PanelProvider, PanelSeat } from '../../../contracts/projects/v1.ts'
+import { judgedOpenP01 } from '../node/judgedPanel.ts'
+import type { LaneReview, NightShiftDecision, SessionRow, Sessions, SessionTotals } from '../api.ts'
 import { formatSpan } from '../time.ts'
 import type { Tone } from '../tone.ts'
 
@@ -168,8 +170,8 @@ export function laneResultText(review: LaneReview): string {
   return `${p0} P0, ${p1} P1`
 }
 
-/** The panel record's fields the card reads (the panels route, contract 1.9.0). */
-export type PanelRecordView = Pick<PanelResults, 'panels'>
+/** The panel record's fields the card reads (the panels route, contract 1.9.0): a 1.0.0 record's panels or a 1.1.0 record's. */
+export type PanelRecordView = { panels: readonly (PanelEntry | JudgedPanelEntry)[] }
 
 /**
  * The panel's state word from its own recorded status ([L12] 1), never from its provider rows: running while any panel runs,
@@ -193,9 +195,12 @@ export function panelWord(record: PanelRecordView): 'running' | 'failed' | 'not 
 export function panelCard(record: PanelRecordView | null): StageCard | null {
   if (record === null || record.panels.length === 0) return null
   const word = panelWord(record)
-  const providers = record.panels.flatMap(panel => panel.providers)
+  const providers = record.panels.flatMap((panel): (PanelProvider | PanelSeat)[] => [...panel.providers])
   const answered = providers.filter(provider => provider.status === 'ok').length
-  const open = record.panels.flatMap(panel => panel.findings).filter(finding => finding.accepted && (finding.severity === 'P0' || finding.severity === 'P1')).length
+  // A judged panel (1.1.0) stands for its judge's confirmed P0/P1 rulings; a report-only one for the findings its overlap rule accepted.
+  const open = record.panels.reduce((sum, panel) => sum + ('judged' in panel
+    ? judgedOpenP01(panel) ?? 0
+    : panel.findings.filter(finding => finding.accepted && (finding.severity === 'P0' || finding.severity === 'P1')).length), 0)
   const first = [...record.panels].filter(panel => panel.started_at !== null).sort((a, b) => a.started_at!.localeCompare(b.started_at!))[0] ?? null
   const seconds = first?.started_at && first.ended_at ? (Date.parse(first.ended_at) - Date.parse(first.started_at)) / 1000 : NaN
   const plural = (n: number) => `${n} provider${n === 1 ? '' : 's'}`

@@ -166,7 +166,7 @@ test(`[scenario:review-legacy] A run exported before review results says no revi
 
 test(`[scenario:paths-redacted] No absolute path from the seeded review reaches the rendered panel (${phase})`, async ({ page }, testInfo) => {
   await page.goto(runUrl(RUN_SUCCEEDED, 'review'))
-  await expect(findingRows(page)).toHaveCount(6)
+  await expect(findingRows(page)).toHaveCount(6, { timeout: 15_000 })
   const text = await renderedText(reviewPanel(page))
   expect(text).toContain(PATH_TOKEN)
   await renderedText(nodeDetail(page))

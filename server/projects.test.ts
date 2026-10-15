@@ -5,6 +5,7 @@ import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, utimes, wr
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
+import { fallbackReview, judgedPlan, panelFallbackExample, panelJudgedExample, reportOnlyPlan, reviewJudgedExample, type RawReview } from '../contracts/projects/judgedExamples.ts'
 import { acceptedRecordSchema, schemas as projectSchemas, validateAttackResult, validateDefinition, validatePanelResults, validateReviewResult, validateRunDetail, validateRunInputs, validateSidecarLedger, type PanelRecord, type RunDetail, type RunInputs } from '../contracts/projects/v1.ts'
 import { eventSchema, validateWorkerResult, type WorkflowEvent } from '../contracts/workflow/v1.ts'
 import { ATTACK_TWINS, RUN_ATTACK_WAITING } from '../tests/project-workflows/fixtures/ux-attack.ts'
@@ -118,6 +119,8 @@ type RunSpec = {
   fixLoop?: unknown
   /** Further files of the run directory (the fix loop's live records), by name. */
   files?: Record<string, string | Buffer>
+  /** Further keys of `plan.json` (a judged run's `panels`), merged over the defaults. */
+  plan?: Record<string, unknown>
 }
 
 /** One run directory exactly as workflow/export_state.py and workflow/checks.py persist it. */
@@ -175,7 +178,7 @@ async function writeRun(root: string, spec: RunSpec): Promise<string> {
     await writeFile(join(dir, 'plan.json'), json({
       run_id: spec.planRunId ?? runId, repository: '/synthetic/repository', base_commit: BASE, allow_edits: true, mode: 'interactive',
       nodes: { ui: { worktree: join(dir, 'worktree-ui') }, adapter: { worktree: join(dir, 'worktree-adapter') } },
-      policy_sha256: 'c'.repeat(64), created_at: created, source_branch: 'feature/synthetic',
+      policy_sha256: 'c'.repeat(64), created_at: created, source_branch: 'feature/synthetic', ...spec.plan,
     }))
   }
   const events = spec.events ?? []
@@ -3718,4 +3721,167 @@ test('[accepted] the engine\'s accepted*.json examples parse with the viewer\'s 
   // The candidate phase has the engine's example; an earlier phase may not have it yet.
   if (process.env.WORKFLOW_VERIFICATION_PHASE === 'candidate') assert.ok(files.length > 0, 'no contracts/workflow/examples/accepted*.json example exists')
   for (const name of files) acceptedRecordSchema.parse(JSON.parse(readFileSync(new URL(name, directory), 'utf8')))
+})
+
+// ---- The judged review panel (features/review-panel-registry/prd.md 7.4, 8): panel record 1.1.0 and the judged review ---------
+
+/** A judged (or fallback) review.json as the export's 1.4.0 review section, its lanes mapped onto this registry's (engine → adapter, viewer → ui). */
+function judgedReviewSection(raw: RawReview): ReviewSection {
+  const lane = (worker: string | undefined) => worker === 'engine' ? 'adapter' : worker === 'viewer' ? 'ui' : worker ?? null
+  const findings = raw.findings.map(item => ({ severity: item.severity, message: item.message, disposition: item.disposition, worker: lane(item.worker), requirement: item.requirement ?? null, reviewer: item.reviewer }))
+  return reviewSection({
+    reviewer_session_id: raw.reviewer, verdict: raw.verdict, findings, diff: null,
+    reviewers: raw.reviewers.map(entry => ({
+      reviewer_id: entry.reviewer_id, transport: 'native', session_id: entry.session_id, verdict: entry.verdict, findings: findings.filter(item => item.reviewer === entry.reviewer_id),
+      launched_at: null, accepted_at: entry.accepted_at, status: entry.verdict === 'approved' ? 'accepted' : 'blocked',
+    })),
+  })
+}
+
+test('[judged panel] the live read and the export fallback both serve a 1.1.0 record with its judge object; a 1.0.0 record is served unchanged', async () => {
+  await harness(async ({ app, runsRoot }) => {
+    const root = runsRoot('alpha', 'main')
+    await writeRun(root, panelRun({ runId: 'judged-export', panels: panelJudgedExample(), plan: { panels: judgedPlan().panels } }))
+    await writeRun(root, panelRun({ runId: 'judged-live', panels: panelJudgedExample(), livePanel: JSON.stringify(panelFallbackExample()), plan: { panels: judgedPlan().panels } }))
+    // A live 1.1.0 record outside the contract (transport foo) is skipped alone: the export's record is served.
+    const foreign = panelFallbackExample()
+    ;(foreign.panels[0].providers[0] as { transport: string }).transport = 'foo'
+    await writeRun(root, panelRun({ runId: 'judged-foreign-live', panels: panelJudgedExample(), livePanel: JSON.stringify(foreign), plan: { panels: judgedPlan().panels } }))
+    await writeRun(root, panelRun({ runId: 'report-only', panels: await panelOf() }))
+    const exported = validatePanelResults((await get(app, panelsRoute('judged-export'))).json())
+    assert.ok(exported.version === '1.1.0')
+    assert.equal(exported.source, 'export')
+    assert.deepEqual(exported.panels[0].judge, panelJudgedExample().panels[0].judge)
+    assert.deepEqual(exported.panels[0].providers, panelJudgedExample().panels[0].providers)
+    const live = validatePanelResults((await get(app, panelsRoute('judged-live'))).json())
+    assert.ok(live.version === '1.1.0')
+    assert.equal(live.source, 'live')
+    assert.deepEqual(live.panels[0].judge, panelFallbackExample().panels[0].judge)
+    assert.deepEqual(live.panels[0].providers.map(seat => seat.status), ['ok', 'timed_out', 'auth_required', 'unavailable'])
+    const skipped = validatePanelResults((await get(app, panelsRoute('judged-foreign-live'))).json())
+    assert.ok(skipped.version === '1.1.0')
+    assert.deepEqual([skipped.source, skipped.panels[0].judge?.status], ['export', 'judged'])
+    const old = validatePanelResults((await get(app, panelsRoute('report-only'))).json())
+    const { contract_version: _version, source: _source, ...record } = old
+    void _version; void _source
+    assert.deepEqual(record, await panelOf())
+    // The judged runs keep their graph: the panel node exists as for a report-only panel.
+    for (const runId of ['judged-export', 'judged-live']) {
+      const detail = validateRunDetail((await get(app, url('alpha', 'main', runId))).json())
+      assert.ok(detail.definition.nodes.some(node => node.node_id === 'panel'), runId)
+    }
+  })
+})
+
+test('[judged panel] a judged review.json validates on a run whose plan pins a judged panel and is refused on a legacy or report-only plan (a run without plan.json is refused whole already)', async () => {
+  await harness(async ({ app, runsRoot }) => {
+    const root = runsRoot('alpha', 'main')
+    const section = judgedReviewSection(reviewJudgedExample())
+    await writeRun(root, panelRun({ runId: 'judged-ok', panels: panelJudgedExample(), review: section, plan: { panels: judgedPlan().panels } }))
+    await writeRun(root, panelRun({ runId: 'judged-legacy', panels: null, review: section }))
+    await writeRun(root, panelRun({ runId: 'judged-report-only', panels: await panelOf(), review: section, plan: { panels: reportOnlyPlan().panels } }))
+    const okResponse = await get(app, url('alpha', 'main', 'judged-ok', '/reviews/1'))
+    assert.equal(okResponse.status, 200, okResponse.body)
+    const review = validateReviewResult(okResponse.json(), { judgedPanel: true })
+    assert.equal(review.judged_panel, true)
+    assert.equal(review.verdict, 'blocked')
+    assert.deepEqual(review.reviewers.map(entry => [entry.reviewer_id, entry.verdict]), [['general', 'blocked'], ['coverage', 'blocked'], ['judge', 'blocked']])
+    assert.deepEqual(review.findings.map(item => [item.reviewer, item.worker]), [['judge', 'adapter'], ['judge', 'ui']])
+    for (const runId of ['judged-legacy', 'judged-report-only']) {
+      const response = await get(app, url('alpha', 'main', runId))
+      assertError(response, 500, 'RUN_STORAGE_INVALID')
+      assert.match((response.json() as { error: { message: string } }).error.message, /review section violates the contract \(Reviewer "judge" decides only on a run whose plan pins a judged panel\)/, runId)
+    }
+  })
+})
+
+test('[judged panel] a fallback review.json on a judged run keeps the built-in reviewers deciding and is never labelled advisory', async () => {
+  await harness(async ({ app, runsRoot }) => {
+    const root = runsRoot('alpha', 'main')
+    await writeRun(root, panelRun({ runId: 'judged-fallback', panels: panelFallbackExample(), review: judgedReviewSection(fallbackReview()), plan: { panels: judgedPlan().panels } }))
+    const body = (await get(app, url('alpha', 'main', 'judged-fallback', '/reviews/1'))).json()
+    const review = validateReviewResult(body, { judgedPanel: true })
+    assert.deepEqual(review.reviewers.map(entry => [entry.reviewer_id, entry.verdict]), [['general', 'blocked'], ['coverage', 'blocked']])
+    assert.deepEqual(review.findings.map(item => item.reviewer), ['general', 'coverage'])
+    // The served flag says the plan pins a judged panel; with no judge entry the judged rule (and the advisory label) never applies.
+    assert.equal(review.judged_panel, true)
+    assert.equal(review.reviewers.some(entry => entry.reviewer_id === 'judge'), false)
+    // The same record validates without any context too: exactly today's rule.
+    assert.doesNotThrow(() => validateReviewResult({ ...review, judged_panel: undefined }))
+  })
+})
+
+test('[judged panel] the sessions list has a row per seat (no resume) and a judge row with the bare resume command; no absolute path', async () => {
+  await harness(async ({ app, runsRoot }) => {
+    const root = runsRoot('alpha', 'main')
+    await writeRun(root, panelRun({ runId: 'judged-sessions', panels: panelJudgedExample(), review: judgedReviewSection(reviewJudgedExample()), plan: { panels: judgedPlan().panels } }))
+    const response = await get(app, url('alpha', 'main', 'judged-sessions', '/sessions'))
+    assert.equal(response.status, 200, response.body)
+    const rows = (response.json() as { sessions: { key: string; label: string; transport: string | null; model: string | null; status: string; resume: { dir: string | null; command: string } | null; session_id: string | null }[] }).sessions
+    // The judge has one row, the panel's: no reviewer row repeats its session.
+    assert.deepEqual(rows.filter(row => row.session_id === '5f0c2a8e-7d4b-4f1e-9a63-2b8d1c0e4f71').map(row => row.key), ['panel:0:judge'])
+    const panelRows = rows.filter(row => row.key.startsWith('panel:'))
+    assert.deepEqual(panelRows.map(row => [row.label, row.transport, row.status, row.resume?.command ?? null]), [
+      ['Panel · review · claude', 'claude', 'succeeded', null],
+      ['Panel · review · gpt', 'pi', 'succeeded', null],
+      ['Panel · review · muse', 'cli', 'succeeded', null],
+      ['Panel · review · judge', 'print', 'succeeded', 'claude --resume 5f0c2a8e-7d4b-4f1e-9a63-2b8d1c0e4f71'],
+    ])
+    assert.equal(panelRows.at(-1)!.resume!.dir, null)
+    assert.doesNotMatch(response.body, new RegExp(root.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+  })
+})
+
+test('[judged panel] a judged run\'s graph draws no reviewer-judge card; the built-in reviewers and the panel keep theirs ([L12] B2)', async () => {
+  await harness(async ({ app, runsRoot }) => {
+    const root = runsRoot('alpha', 'main')
+    await writeRun(root, panelRun({ runId: 'judged-graph', panels: panelJudgedExample(), review: judgedReviewSection(reviewJudgedExample()), plan: { panels: judgedPlan().panels } }))
+    const detail = validateRunDetail((await get(app, url('alpha', 'main', 'judged-graph'))).json())
+    const ids = (nodes: readonly { node_id: string }[]) => nodes.map(node => node.node_id)
+    for (const nodes of [detail.definition.nodes, detail.snapshot.nodes]) {
+      assert.ok(!ids(nodes).includes('reviewer-judge'), `reviewer-judge drawn: ${ids(nodes).join(', ')}`)
+      assert.ok(['reviewer-general', 'reviewer-coverage', 'panel'].every(id => ids(nodes).includes(id)), ids(nodes).join(', '))
+    }
+    // The judge stays reachable: its session row points at the panel node, and the review still names it the decider.
+    const rows = ((await get(app, url('alpha', 'main', 'judged-graph', '/sessions'))).json() as { sessions: { key: string; node_id: string | null }[] }).sessions
+    assert.deepEqual(rows.filter(row => row.key === 'panel:0:judge').map(row => row.node_id), ['panel'])
+    const review = validateReviewResult((await get(app, url('alpha', 'main', 'judged-graph', '/reviews/1'))).json(), { judgedPanel: true })
+    assert.ok(review.reviewers?.some(entry => entry.reviewer_id === 'judge'))
+  })
+})
+
+test('[judged panel] every review round keeps its judge row: an archived judged and an archived fallback round from panel.round-<k>.json beside the current round ([L9] T1)', async () => {
+  await harness(async ({ app, runsRoot }) => {
+    const root = runsRoot('alpha', 'main')
+    // Round 1 was judged (blocked by J1), archived by the fix loop; round 2 is the current, judged round.
+    const judgedRound = panelJudgedExample()
+    Object.assign(judgedRound.panels[0].judge!, { session_id: '1a2b3c4d-0000-4000-8000-000000000001', cost_usd: 3.25 })
+    // A fallback round: the judge ran and timed out, so review.round-1.json lists no `judge` entry; its session still counts.
+    const fallbackRound = panelFallbackExample()
+    Object.assign(fallbackRound.panels[0].judge!, { session_id: '1a2b3c4d-0000-4000-8000-000000000002', cost_usd: 6.5 })
+    const runs = [['judged-rounds', judgedRound, reviewJudgedExample()], ['fallback-rounds', fallbackRound, fallbackReview()]] as const
+    for (const [runId, archivedPanel, archivedReview] of runs) {
+      await writeRun(root, panelRun({
+        runId, panels: panelJudgedExample(), review: judgedReviewSection(reviewJudgedExample()), plan: { panels: judgedPlan().panels },
+        files: { 'review.round-1.json': JSON.stringify(archivedReview), 'panel.round-1.json': JSON.stringify(archivedPanel) },
+      }))
+    }
+    type Row = { key: string; label: string; round: number | null; status: string; verdict: string | null; cost_usd: number | null; session_id: string | null; resume: { dir: string | null; command: string } | null }
+    const expected = {
+      'judged-rounds': ['1a2b3c4d-0000-4000-8000-000000000001', 'succeeded', 'blocked', 3.25],
+      'fallback-rounds': ['1a2b3c4d-0000-4000-8000-000000000002', 'stopped', 'fallback: today\'s rule decided', 6.5],
+    } as const
+    for (const [runId] of runs) {
+      const response = await get(app, url('alpha', 'main', runId, '/sessions'))
+      assert.equal(response.status, 200, response.body)
+      const judges = (response.json() as { sessions: Row[] }).sessions.filter(row => row.key.endsWith(':judge'))
+      const [sessionId, status, verdict, cost] = expected[runId]
+      const current = panelJudgedExample().panels[0].judge!
+      assert.deepEqual(judges.map(row => [row.key, row.label, row.round, row.status, row.verdict, row.cost_usd, row.session_id, row.resume?.command ?? null, row.resume?.dir ?? null]).sort(), [
+        ['panel:0:judge', 'Panel · review · judge', null, 'succeeded', 'blocked', current.cost_usd, current.session_id, `claude --resume ${current.session_id}`, null],
+        ['panel:round-1:0:judge', 'Panel · review · judge · round 1', 1, status, verdict, cost, sessionId, `claude --resume ${sessionId}`, null],
+      ].sort(), runId)
+      assert.doesNotMatch(response.body, new RegExp(root.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), runId)
+    }
+  })
 })

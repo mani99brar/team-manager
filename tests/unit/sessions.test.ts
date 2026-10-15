@@ -44,13 +44,13 @@ test('stageCardOf: the panel card aggregates its providers; costs stay apart', (
   assert.equal(stageCardOf(PAYLOAD, 'panel'), null)
 })
 
-type PanelEntry = (typeof PANEL)['panels'][number]
+type PanelEntry = import('../../contracts/projects/v1.ts').PanelEntry
 const provider = (model: string, status: PanelEntry['providers'][number]['status']): PanelEntry['providers'][number] =>
   ({ transport: 'pi', model, effort: null, status, cost_usd: 0.1, context_bytes: 1, finding_ids: [], error: status === 'ok' ? null : 'timed out after 600s' })
 const finding = (id: string, severity: 'P0' | 'P1' | 'P2', accepted: boolean, raised: string[]): PanelEntry['findings'][number] =>
   ({ id, severity, file: 'a.ts', line: 1, title: id, detail: id, providers_raised: raised, accepted, unanchored: false })
 const panelRecord = (status: PanelEntry['status'], providers: PanelEntry['providers'], findings: PanelEntry['findings'] = []) =>
-  ({ panels: [{ ...PANEL.panels[0]!, status, providers, findings }] })
+  ({ panels: [{ ...(PANEL.panels[0] as PanelEntry), status, providers, findings }] })
 
 test('panelCard: the word follows the panel\'s own recorded status, the sheet counts the providers that answered ([L12] 1)', () => {
   // A succeeded panel with one provider timed out: reviewed, "2 of 3 providers answered", whatever the provider rows say.
