@@ -1222,8 +1222,25 @@ export function servedReviewContext(input: unknown): ReviewPlanContext {
  * Whether the judge decided this review: the caller's plan pins a judged panel and the record lists the `judge` reviewer. A
  * fallback record on a judged run (no `judge` entry) keeps the built-in reviewers' decision, as today.
  */
-export function judgeDecided(result: Pick<ReviewResult, 'reviewers'>, context?: ReviewPlanContext): boolean {
+export function judgeDecided(result: { reviewers: readonly { reviewer_id: string }[] }, context?: ReviewPlanContext): boolean {
   return context?.judgedPanel === true && result.reviewers.some(entry => entry.reviewer_id === JUDGE_REVIEWER_ID)
+}
+
+/** The label of a built-in reviewer on a judged review (features/review-panel-registry/prd.md 8). */
+export const ADVISORY_WORDING = 'advisory (the judge decided)'
+/** The label of the judge entry on a judged review. */
+export const DECIDING_WORDING = 'deciding reviewer'
+
+/**
+ * A reviewer's part in a judged review (PRD 7.4 and 8): the judge decides, critique keeps its own blocking (null), the
+ * built-ins are advisory; null for every reviewer of any other record. `context` defaults to the served result's own
+ * `judged_panel` flag; an archived round, which carries none, passes the run's. The one definition the viewer and the
+ * triage model share, so the review page, the step sheet and the Now banner never disagree on who decided.
+ */
+export function reviewerRole(record: { reviewers: readonly { reviewer_id: string }[] }, reviewerId: string, context: ReviewPlanContext = servedReviewContext(record)): 'deciding' | 'advisory' | null {
+  if (!judgeDecided(record, context)) return null
+  if (reviewerId === JUDGE_REVIEWER_ID) return 'deciding'
+  return reviewerId === CRITIQUE_REVIEWER_ID ? null : 'advisory'
 }
 
 /**

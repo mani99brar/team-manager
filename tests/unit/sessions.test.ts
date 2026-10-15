@@ -10,7 +10,7 @@ import assert from 'node:assert/strict'
 import type { NightShiftDecision, SessionRow, Sessions } from '../../contracts/projects/sessions.ts'
 import {
   aggregateCostText, costText, decisionsForNode, durationText, fixRoundShort, fixRoundText, groupSessions, jevText, laneResultText,
-  nightShiftCountText, nightShiftNodes, outcomeText, providerText, resumeText, RESUME_NOTE, reviewerRoundsOf, reviewerTone, sessionsForNode,
+  nightShiftCountText, nightShiftNodes, outcomeText, providerText, JUDGE_RESUME_NOTE, resumeText, RESUME_NOTE, reviewerRoundsOf, reviewerTone, sessionsForNode,
   spentText, stageCardOf, totalsText,
 } from '../../src/projects/sessions/model.ts'
 import { stageExecutor } from '../../src/projects/signal/executor.ts'
@@ -151,6 +151,17 @@ test('resumeText: the ~/ form copies whole with no note; the bare form says to r
   assert.equal(RESUME_NOTE, "run it in the session's worktree")
   const pi = PAYLOAD.sessions.find(row => row.transport === 'pi')!
   assert.equal(resumeText(pi), null)
+})
+
+test('resumeText: a panel judge\'s bare command says its worktree was removed, live and archived rounds alike (PRD 8, C2)', () => {
+  const bare = BARE.sessions.find(row => row.key === 'worker:server')!
+  for (const key of ['panel:0:judge', 'panel:round-2:1:judge']) {
+    const judge = { ...bare, key, role: 'panel_provider' as const }
+    assert.deepEqual(resumeText(judge), { command: `claude --resume ${bare.session_id}`, note: JUDGE_RESUME_NOTE }, key)
+  }
+  assert.equal(JUDGE_RESUME_NOTE, 'its worktree was removed; run it from any directory')
+  // A seat row of the same panel keeps the worktree note.
+  assert.equal(resumeText({ ...bare, key: 'panel:0:1', role: 'panel_provider' })?.note, RESUME_NOTE)
 })
 
 test('reviewerRoundsOf and sessionsForNode: the latest round first, then the earlier rounds; a challenge has one block per attempt', () => {

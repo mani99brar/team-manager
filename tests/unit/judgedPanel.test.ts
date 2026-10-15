@@ -6,12 +6,15 @@
 import assert from 'node:assert/strict'
 import { describe, test } from 'node:test'
 import { fallbackReview, judgeStates, panelFallbackExample, panelJudgedExample, reviewJudgedExample, servedReview } from '../../contracts/projects/judgedExamples.ts'
-import { SEAT_STATUSES, type JudgeRuling, type PanelSeat } from '../../contracts/projects/v1.ts'
+import { reviewerRole as contractReviewerRole, SEAT_STATUSES, type JudgeRuling, type PanelSeat } from '../../contracts/projects/v1.ts'
 import {
   fallbackBanner, groupRulings, JUDGE_STATUS_WORDING, judgedOpenP01, judgeReadFindings, laneText, rulingCountsText, rulingLocation, seatAnchorId, seatCostText, seatCounts, seatDuration,
   seatModelText, seatStatusText, SEAT_STATUS_WORDING, sourceTarget,
 } from '../../src/projects/node/judgedPanel.ts'
-import { ADVISORY_WORDING, DECIDING_WORDING, isJudgedReview, reviewerRole } from '../../src/projects/reviewers.ts'
+import {
+  ADVISORY_FINDINGS_WORDING, ADVISORY_WORDING, advisedWording, advisoryFindingsWording, DECIDING_WORDING, findingsLegend, isJudgedReview, reviewerRole,
+} from '../../src/projects/reviewers.ts'
+import { findingFilterIds, reviewFigures } from '../../src/projects/node/panels.ts'
 import { reviewBlockedBy } from '../../src/projects/critique.ts'
 
 const judged = () => panelJudgedExample().panels[0]
@@ -153,5 +156,57 @@ describe('the review section on a judged run', () => {
     assert.match(reviewBlockedBy(fallback) ?? '', /^Blocked by general .* and coverage/)
     const unflagged = servedReview(reviewJudgedExample())
     assert.equal(isJudgedReview(unflagged), false)
+  })
+})
+
+describe('one role helper for the viewer and the triage model (C1)', () => {
+  test('src/projects/reviewers.ts re-exports the contract\'s reviewerRole: one definition', () => {
+    assert.equal(reviewerRole, contractReviewerRole)
+    // An archived round carries no judged flag: the caller passes the run's context.
+    const round = { reviewers: [{ reviewer_id: 'general' }, { reviewer_id: 'judge' }] }
+    assert.deepEqual(round.reviewers.map(entry => contractReviewerRole(round, entry.reviewer_id, { judgedPanel: true })), ['advisory', 'deciding'])
+    assert.deepEqual(round.reviewers.map(entry => contractReviewerRole(round, entry.reviewer_id)), [null, null])
+  })
+})
+
+describe('an advisory card on the judged review (C1 d, C3)', () => {
+  test('an advisory verdict reads "advised", never "blocked the candidate"', () => {
+    assert.equal(advisedWording({ status: 'blocked', verdict: 'blocked' }), 'advised blocking')
+    assert.equal(advisedWording({ status: 'accepted', verdict: 'approved' }), 'advised approval')
+    assert.equal(advisedWording({ status: 'superseded', verdict: null }), 'stopped after the combined decision, no advice recorded')
+    assert.equal(ADVISORY_FINDINGS_WORDING, 'findings passed to the judge')
+  })
+
+  test('an advisory built-in with no verdict (deadline expired or file rejected) says it gave none, never "blocked" or "passed to the judge" (V3)', () => {
+    const silent = { status: 'blocked' as const, verdict: null, findings: [] }
+    assert.equal(advisedWording(silent), 'gave no verdict (the judge ruled on the others)')
+    assert.equal(advisoryFindingsWording(silent), 'no findings')
+    assert.equal(advisoryFindingsWording({ ...silent, verdict: 'blocked' }), ADVISORY_FINDINGS_WORDING)
+  })
+
+  test('the figures and filter toggles leave out the advisory built-ins on a judged review; an unjudged record keeps every reviewer', () => {
+    const review = servedReview(reviewJudgedExample(), { judgedPanel: true })
+    assert.deepEqual(reviewFigures(review, ['engine', 'viewer']).reviewers, [{ id: 'judge', count: 2 }])
+    assert.deepEqual(findingFilterIds(review, ['engine', 'viewer']).reviewers.map(toggle => toggle.label), ['judge'])
+    const unjudged = servedReview(reviewJudgedExample())
+    assert.deepEqual(reviewFigures(unjudged, ['engine', 'viewer']).reviewers, [{ id: 'general', count: 0 }, { id: 'coverage', count: 0 }, { id: 'judge', count: 2 }])
+    assert.deepEqual(findingFilterIds(unjudged, ['engine', 'viewer']).reviewers.map(toggle => toggle.label), ['general', 'coverage', 'judge'])
+  })
+})
+
+describe('the Findings legend (C4)', () => {
+  test('an unjudged record keeps today\'s legend, byte for byte', () => {
+    assert.equal(findingsLegend(false, false, ['engine', 'viewer']),
+      'A finding links to a captured file only where its message names the file\'s path verbatim. Blocking means an unresolved P0 or P1 finding from any reviewer; a quote links only where the task text contains it verbatim. Workers are the lanes this run had (engine, viewer); “multiple workers” covers findings that concern more than one lane. Reviewer names the reviewer that raised the finding; the same finding raised by several reviewers is listed once per reviewer, never merged.')
+    assert.equal(findingsLegend(false, true, []), findingsLegend(false, false, []))
+    assert.match(findingsLegend(false, false, []), /Workers are the lanes this run had; /)
+  })
+
+  test('a judged record: blocking is a confirmed P0/P1 ruling (or a critique P0/P1); the built-ins are advisory; a ruling names what it merged', () => {
+    const legend = findingsLegend(true, false, ['engine'])
+    assert.match(legend, /Blocking means an unresolved P0 or P1 ruling the judge confirmed; the built-in reviewers are advisory and reach this list only through a ruling;/)
+    assert.match(legend, /Each ruling's Reviewer is the judge, and its \[J<n> from …\] prefix names the findings it merged\.$/)
+    assert.doesNotMatch(legend, /from any reviewer|never merged/)
+    assert.match(findingsLegend(true, true, ['engine']), /ruling the judge confirmed, or an unresolved P0 or P1 critique finding;/)
   })
 })

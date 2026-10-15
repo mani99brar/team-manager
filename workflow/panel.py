@@ -1548,6 +1548,10 @@ def kill_orphan_seat(panel_dir: Path, slug: str, repository: str) -> None:
                 else:
                     continue
                 break
+            try:  # What the leader left in its group (a child ignoring SIGTERM) is SIGKILLed too, as stop_seat does (PRD 7.6).
+                os.killpg(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
     if info.get("worktree"):
         remove_worktree(repository, Path(info["worktree"]))
     if info.get("scratch"):
@@ -1624,11 +1628,18 @@ def start_seat(runtime, index: int, item: dict, seat: dict, context: Path, clock
             raise
         cwd = worktree
         marker = seat["bin"]
-    save_json(stem.with_name(stem.name + ".pid"), {"pid": process.pid, "cwd": str(Path(cwd).resolve()), "marker": marker,
-                                                  "worktree": str(worktree) if worktree else None, "scratch": str(scratch) if scratch else None})
     job = Job(0, index, seat, process, clock(), seat["cap"]["timeout_minutes"] * 60, stdout_path, session_id, number)
     job.stderr, job.stem, job.worktree, job.scratch, job.repository = stderr_path, stem, worktree, scratch, plan["repository"]
-    arm_watchdog(job)
+    try:
+        save_json(stem.with_name(stem.name + ".pid"), {"pid": process.pid, "cwd": str(Path(cwd).resolve()), "marker": marker,
+                                                      "worktree": str(worktree) if worktree else None, "scratch": str(scratch) if scratch else None})
+        arm_watchdog(job)
+    except BaseException:  # A failed `.pid` write or watchdog (PRD 5.2, 9): the spawned seat is stopped and cleaned up, never left running.
+        try:
+            stop_seat(job)
+        except Exception:  # noqa: BLE001 - the original error is the one raised.
+            pass
+        raise
     return job
 
 
@@ -1688,23 +1699,26 @@ def cleanup_seat(job: Job) -> None:
 
 def stop_seat(job: Job) -> None:
     """SIGTERM the seat's process group, SIGKILL it KILL_GRACE_SECONDS later (PRD 5.1), then SIGKILL what is left of the group
-    even when the leader exited on the SIGTERM (PRD 7.6), then clean up. Its watchdog is cancelled."""
+    even when the leader exited on the SIGTERM (PRD 7.6), then clean up. Its watchdog is cancelled. The last group SIGKILL and
+    the cleanup run even when the SIGTERM or the wait raises (a KeyboardInterrupt), and that error propagates."""
     cancel_watchdog(job)
-    if job.running():
-        try:
-            os.killpg(job.process.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-        try:
-            job.process.wait(timeout=KILL_GRACE_SECONDS)
-        except subprocess.TimeoutExpired:
+    try:
+        if job.running():
             try:
-                os.killpg(job.process.pid, signal.SIGKILL)
+                os.killpg(job.process.pid, signal.SIGTERM)
             except ProcessLookupError:
                 pass
-            job.process.wait()
-    _kill_group(job)
-    cleanup_seat(job)
+            try:
+                job.process.wait(timeout=KILL_GRACE_SECONDS)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(job.process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                job.process.wait()
+    finally:
+        _kill_group(job)
+        cleanup_seat(job)
 
 
 def _kill_group(job: Job) -> None:
@@ -1716,11 +1730,25 @@ def _kill_group(job: Job) -> None:
 
 
 def _stop_seats(jobs: list[Job]) -> None:
+    """Stop every seat even after a KeyboardInterrupt (a second Ctrl-C in one seat's grace wait): the seats after it are SIGKILLed
+    and cleaned up without the grace (PRD 7.6), then the first interrupt propagates."""
+    interrupted = None
     for job in jobs:
         try:
-            stop_seat(job)
+            if interrupted is None:
+                stop_seat(job)
+            else:
+                cancel_watchdog(job)
+                try:
+                    _kill_group(job)
+                finally:
+                    cleanup_seat(job)
+        except KeyboardInterrupt as error:
+            interrupted = interrupted or error
         except Exception:  # noqa: BLE001
             pass
+    if interrupted is not None:
+        raise interrupted
 
 
 def extract(extractor: dict, stdout: str) -> tuple[bool, str | None]:

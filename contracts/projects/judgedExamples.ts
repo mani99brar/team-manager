@@ -52,13 +52,17 @@ export type RawReview = {
 
 /**
  * A raw review.json as the review route serves it (contract 1.4.0): what `server/projects.ts` `projectReview` makes of the
- * export's review section, with the run-wide transport `native`, no diff and no requirement matches.
+ * export's review section, with the run-wide transport `native`, no diff and no requirement matches. On a judged record (the
+ * judged flag and a `judge` entry) a built-in with a verdict has status `accepted`, as the engine writes it; the judge and
+ * critique, and every other record, take their status from their verdict.
  */
 export function servedReview(raw: RawReview, options: { judgedPanel?: boolean; reviewedAt?: string } = {}): ReviewResult {
   const findings = raw.findings.map(finding => ({
     severity: finding.severity, message: finding.message, disposition: finding.disposition, worker: finding.worker ?? null,
     requirement: finding.requirement ?? null, requirement_found_in: [], reviewer: finding.reviewer,
   }))
+  const judged = options.judgedPanel === true && raw.reviewers.some(entry => entry.reviewer_id === 'judge')
+  const builtin = (id: string) => id !== 'judge' && id !== 'critique'
   const reviewedAt = options.reviewedAt ?? raw.reviewers.map(entry => entry.accepted_at).filter((at): at is string => at !== null).sort().at(-1) ?? '2026-10-15T10:31:40Z'
   return {
     contract_version: '1.4.0', run_id: raw.run_id, node_id: 'review', attempt: 1,
@@ -67,7 +71,7 @@ export function servedReview(raw: RawReview, options: { judgedPanel?: boolean; r
     reviewers: raw.reviewers.map(entry => ({
       reviewer_id: entry.reviewer_id, transport: 'native', session_id: entry.session_id, verdict: entry.verdict,
       findings: findings.filter(finding => finding.reviewer === entry.reviewer_id), launched_at: null, accepted_at: entry.accepted_at,
-      status: entry.verdict === 'approved' ? 'accepted' : 'blocked',
+      status: entry.verdict === 'approved' || (judged && builtin(entry.reviewer_id) && entry.verdict !== null) ? 'accepted' : 'blocked',
     })),
     reviewed_at: reviewedAt, diff: null,
     ...(options.judgedPanel ? { judged_panel: true as const } : {}),

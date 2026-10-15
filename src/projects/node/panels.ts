@@ -5,7 +5,7 @@
  * React), so the sections and the unit tests read the same values.
  */
 import type { Span } from '../../../contracts/projects/triage.ts'
-import { isBlockingFinding, type ReviewFinding, type ReviewResult, type RunInputs } from '../../../contracts/projects/v1.ts'
+import { isBlockingFinding, reviewerRole, type ReviewFinding, type ReviewResult, type RunInputs } from '../../../contracts/projects/v1.ts'
 import type { WorkflowEvent } from '../../../contracts/workflow/v1.ts'
 import { workerGroupOf, workerGroups } from '../findings.ts'
 import { formatSpan } from '../time.ts'
@@ -241,19 +241,23 @@ export type ReviewFigures = {
   /** Unresolved P0 and P1 findings from any reviewer. */
   blocking: number
   open: number
-  /** Every reviewer of the run in declared order, with the findings it raised (0 included). */
+  /**
+   * Every reviewer of the run in declared order, with the findings it raised (0 included). On a judged review the advisory
+   * built-ins are left out: their findings went to the judge, so a count of 0 (and its toggle) would say they found nothing.
+   */
   reviewers: { id: string; count: number }[]
   /** Every populated lane group in display order, with its findings. */
   lanes: { key: string; label: string; count: number }[]
 }
 
 /** The four figures a review node opens on: blocking, open, per reviewer and per lane. */
-export function reviewFigures(review: { findings: readonly ReviewFinding[]; reviewers: readonly Pick<Reviewer, 'reviewer_id'>[] }, lanes: readonly string[]): ReviewFigures {
+export function reviewFigures(review: { findings: readonly ReviewFinding[]; reviewers: readonly Pick<Reviewer, 'reviewer_id'>[]; judged_panel?: true }, lanes: readonly string[]): ReviewFigures {
   const { findings } = review
   return {
     blocking: findings.filter(isBlockingFinding).length,
     open: findings.filter(finding => finding.disposition === 'open').length,
-    reviewers: review.reviewers.map(reviewer => ({ id: reviewer.reviewer_id, count: findings.filter(finding => finding.reviewer === reviewer.reviewer_id).length })),
+    reviewers: review.reviewers.filter(reviewer => reviewerRole(review, reviewer.reviewer_id) !== 'advisory')
+      .map(reviewer => ({ id: reviewer.reviewer_id, count: findings.filter(finding => finding.reviewer === reviewer.reviewer_id).length })),
     lanes: laneKeys(lanes, findings).map(key => ({ key, label: GROUP_WORDS[key] ?? key, count: findings.filter(finding => workerGroupOf(finding) === key).length })),
   }
 }
@@ -261,7 +265,7 @@ export function reviewFigures(review: { findings: readonly ReviewFinding[]; revi
 export type FindingFilter = { id: string; label: string; count: number }
 
 /** The filter row's toggles: one per reviewer (declared order), one per populated lane group (labelled by its id), and Open only. */
-export function findingFilterIds(review: { findings: readonly ReviewFinding[]; reviewers: readonly Pick<Reviewer, 'reviewer_id'>[] }, lanes: readonly string[]): { reviewers: FindingFilter[]; lanes: FindingFilter[]; open: FindingFilter } {
+export function findingFilterIds(review: { findings: readonly ReviewFinding[]; reviewers: readonly Pick<Reviewer, 'reviewer_id'>[]; judged_panel?: true }, lanes: readonly string[]): { reviewers: FindingFilter[]; lanes: FindingFilter[]; open: FindingFilter } {
   const figures = reviewFigures(review, lanes)
   return {
     reviewers: figures.reviewers.map(item => ({ id: reviewerFilterId(item.id), label: item.id, count: item.count })),

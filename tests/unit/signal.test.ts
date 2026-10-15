@@ -12,7 +12,12 @@ import { eventSchema, validateWorkerResult } from '../../contracts/workflow/v1.t
 import { buildTimeline, deriveAttention, deriveNow, type RunData } from '../../contracts/projects/triage.ts'
 import { stepRows } from '../../src/projects/steps.ts'
 import { formatSpan } from '../../src/projects/time.ts'
+import { reviewJudgedExample, servedReview } from '../../contracts/projects/judgedExamples.ts'
 import { REFINE_EXAMPLES } from '../project-workflows/fixtures/ux-refine.ts'
+import { PANEL, RUN_SESSIONS, sessionsPayload, UX_SESSIONS_WORKFLOW_ID } from '../project-workflows/fixtures/sessions.ts'
+import { runDetails } from '../project-workflows/fixtures.ts'
+import '../project-workflows/fixtures/index.ts'
+import { injectSessionNodes } from '../project-workflows/sessionProjection.ts'
 import { elbow, GAP_ALONG, layoutStage, NODE_HEIGHT, NODE_WIDTH, orderColumns, stepFrom, type StageInput } from '../../src/projects/signal/layout.ts'
 import { factsOf, laneOf, latestEvents, nowNodeId, stageNodes, wordOf, type StageNode } from '../../src/projects/signal/model.ts'
 
@@ -242,5 +247,45 @@ describe('words and facts', () => {
     assert.equal(factsOf({ ...base, tone: 'fail', word: 'failed', attempt: 2 }, formatSpan), 'failed · #2')
     assert.equal(factsOf({ ...base, attention: { kind: 'question', node_id: 'launch_ui', lane: 'ui', since: null, detail: '' } }, formatSpan), 'question waiting')
     assert.equal(factsOf({ ...base, lane: null, ms: null }, formatSpan), 'succeeded')
+  })
+})
+
+describe('the review card of a judged review (features/review-panel-registry/prd.md 8, C1 c)', () => {
+  const skeleton = loadRun('skeleton-001')
+  const reviewCard = (judgedPanel: boolean) => cardsOf({ ...skeleton, review: servedReview(reviewJudgedExample(), { judgedPanel }) }).find(item => item.id === 'review')!
+
+  test('"What it did" says the judge decided and lists the built-ins as advisory; the sheet\'s entries carry their role', () => {
+    const card = reviewCard(true)
+    assert.equal(card.did, 'Review blocked by judge blocked; the judge decided, advisory: general advised blocking, coverage advised blocking; 2 findings, 1 blocking.')
+    assert.deepEqual(card.reviewers!.map(reviewer => [reviewer.id, reviewer.role]), [['general', 'advisory'], ['coverage', 'advisory'], ['judge', 'deciding']])
+  })
+
+  test('the same record without the judged flag reads as today: every reviewer by its verdict, no role', () => {
+    const card = reviewCard(false)
+    assert.equal(card.did, 'Review blocked by general blocked, coverage blocked, judge blocked; 2 findings, 1 blocking.')
+    assert.deepEqual(card.reviewers!.map(reviewer => reviewer.role), [null, null, null])
+  })
+})
+
+describe('the projected reviewer cards of a judged review (features/review-panel-registry/prd.md 8, V2)', () => {
+  const detail = injectSessionNodes(runDetails[RUN_SESSIONS]!)
+  const sessions = sessionsPayload(RUN_SESSIONS, UX_SESSIONS_WORKFLOW_ID, 'home', true)
+  const nodesOf = (judgedPanel: boolean) => stageNodes({
+    detail, rows: [], timeline: null, events: [], inputs: null, review: servedReview(reviewJudgedExample(), { judgedPanel }), attention: null, reviewRound: null, sessions, panels: PANEL,
+  }, formatSpan)
+  const facts = (node: StageNode) => [node.tone, node.word, node.openFindings, node.did]
+
+  test('an advisory built-in\'s card is neutral and says it advised; the judge decided; critique keeps its own card', () => {
+    const nodes = nodesOf(true)
+    assert.deepEqual(facts(nodes.find(node => node.id === 'reviewer-general')!), ['idle', 'advised blocking', null, 'Round 2: advised blocking (the judge decided).'])
+    assert.deepEqual(facts(nodes.find(node => node.id === 'reviewer-coverage')!), ['idle', 'advised blocking', null, 'Round 2: advised blocking (the judge decided).'])
+    const critique = nodes.find(node => node.id === 'reviewer-critique')!
+    assert.deepEqual([critique.tone, critique.word, critique.openFindings], ['ok', 'approved', 0])
+  })
+
+  test('the same record without the judged flag keeps every card as today', () => {
+    const general = nodesOf(false).find(node => node.id === 'reviewer-general')!
+    assert.deepEqual([general.tone, general.word, general.openFindings], ['fail', 'blocked', 2])
+    assert.match(general.did ?? '', /^Round 2: blocked, 2 open P0\/P1\.$/)
   })
 })

@@ -33,6 +33,13 @@ export const ROLE_GROUPS: { role: SessionRow['role']; label: string }[] = [
 
 /** The note beside a bare resume command (PRD 3.5): the command only works from the session's own working directory. */
 export const RESUME_NOTE = "run it in the session's worktree"
+/** The judge's note instead (features/review-panel-registry/prd.md 8): its worktree is removed after it ends, so no `cd`. */
+export const JUDGE_RESUME_NOTE = 'its worktree was removed; run it from any directory'
+
+/** A panel judge's row: `panel:<i>:judge`, or `panel:round-<k>:<i>:judge` for an archived round (server/sessions.ts `judgeRow`). */
+function isJudgeRow(row: Pick<SessionRow, 'role' | 'key'>): boolean {
+  return row.role === 'panel_provider' && /^panel:(?:round-\d+:)?\d+:judge$/.test(row.key)
+}
 
 const dollars = (value: number) => `$${value.toFixed(2)}`
 /** A single session's cost: a non-zero figure under a cent says so rather than reading "$0.00". */
@@ -99,7 +106,7 @@ export function spentText(totals: SessionTotals): string | null {
 /** The resume command's parts as the page shows them: the line to copy and the note when it carries no directory. */
 export function resumeText(row: SessionRow): { command: string; note: string | null } | null {
   if (row.resume === null) return null
-  return { command: row.resume.command, note: row.resume.dir === null ? RESUME_NOTE : null }
+  return { command: row.resume.command, note: row.resume.dir === null ? (isJudgeRow(row) ? JUDGE_RESUME_NOTE : RESUME_NOTE) : null }
 }
 
 // ---- Reviewer, panel and lane-review cards -----------------------------------------------------------------------

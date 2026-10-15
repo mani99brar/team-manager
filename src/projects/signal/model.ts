@@ -7,9 +7,10 @@
 import type { Attention, AttentionKind, Instant, Now, RunAttention, Timeline } from '../../../contracts/projects/triage.ts'
 import { humanizeEvent } from '../../../contracts/projects/triage.ts'
 import type { PanelResults, ReviewFinding, ReviewResult, RunDetail, RunInputs, Sessions, WorkflowEvent } from '../api.ts'
-import { isProjectedSessionNode, stageCardOf } from '../sessions/model.ts'
+import { isProjectedSessionNode, reviewerRowOf, stageCardOf, type StageCard } from '../sessions/model.ts'
 import type { RepairEntry } from '../../../contracts/projects/v1.ts'
 import { isBlockingFinding } from '../api.ts'
+import { advisedWording, reviewerRole } from '../reviewers.ts'
 import { isRepairNode } from '../dag.ts'
 import { executorCategory, isAttackNode, isChallengeNode, isSidecarNode, KIND_LABEL, STATUS_LABEL, type Executor, type NodeKind, type RunStatus } from '../status.ts'
 import type { StepRow } from '../steps.ts'
@@ -17,7 +18,8 @@ import { stateTone, TONE_LABEL, type Tone } from '../tone.ts'
 
 export type StageEvent = { sequence: number; at: string; status: RunStatus | null; text: string }
 
-export type StageReviewer = { id: string; verdict: 'approved' | 'blocked' | null; status: string; findings: number; blocking: number }
+/** `role` is the reviewer's part in a judged review (`reviewerRole`): `advisory` for a built-in, `deciding` for the judge; else null. */
+export type StageReviewer = { id: string; verdict: 'approved' | 'blocked' | null; status: string; findings: number; blocking: number; role: 'deciding' | 'advisory' | null }
 
 export type StageNode = {
   id: string
@@ -125,8 +127,11 @@ function didOf(node: { node_id: string; kind: NodeKind }, row: StepRow | undefin
   }
   if (node.node_id === 'review' && node.kind === 'review' && review) {
     const blocking = review.findings.filter(isBlockingFinding).length
-    const who = review.reviewers.map(entry => `${entry.reviewer_id} ${entry.verdict ?? entry.status}`).join(', ')
-    return `Review ${review.verdict}${reviewRound ? ` (${reviewRound})` : ''} by ${who}; ${review.findings.length} finding${review.findings.length === 1 ? '' : 's'}, ${blocking} blocking.`
+    // On a judged review the judge decided; the built-ins are listed as advisory, never as deciding (PRD 7.4 and 8).
+    const advisory = review.reviewers.filter(entry => reviewerRole(review, entry.reviewer_id) === 'advisory')
+    const who = review.reviewers.filter(entry => !advisory.includes(entry)).map(entry => `${entry.reviewer_id} ${entry.verdict ?? entry.status}`).join(', ')
+    const advised = advisory.length ? `; the judge decided, advisory: ${advisory.map(entry => `${entry.reviewer_id} ${advisedWording(entry)}`).join(', ')}` : ''
+    return `Review ${review.verdict}${reviewRound ? ` (${reviewRound})` : ''} by ${who}${advised}; ${review.findings.length} finding${review.findings.length === 1 ? '' : 's'}, ${blocking} blocking.`
   }
   if (isChallengeNode(node) && inputs?.challenge) {
     const challenge = inputs.challenge
@@ -174,6 +179,19 @@ function projectedKindOf(nodeId: string): StageNode['projected'] {
   return nodeId === 'panel' ? 'panel' : nodeId.startsWith('lane-review-') ? 'lane_review' : 'reviewer'
 }
 
+/**
+ * A built-in reviewer's card on a judged review (PRD 7.4 and 8): it advised and the judge decided, so the card is neutral, says
+ * "advised …" and carries no open P0/P1 of its own (its findings went to the judge). Every other card is returned as it is.
+ */
+function advisoryCard(card: StageCard, review: ReviewResult, nodeId: string, sessions: StageModelInput['sessions']): StageCard {
+  const reviewerId = nodeId.slice('reviewer-'.length)
+  const entry = review.reviewers.find(item => item.reviewer_id === reviewerId)
+  if (!entry || reviewerRole(review, reviewerId) !== 'advisory') return card
+  const word = advisedWording(entry)
+  const round = sessions ? reviewerRowOf(sessions, nodeId)?.round ?? null : null
+  return { ...card, tone: 'idle', word, openP01: null, did: `Round ${round ?? '?'}: ${word} (the judge decided).` }
+}
+
 export function stageNodes(input: StageModelInput, span: (ms: number) => string): StageNode[] {
   const { detail, rows, events, inputs, review, attention, reviewRound, sessions, panels } = input
   const snapshot = new Map(detail.snapshot.nodes.map(node => [node.node_id, node]))
@@ -198,7 +216,8 @@ export function stageNodes(input: StageModelInput, span: (ms: number) => string)
     // A projected session card's word, tone, open P0/P1, cost and facts come from the sessions payload (PRD 3.1/3.2), the panel's
     // from its own record ([L12] 1): a blocked reviewer is a finished session (status succeeded) whose card carries the fail tone ([L11] 2). Its served status until it loads.
     const projected = projectedKindOf(node.node_id)
-    const stageCard = projected ? stageCardOf(sessions ?? null, node.node_id, panels ?? null) : null
+    const sessionCard = projected ? stageCardOf(sessions ?? null, node.node_id, panels ?? null) : null
+    const stageCard = projected === 'reviewer' && sessionCard && review ? advisoryCard(sessionCard, review, node.node_id, sessions ?? null) : sessionCard
     const reviewOpen = isReview && review ? review.findings.filter(finding => isBlockingFinding(finding) && finding.disposition !== 'resolved').length : null
     const card: Omit<StageNode, 'facts'> = {
       id: node.node_id,
@@ -224,7 +243,7 @@ export function stageNodes(input: StageModelInput, span: (ms: number) => string)
       returnTo: repair?.blocked_step ?? null,
       did: stageCard ? stageCard.did : didOf(node, row, repair, inputs, review, reviewRound),
       events: sorted.filter(event => event.node_id === node.node_id).map(event => ({ sequence: event.sequence, at: event.occurred_at, status: event.status, text: humanizeEvent(event) })),
-      reviewers: isReview && review ? review.reviewers.map(entry => ({ id: entry.reviewer_id, verdict: entry.verdict, status: entry.status, findings: entry.findings.length, blocking: entry.findings.filter(isBlockingFinding).length })) : null,
+      reviewers: isReview && review ? review.reviewers.map(entry => ({ id: entry.reviewer_id, verdict: entry.verdict, status: entry.status, findings: entry.findings.length, blocking: entry.findings.filter(isBlockingFinding).length, role: reviewerRole(review, entry.reviewer_id) })) : null,
       findings: isReview && review ? review.findings : null,
       questions: worker && worker.questions.length > 0 ? worker.questions : null,
       openFindings: stageCard ? stageCard.openP01 : reviewOpen,

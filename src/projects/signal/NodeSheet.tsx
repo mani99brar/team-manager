@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from 'react'
 import type { Now } from '../../../contracts/projects/triage.ts'
 import { CommandBlock } from '../CommandBlock.tsx'
 import { AppLink } from '../panels.tsx'
+import { ADVISORY_WORDING } from '../reviewers.ts'
 import { formatSpan } from '../time.ts'
 import { Time } from '../Time.tsx'
 import { severityClass, severityTone, toneClass } from '../tone.ts'
@@ -100,8 +101,12 @@ export function NodeSheet({ node, now, isFocus, href, onNavigate, onClose, child
             <h4>Reviewers</h4>
             <div className="sh-revs" data-testid="sheet-reviewers">
               {node.reviewers.map(reviewer => {
-                const tone = reviewer.verdict === 'approved' ? 'ok' : reviewer.verdict === 'blocked' ? 'fail' : reviewer.status === 'superseded' ? 'pause' : 'idle'
-                return <span key={reviewer.id} className={`state ${toneClass(tone)}`}><Glyph tone={tone} size={14} />{reviewer.id} {reviewer.verdict ?? reviewer.status} · {reviewer.findings} finding{reviewer.findings === 1 ? '' : 's'}</span>
+                // An advisory built-in of a judged review is neutral: its verdict is kept for the record, the judge decided.
+                const tone = reviewer.role === 'advisory' ? 'idle' : reviewer.verdict === 'approved' ? 'ok' : reviewer.verdict === 'blocked' ? 'fail' : reviewer.status === 'superseded' ? 'pause' : 'idle'
+                return reviewer.role === 'advisory'
+                  // The short word keeps the pill on one line at 390 px; the full label is its title.
+                  ? <span key={reviewer.id} className={`state ${toneClass(tone)}`} data-role="advisory" title={ADVISORY_WORDING}><Glyph tone={tone} size={14} />{reviewer.id} {reviewer.verdict ?? 'no verdict'} · advisory</span>
+                  : <span key={reviewer.id} className={`state ${toneClass(tone)}`} data-role={reviewer.role ?? undefined}><Glyph tone={tone} size={14} />{reviewer.id} {reviewer.verdict ?? reviewer.status} · {reviewer.findings} finding{reviewer.findings === 1 ? '' : 's'}</span>
               })}
             </div>
           </section>

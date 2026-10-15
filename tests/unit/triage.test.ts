@@ -28,6 +28,8 @@ import {
   type Span,
   type Step,
 } from '../../contracts/projects/triage.ts'
+import { reviewJudgedExample, servedReview } from '../../contracts/projects/judgedExamples.ts'
+import { reviewFigures } from '../../src/projects/node/panels.ts'
 import { uxSidecar, RUN_SIDECAR, RUN_SIDECAR_BLOCKED, RUN_SIDECAR_FROZEN, RUN_SIDECAR_ONE_LANE, SIDECAR_TWINS } from '../project-workflows/fixtures/ux-sidecar.ts'
 
 const sidecarPayloads = uxSidecar.payloads!
@@ -1534,6 +1536,26 @@ describe('the in-run fix loop in the triage model (A.2)', () => {
     assert.equal(attempts[1].end?.at, t(500))
   })
 
+  it('a judged archived round names the judge, not the advisory built-ins; the same round on an unjudged run reads as today (C1 a)', () => {
+    const reviewers = [
+      { reviewer_id: 'general', verdict: 'blocked' as const, session_id: 's-1' }, { reviewer_id: 'coverage', verdict: 'blocked' as const, session_id: 's-2' },
+      { reviewer_id: 'judge', verdict: 'blocked' as const, session_id: 's-3' },
+    ]
+    // Two archived rounds: the timeline gives the last review span the live review's outcome, so round 1 is the one read here.
+    const archived = (round: number) => roundOf(round, { reviewers, findings: [{ ...FINDING, reviewer: 'judge' }], started_at: t(200 + round * 5) })
+    const run = settled(FIXED_EVENTS, { ...APPROVED, approval: 'pending' }, 'running', { repairs: [repairOf(2)], review_rounds: [archived(1), archived(2)] })
+    const judgedRun = { ...run, review: judgedReview({ approved: true }) }
+    assert.match(buildTimeline(judgedRun).byNode.get('review')![0].outcome, /^round 1 blocked by judge · 1 P1$/)
+    // While round k>1 runs review.json is archived and no review is served: the round's own judge entry says the judge decided
+    // it (the id is reserved to a judged plan).
+    assert.equal(run.review, null)
+    assert.match(buildTimeline(run).byNode.get('review')![0].outcome, /^round 1 blocked by judge · 1 P1$/)
+    // An unjudged run (or a fallback round) has no judge entry and reads as today, served review or not.
+    const unjudged = (round: number) => roundOf(round, { reviewers: reviewers.slice(0, 2), findings: [FINDING], started_at: t(200 + round * 5) })
+    const unjudgedRun = settled(FIXED_EVENTS, { ...APPROVED, approval: 'pending' }, 'running', { repairs: [repairOf(2)], review_rounds: [unjudged(1), unjudged(2)] })
+    assert.match(buildTimeline(unjudgedRun).byNode.get('review')![0].outcome, /^round 1 blocked by general, coverage · 1 P1$/)
+  })
+
   it('a restored round stays the one live attempt of the review node', () => {
     const run = settled(FIXED_EVENTS.slice(0, 5), { ...APPROVED, review: 'failed' }, 'failed', { repairs: [repairOf(2, { status: 'blocked', applied_at: null })], review_rounds: [roundOf(1, { archived: false, restored_at: t(300) })] })
     assert.deepEqual((buildTimeline(run).byNode.get('review') ?? []).map(span => span.attempt), [1])
@@ -1597,5 +1619,95 @@ describe('the in-run fix loop in the triage model (A.2)', () => {
     assert.equal(skeleton.detail.fixLoop, undefined)
     assert.equal(before.markers.some(item => item.repair?.session), false)
     assert.equal(deriveFocus(skeleton.detail, skeleton.events)?.node_id, 'review')
+  })
+})
+
+// ---- A judged review (features/review-panel-registry/prd.md 7.4 and 8): the judge decides, the built-ins are advisory ----
+
+/**
+ * The served judged review example (blocked by J1); `approved` turns it into an approval with only the P2 ruling left, the
+ * built-ins advising approval too (so a wording that named every approver would name them).
+ */
+function judgedReview(options: { approved?: boolean } = {}): ReviewResult {
+  const review = servedReview(reviewJudgedExample(), { judgedPanel: true })
+  if (!options.approved) return review
+  const findings = review.findings.filter(finding => finding.severity === 'P2')
+  return {
+    ...review, verdict: 'approved', findings,
+    reviewers: review.reviewers.map(entry => ({ ...entry, verdict: 'approved' as const, status: 'accepted' as const, findings: entry.reviewer_id === 'judge' ? findings : entry.findings })),
+  }
+}
+
+/**
+ * A judged review with critique (PRD 7.4, [O4]): the judge approved with only the P2 ruling left and critique, still a
+ * decider, either blocked with a P1 of its own or approved too. Validated under the judged plan context.
+ */
+function judgedWithCritique(critique: 'approved' | 'blocked'): ReviewResult {
+  const raw = reviewJudgedExample()
+  raw.findings = raw.findings.filter(finding => finding.severity === 'P2')
+  raw.reviewers = raw.reviewers.map(entry => entry.reviewer_id === 'judge' ? { ...entry, verdict: 'approved' } : entry)
+  raw.reviewers.push({ reviewer_id: 'critique', session_id: '0a1b2c3d-3333-4444-8555-666677778888', verdict: critique, accepted_at: '2026-10-15T10:32:00Z' })
+  if (critique === 'blocked') raw.findings.push({ severity: 'P1', message: 'The fallback banner is cut off at 390 px.', disposition: 'open', worker: 'viewer', reviewer: 'critique' })
+  raw.verdict = critique
+  return validateReviewResult(servedReview(raw, { judgedPanel: true }), { judgedPanel: true })
+}
+
+describe('a judged review in the triage model (C1 a, b)', () => {
+  it('the Activity row and the timeline name only the judge; the advisory built-ins are not blockers', () => {
+    const review = judgedReview()
+    const row = buildTimeline({ ...runData(skeleton), review }).activity.filter(item => item.node_id === 'review').at(-1)
+    assert.equal(row?.text, 'blocked by judge · 1 P1 · 1 P2')
+    const approved = buildTimeline({ ...runData(fixes), review: judgedReview({ approved: true }) }).activity.filter(item => item.node_id === 'review').at(-1)
+    assert.equal(approved?.text, 'approved by judge · 1 P2')
+  })
+
+  it('review_blocked: the cause is the judge\'s ruling; general and coverage are named advisory, never as having blocked', () => {
+    const now = checked({ ...runData(skeleton), review: judgedReview() })
+    assert.equal(now.situation, 'review_blocked')
+    const reason = textToString(now.reason, T0)
+    assert.match(reason, /^judge blocked the candidate: 1 open P1 — \[J1 from general-1, C1, M1\] settle does not wait for a seat relaunched on resume/)
+    assert.match(reason, / general and coverage advised \(the judge decided\)\.$/)
+    assert.doesNotMatch(reason, /(general|coverage) (blocked|approved)/)
+  })
+
+  it('succeeded: the review was approved by the judge, not by the advisory built-ins', () => {
+    const review = judgedReview({ approved: true })
+    const headline = textToString(checked({ ...runData(fixes), review }).headline, T0)
+    assert.match(headline, / · review approved by judge · 1 open P2$/)
+  })
+
+  it('review_blocked on the engine\'s shape: built-ins keep their verdict with status accepted, and are still only named advisory (V4)', () => {
+    const review = judgedReview()
+    assert.deepEqual(review.reviewers.map(entry => [entry.reviewer_id, entry.verdict, entry.status]), [['general', 'blocked', 'accepted'], ['coverage', 'blocked', 'accepted'], ['judge', 'blocked', 'blocked']])
+    const reason = textToString(checked({ ...runData(skeleton), review }).reason, T0)
+    assert.match(reason, /^judge blocked the candidate: 1 open P1/)
+    assert.doesNotMatch(reason, /(general|coverage) (approved|blocked)/)
+  })
+
+  it('review_blocked: an advisory built-in that gave no verdict is named so, never as having advised (V3)', () => {
+    const base = judgedReview()
+    const review = { ...base, reviewers: base.reviewers.map(entry => entry.reviewer_id === 'general' ? { ...entry, verdict: null, status: 'blocked' as const } : entry) }
+    const reason = textToString(checked({ ...runData(skeleton), review }).reason, T0)
+    assert.match(reason, / coverage advised \(the judge decided\)\. general gave no verdict\.$/)
+    assert.doesNotMatch(reason, /general (and coverage )?advised|general (approved|blocked)/)
+  })
+
+  it('critique still decides on a judged record: blocked by critique over the judge\'s approval, named first; approved by judge and critique (V5)', () => {
+    const blocked = judgedWithCritique('blocked')
+    assert.equal(buildTimeline({ ...runData(skeleton), review: blocked }).activity.filter(item => item.node_id === 'review').at(-1)?.text, 'blocked by critique · 1 P1 · 1 P2')
+    const reason = textToString(checked({ ...runData(skeleton), review: blocked }).reason, T0)
+    assert.match(reason, /^critique blocked the candidate: 1 open P1 — The fallback banner is cut off at 390 px\. judge approved\. general and coverage advised \(the judge decided\)\.$/)
+    assert.deepEqual(reviewFigures(blocked, ['engine', 'viewer']).reviewers.map(item => item.id), ['judge', 'critique'])
+    const approved = judgedWithCritique('approved')
+    assert.equal(buildTimeline({ ...runData(fixes), review: approved }).activity.filter(item => item.node_id === 'review').at(-1)?.text, 'approved by judge and critique · 1 P2')
+    assert.match(textToString(checked({ ...runData(fixes), review: approved }).headline, T0), / · review approved by judge and critique · 1 open P2$/)
+  })
+
+  it('an unjudged record (the same reviewers without the judged flag) reads exactly as today', () => {
+    const review = servedReview(reviewJudgedExample())
+    assert.equal(buildTimeline({ ...runData(skeleton), review }).activity.filter(item => item.node_id === 'review').at(-1)?.text, 'blocked by general, coverage, judge · 1 P1 · 1 P2')
+    const reason = textToString(checked({ ...runData(skeleton), review }).reason, T0)
+    assert.match(reason, /^general blocked the candidate\. coverage blocked the candidate\. judge blocked the candidate: 1 open P1/)
+    assert.doesNotMatch(reason, /advised/)
   })
 })

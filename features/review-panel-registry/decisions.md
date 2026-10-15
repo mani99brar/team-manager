@@ -185,6 +185,31 @@ Design challenge attempt 1 (3 P1, 7 P2) on run review-panel-registry-001. The bu
   - Every required gate runs again, including `JudgedCandidateTests` on the merged tree, then review round 1 runs on the new candidate. No readiness claim before these pass.
   - **Why:** blocking now is 0 (triage 010). Run 007 stopped on a load-sensitive browser flake: the test passed in all 14 earlier reports and in repair-1's 25 targeted reruns plus a full 124/124 suite on unchanged 207c037; the failing window had the gate's highest CPU stall (cpu_some10 32) with about 920 MB of swap in use; the run-detail path adds only a pure in-memory check (`server/projects.ts:1541`). The test has reached 4530 ms before, so a 15 s first-load wait is the narrowest durable fix and is easy to revert.
 
+- [L17] (operator: hand fix, run 008 blocked; [O14]) No run follows run 008. This supersedes [L16]'s "seats and judge: no code item" and seats and judge Acceptance 0.
+  - **Run 008's repairs.**
+    - Repair 1 (controller): a print reviewer that fails to launch no longer aborts a judged round.
+    - Repair 2 ended without a fix. cryotrack was frozen (the Mac slept) for most of 10:51-12:34 UTC, so the viewer's browser check, which passed 124/124 in 6.0 min, read 3456 s on the wall clock, and the repair session's 45-minute deadline lapsed.
+    - Repair 3 (operator, `d8ee691`):
+      - F1: `judge.run` SIGKILLs the judge job's process group before removing its worktree.
+      - F2: `panel.stop_seat` SIGKILLs the rest of the seat's group when the leader exits on SIGTERM (Deferred A).
+      - F3: `panel.parse_cli` records `parse_failed` for a findings array holding a non-object.
+    - Candidate `a2f3763` then passed every lane's gate. Its review blocked on two lanes (general and coverage: S2; critique: C1). The fix loop does not repair a block that spans two lanes, and `repair` refuses once reviewers have seen a candidate.
+  - **The hand fix, outside the pipeline.** Branch `cook/review-panel-registry-fix`, from `a2f3763`. Operator, session `359ea97f-8b4e-4f21-8e5a-bbbe0217e662`: "Can we hand fix them now?".
+    - Seats:
+      - S2: `start_seat` stops and cleans up a spawned seat whose `.pid` write or watchdog fails, then re-raises the original error.
+      - S1: `kill_orphan_seat` SIGKILLs a verified orphan's whole group.
+      - `stop_seat` kills the group and cleans up in a `finally`.
+      - `_stop_seats` stops every seat after a second Ctrl-C and re-raises it.
+    - Viewer, judged records only (C1-C4, V1-V5):
+      - Every run-wide summary names the judge, and critique when it blocks, as the decider, and the built-ins as advisory. This covers the timeline and Latest events (archived rounds too), the Now banner, the step sheet, the graph's reviewer cards and the reviewer strip.
+      - The judge's Sessions row says its worktree was removed.
+      - The advisory cards say their findings went to the judge, and the per-reviewer figures leave advisory reviewers out.
+      - The findings legend has judged wording.
+      - Non-judged, report-only, fallback and legacy records render as before.
+    - Claude, GPT-6 Astra and DeepSeek verified each finding before it was fixed and reviewed each diff. The final review found no P0 or P1. The P2s it left are under Deferred.
+    - Checks on the branch: workflow suite 1395 passed (4 jobs); build; lint; contracts 50 passed; unit 816 passed; project-workflows browser 123 passed and 1 skipped (the candidate-only parity test); sessions-parity in the candidate phase 2 passed.
+  - **No readiness claim:** the hand fix has had no run review. Merging it is the operator's decision.
+
 Not changed:
 - The Muse entry's `env.pass: []` stands. The session ran the challenge's cheap experiment, and the login works with an environment built from nothing (`decisions/001-challenge_paused/extra.md`).
 - The seats lane's effort stays medium, because feature.json is frozen after prepare.
@@ -206,7 +231,7 @@ Not changed:
   - T4 (P2): a print-transport judge that is interrupted cannot resume (`automatic.py:1966-1970`); print never resumed before either, and these runs never use print ([G25]).
   - T5 (P2): resume forgets which built-in reviewers failed (`automatic.py:1072`), a narrow provenance window.
 - From run 002's lane review (triage 004; all confirmed P2 that fail safe):
-  - A: `workflow/panel.py:1649-1663` `stop_seat` never SIGKILLs the process group when the leader exits on SIGTERM within the grace; the fix is `_kill_group(job)` after the leader's wait.
+  - A: `workflow/panel.py:1649-1663` `stop_seat` never SIGKILLs the process group when the leader exits on SIGTERM within the grace; the fix is `_kill_group(job)` after the leader's wait. Closed by [L17] (F2).
   - D: `workflow/pipeline.py:170` `JUDGED_GATES` includes `critique` unconditionally, so an undeclared built-in reviewer named `critique` gates approval.
   - E: `workflow/judge.py:44` the citation rule rejects root-level extensionless paths such as `Makefile:8`, so such refuted rulings record as confirmed.
   - F: `workflow/judge.py:482` a whitespace-only `requirement` reaches review.json and is rejected there instead of taking the judge fallback.
@@ -224,7 +249,7 @@ Not changed:
     - real `settle` in `JudgedCandidateTests`;
     - a 1.0.0 Panel snapshot;
     - a missing-plan seeded run.
-  - G15: the judge row's worktree note.
+  - G15: the judge row's worktree note. Closed by [L17] (C2).
   - G16: the pi `mpp-panel-*` scratch dir is never removed (pre-existing).
   - Critique's two design P2s.
 
@@ -233,3 +258,19 @@ Not changed:
 - Test isolation: the workflow tests wait on the host-wide browser queue (`~/.config/md-manager/browser-queue`), so lane suites contend with live Playwright checks. This was run 001's seats timeout. It goes to a learning, not this cook.
 - From run 006 (triage 009, P2): `server/projects.ts:2256-2262` `readArchivedPanel` catches only `ProjectApiError`, so an unreadable `panel.round-<k>.json` (EACCES, EIO) makes `/sessions` return 500. Same-user 0600 files, a loud failure, and the base has the same pattern for the live panel.json. The fix is a one-line `catch { return null }`.
 - From run 007 (triage 010, plausible P2, J-b): `workflow/judge.py:185-187` `fit` can drop a requirement document without naming it.
+- From the hand fix's final review ([L17]; all P2):
+  - Viewer:
+    - On a judged run, during a fix-loop round (no served review), the graph's reviewer cards fall back to fail-toned "blocked" (V1 covers only the timeline).
+    - The reviewer node page (`Sessions.tsx` `ReviewerNodeBody`) still shows an advisory built-in's verdict in fail tone.
+    - The step-sheet pill reads "general blocked · advisory".
+    - "Findings passed to the judge" shows even with zero findings.
+    - A no-verdict graph card has a doubled parenthetical.
+    - Tests: the fallback record on the new surfaces, and critique through `reviewerRole` in the signal test.
+  - Seats:
+    - A third Ctrl-C during the post-interrupt cleanup can skip a seat's worktree removal. The fix is to ignore SIGINT for the rest of the cleanup, as `sidecar.deferred_interrupt` does.
+    - `_collect_seats`' interrupt branch reaps before it stops the seats.
+    - The callers' `save_record` is skipped after a second Ctrl-C, so a resume reruns reaped seats.
+    - Tests: no grace for the seats after an interrupt; S2's KeyboardInterrupt path.
+  - Not taken: "keep the original launch error when a Ctrl-C lands in start_seat's cleanup". A Ctrl-C must propagate (PRD 7.6).
+  - The critique's design polish (C5) goes to a polish follow-up.
+- From run 008's coverage review: the 2.11.0 report-only regression covers `panel.json` bytes and launch settings, not review.json or the export.

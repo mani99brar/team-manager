@@ -1835,6 +1835,154 @@ class JudgedSeats(SeatHarness):
         self.assertEqual(process.poll(), -signal.SIGTERM)  # The leader took the SIGTERM path: only the group SIGKILL can end the child.
         self.assertTrue(self.wait_for(lambda: panel._gone(int(children[0])), seconds=10))
 
+    def test_a_stop_interrupted_in_its_wait_still_kills_the_group_and_cleans_up(self):
+        """A KeyboardInterrupt in stop_seat's wait still SIGKILLs the seat's group (a child ignoring SIGTERM) and removes its
+        scratch dir, and the KeyboardInterrupt propagates."""
+        import signal
+        pid_file = self.tmp / "child.pid"
+        child = f"import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); open({str(pid_file)!r}, 'w').write('ready'); time.sleep(60)"
+        leader = f"import signal, subprocess, sys, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); c = subprocess.Popen([sys.executable, '-c', {child!r}]); time.sleep(60)"
+        process = subprocess.Popen([sys.executable, "-c", leader], start_new_session=True)
+        children: list[str] = []
+
+        def kill_survivors():
+            if process.poll() is None or not all(panel._gone(int(pid)) for pid in children):  # The group still has a member.
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
+            process.wait()
+        self.addCleanup(kill_survivors)
+        self.assertTrue(self.wait_for(lambda: pid_file.exists() and pid_file.read_text() == "ready", seconds=30))  # Two interpreter starts on a loaded host.
+        children[:] = Path(f"/proc/{process.pid}/task/{process.pid}/children").read_text().split()
+        self.assertEqual(len(children), 1)
+        scratch = Path(tempfile.mkdtemp(prefix="seat-scratch-", dir=self.tmp))
+        job = panel.Job(0, 0, {"transport": "cli", "name": "muse"}, process, 0.0, 900.0, self.tmp / "x.stdout", "s", 1)
+        job.stderr, job.stem, job.worktree, job.scratch, job.repository = self.tmp / "x.stderr", self.tmp / "muse-1", None, scratch, str(self.repo)
+        with mock.patch.object(process, "wait", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                panel.stop_seat(job)
+        self.assertTrue(self.wait_for(lambda: process.poll() is not None, seconds=10))  # Both ignore SIGTERM: only the group SIGKILL ends them.
+        self.assertEqual(process.returncode, -signal.SIGKILL)
+        self.assertTrue(self.wait_for(lambda: panel._gone(int(children[0])), seconds=10))
+        self.assertFalse(scratch.exists())
+
+    def test_stopping_seats_interrupted_in_the_first_wait_still_stops_every_seat(self):
+        """A KeyboardInterrupt in the first seat's stop wait (a second Ctrl-C) does not end _stop_seats: every seat's group
+        (leader and child both ignoring SIGTERM) is killed, every worktree and scratch dir removed, and the interrupt propagates."""
+        import signal
+        jobs, processes, children = [], [], []
+        self.addCleanup(lambda: subprocess.run(["git", "-C", str(self.repo), "worktree", "prune"], capture_output=True))
+        for n in (1, 2):
+            pid_file = self.tmp / f"child-{n}.pid"
+            child = f"import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); open({str(pid_file)!r}, 'w').write('ready'); time.sleep(60)"
+            leader = f"import signal, subprocess, sys, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); c = subprocess.Popen([sys.executable, '-c', {child!r}]); time.sleep(60)"
+            process = subprocess.Popen([sys.executable, "-c", leader], start_new_session=True)
+            processes.append(process)
+
+            def kill_survivors(process=process):
+                if process.poll() is None or not all(panel._gone(int(pid)) for pid in children):  # A group may still have a member.
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except (ProcessLookupError, PermissionError):
+                        pass
+                process.wait()
+            self.addCleanup(kill_survivors)
+            self.assertTrue(self.wait_for(lambda: pid_file.exists() and pid_file.read_text() == "ready", seconds=30))  # Two interpreter starts on a loaded host.
+            children.extend(Path(f"/proc/{process.pid}/task/{process.pid}/children").read_text().split())
+            worktree = self.tmp / f"review-seat-{n}"
+            git(self.repo, "worktree", "add", "--detach", str(worktree), self.candidate)
+            scratch = Path(tempfile.mkdtemp(prefix="seat-scratch-", dir=self.tmp))
+            job = panel.Job(0, n - 1, {"transport": "cli", "name": "muse"}, process, 0.0, 900.0, self.tmp / f"x{n}.stdout", "s", 1)
+            job.stderr, job.stem, job.worktree, job.scratch, job.repository = self.tmp / f"x{n}.stderr", self.tmp / f"muse-{n}", worktree, scratch, str(self.repo)
+            jobs.append(job)
+        self.assertEqual(len(children), 2)
+        left = [job.worktree for job in jobs] + [job.scratch for job in jobs]
+        with mock.patch.object(processes[0], "wait", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                panel._stop_seats(jobs)
+        for process in processes:
+            self.assertTrue(self.wait_for(lambda: process.poll() is not None, seconds=10))  # Both ignore SIGTERM: only the group SIGKILL ends them.
+            self.assertEqual(process.returncode, -signal.SIGKILL)
+        for pid in children:
+            self.assertTrue(self.wait_for(lambda: panel._gone(int(pid)), seconds=10))
+        for path in left:
+            self.assertFalse(path.exists(), path)
+        self.assertNotIn("review-seat-", git(self.repo, "worktree", "list", "--porcelain"))
+
+    def launch_failing(self, step: str) -> tuple[dict, dict]:
+        """A muse seat whose `.pid` write (`step` "pid") or watchdog (`step` "watchdog") fails after the spawn, once the seat has
+        a grandchild in its group: returns its provider record and the `.pid` record start_seat built (pid, worktree, scratch),
+        plus `grandchild` (its pid, or None when it never came up)."""
+        import signal
+        built, real_save = {}, panel.save_json
+        grandchild = self.fakes / "grandchild.pid"
+
+        def wait_for_grandchild():
+            ready = self.wait_for(lambda: grandchild.exists() and grandchild.read_text().strip().isdigit(), seconds=30)  # Interpreter start on a loaded host.
+            built["grandchild"] = int(grandchild.read_text()) if ready else None
+
+        def save(path, value):
+            if str(path).endswith(".pid"):
+                built.update(value)
+                if step == "pid":
+                    wait_for_grandchild()
+                    raise OSError(28, "No space left on device")
+            return real_save(path, value)
+
+        def arm(job):
+            wait_for_grandchild()
+            raise RuntimeError("can't start new thread")
+
+        def kill_leftover():
+            pid = built.get("pid")
+            if pid and not panel._gone(pid):
+                try:
+                    os.killpg(pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
+            if pid:
+                try:
+                    os.waitpid(pid, 0)
+                except ChildProcessError:
+                    pass
+            for left in (built.get("worktree"), built.get("scratch")):  # What a failing run left behind.
+                if left:
+                    shutil.rmtree(left, ignore_errors=True)
+        self.addCleanup(kill_leftover)
+        self.control_seats(muse={"mode": "hang"})
+        plan = self.judged_plan(self.seats(["muse"]))
+        patches = [mock.patch.object(panel, "save_json", save)] + ([mock.patch.object(panel, "arm_watchdog", arm)] if step == "watchdog" else [])
+        for patch in patches:
+            patch.start()
+        try:
+            panel.ensure_started(self.runtime(plan))
+        finally:
+            for patch in patches:
+                patch.stop()
+        return self.record()["panels"][0]["providers"][0], built
+
+    def assert_launch_failure_left_nothing(self, provider: dict, built: dict, error: str):
+        self.assertEqual(provider["status"], "error")
+        self.assertIn(f"launch failed: {error}", provider["error"])
+        self.assertTrue(self.wait_for(lambda: panel._gone(built["pid"]), seconds=10))
+        self.assertIsNotNone(built["grandchild"])  # The failure struck with a grandchild in the group: the whole group is killed.
+        self.assertTrue(self.wait_for(lambda: panel._gone(built["grandchild"]), seconds=10))
+        self.assertNotIn("review-seat-", self.worktrees())
+        self.assertFalse(Path(built["worktree"]).exists())
+        self.assertFalse(Path(built["scratch"]).exists())
+
+    def test_a_seat_whose_pid_record_cannot_be_written_is_stopped_and_cleaned_up(self):
+        """PRD 5.2 / 9: a `.pid` write failing after the spawn (ENOSPC) stops the seat's group and removes its worktree and
+        scratch dir before the launch failure is recorded."""
+        provider, built = self.launch_failing("pid")
+        self.assert_launch_failure_left_nothing(provider, built, "OSError")
+
+    def test_a_seat_whose_watchdog_cannot_be_armed_is_stopped_and_cleaned_up(self):
+        """PRD 5.2 / 9: a watchdog that cannot start (Timer.start's RuntimeError) stops the seat the same way."""
+        provider, built = self.launch_failing("watchdog")
+        self.assert_launch_failure_left_nothing(provider, built, "RuntimeError")
+
     def test_an_expired_seat_is_timed_out_on_an_exit_with_no_review_json(self):
         """Challenge note 2: a seat killed at its cap during the built-in reviewers is recorded timed_out, not `error: exit -15`,
         when the review exits with no review.json."""
@@ -1963,6 +2111,42 @@ class JudgedSeats(SeatHarness):
         self.assertFalse(Path(orphan["cwd"]).exists())
         self.assertNotIn("review-seat-", self.worktrees())
         crashed.panel_jobs = None  # Nothing left for the crashed process's handles to do.
+
+    def test_orphan_cleanup_kills_a_group_member_that_ignores_sigterm(self):
+        """An orphan seat whose leader exits on the SIGTERM still has its group SIGKILLed (as stop_seat), so a child ignoring
+        SIGTERM does not outlive it while its worktree is removed."""
+        import signal
+        orphan_cwd = Path(tempfile.mkdtemp(prefix="orphan-seat-", dir=self.tmp)).resolve()
+        pid_file = self.tmp / "child.pid"
+        child = f"import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); open({str(pid_file)!r}, 'w').write('ready'); time.sleep(60)"
+        leader = f"import subprocess, sys, time; c = subprocess.Popen([sys.executable, '-c', {child!r}]); time.sleep(60)  # orphan-seat-leader"
+        process = subprocess.Popen([sys.executable, "-c", leader], cwd=str(orphan_cwd), start_new_session=True)
+        children: list[str] = []
+
+        def kill_survivors():
+            if process.poll() is None or not all(panel._gone(int(pid)) for pid in children):  # The group still has a member.
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
+            process.wait()
+        self.addCleanup(kill_survivors)
+        self.assertTrue(self.wait_for(lambda: pid_file.exists() and pid_file.read_text() == "ready", seconds=30))  # Two interpreter starts on a loaded host.
+        children[:] = Path(f"/proc/{process.pid}/task/{process.pid}/children").read_text().split()
+        self.assertEqual(len(children), 1)
+        panel_dir = self.run / "panel" / "review"
+        panel_dir.mkdir(parents=True)
+        save_json(panel_dir / "muse-1.pid", {"pid": process.pid, "cwd": str(orphan_cwd), "marker": "someone-elses-process",
+                                             "worktree": None, "scratch": None})
+        panel.kill_orphan_seat(panel_dir, "muse", str(self.repo))  # A live pid whose marker does not match is never signalled.
+        self.assertFalse(self.wait_for(lambda: process.poll() is not None, seconds=1))
+        self.assertFalse(panel._gone(int(children[0])))
+        save_json(panel_dir / "muse-2.pid", {"pid": process.pid, "cwd": str(orphan_cwd), "marker": "orphan-seat-leader",
+                                             "worktree": None, "scratch": str(orphan_cwd)})  # The latest record is the one read.
+        panel.kill_orphan_seat(panel_dir, "muse", str(self.repo))
+        self.assertTrue(self.wait_for(lambda: process.poll() is not None, seconds=10))
+        self.assertTrue(self.wait_for(lambda: panel._gone(int(children[0])), seconds=10))
+        self.assertFalse(orphan_cwd.exists())
 
     def test_an_unavailable_seat_is_recorded_and_an_all_unavailable_panel_still_settles(self):
         listing = registry_example("reviewers")

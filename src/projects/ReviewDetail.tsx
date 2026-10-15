@@ -18,7 +18,7 @@ import { Screenshots } from './Screenshots.tsx'
 import './critique.css'
 import { useRunCapturedFiles } from './files.ts'
 import { AppLink, ErrorPanel, LoadingPanel } from './panels.tsx'
-import { ADVISORY_WORDING, DECIDING_WORDING, isJudgedReview, outcomeWording, reviewerRole, severityCounts, type Reviewer } from './reviewers.ts'
+import { ADVISORY_WORDING, advisedWording, advisoryFindingsWording, DECIDING_WORDING, findingsLegend, isJudgedReview, outcomeWording, reviewerRole, severityCounts, type Reviewer } from './reviewers.ts'
 import { runPathname } from './routes.ts'
 import { blockingFindings, filterFindings, findingFilterIds, orderFindings, reviewerTime } from './node/panels.ts'
 import { reviewSummary, shortRevision } from './status.ts'
@@ -185,11 +185,12 @@ function FindingCard({ finding, scope, definitionNodes, inputs, onOpenRequiremen
  * The controller's verdict for a reviewer, derived from its findings (C34); the verdict the reviewer wrote is `accepted_decision` in
  * its status file. A reviewer superseded before deciding, still pending, or blocked by the deadline or a rejected file has none.
  */
-function ReviewerVerdict({ verdict }: { verdict: Reviewer['verdict'] }) {
+function ReviewerVerdict({ verdict, advisory = false }: { verdict: Reviewer['verdict']; advisory?: boolean }) {
   if (verdict === null) return <span className="projects-muted" data-testid="reviewer-verdict" data-status="none">No verdict</span>
   const approved = verdict === 'approved'
+  // An advisory verdict stays visible but neutral: it did not decide the review.
   return (
-    <span className={`status-badge ${approved ? 'status-succeeded' : 'status-failed'}`} data-testid="reviewer-verdict" data-status={verdict}>
+    <span className={`status-badge ${advisory ? 'status-advisory' : approved ? 'status-succeeded' : 'status-failed'}`} data-testid="reviewer-verdict" data-status={verdict}>
       <span>{approved ? 'Approved' : 'Blocked'}</span>
     </span>
   )
@@ -224,23 +225,29 @@ function ReviewerStrip({ review, reviewers }: { review: ReviewResult; reviewers:
     <section className="evidence-section reviewer-strip" aria-labelledby="review-reviewers-title" data-testid="reviewer-strip" data-count={reviewers.length}>
       <h4 id="review-reviewers-title">Reviewers ({reviewers.length})</h4>
       <ul className="evidence-list reviewer-list">
-        {reviewers.map(reviewer => (
-          <li key={reviewer.reviewer_id} className={`ui-card reviewer-card ${toneClass(reviewerTone(reviewer))}`} data-testid="reviewer-entry" data-reviewer={reviewer.reviewer_id} data-status={reviewer.status} data-verdict={reviewer.verdict ?? 'none'}>
-            <p>
-              <strong data-testid="reviewer-id">{reviewer.reviewer_id}</strong>{' '}
-              {isCritiqueReviewer(reviewer.reviewer_id) && <><span className="reviewer-kind" data-testid="reviewer-kind">{CRITIQUE_JOB_WORDING}</span>{' '}</>}
-              <RoleLabel role={reviewerRole(review, reviewer.reviewer_id)} />
-              <ReviewerVerdict verdict={reviewer.verdict} />{' '}
-              <span data-testid="reviewer-status">{isCritiqueReviewer(reviewer.reviewer_id) ? critiqueOutcomeWording(reviewer) : outcomeWording(reviewer)}</span>
-              <ReviewerTime reviewer={reviewer} />
-            </p>
-            <p className="projects-muted">
-              <span data-testid="reviewer-counts">{severityCounts(reviewer.findings)}</span>
-              {reviewer.launched_at !== null && reviewer.accepted_at !== null && <> · launched <Time iso={reviewer.launched_at} seconds /></>}
-              {reviewer.accepted_at !== null && <> · {isCritiqueReviewer(reviewer.reviewer_id) ? CRITIQUE_DECIDED_WORDING : 'file accepted'} <Time iso={reviewer.accepted_at} seconds /></>}
-            </p>
-          </li>
-        ))}
+        {reviewers.map(reviewer => {
+          // An advisory built-in of a judged review keeps its verdict for the record but decided nothing: neutral tone, "advised"
+          // wording, and its findings went to the judge when it gave a verdict (the review's list carries the judge's rulings, not them).
+          const role = reviewerRole(review, reviewer.reviewer_id)
+          const advisory = role === 'advisory'
+          return (
+            <li key={reviewer.reviewer_id} className={`ui-card reviewer-card ${toneClass(advisory ? 'idle' : reviewerTone(reviewer))}`} data-testid="reviewer-entry" data-reviewer={reviewer.reviewer_id} data-status={reviewer.status} data-verdict={reviewer.verdict ?? 'none'}>
+              <p>
+                <strong data-testid="reviewer-id">{reviewer.reviewer_id}</strong>{' '}
+                {isCritiqueReviewer(reviewer.reviewer_id) && <><span className="reviewer-kind" data-testid="reviewer-kind">{CRITIQUE_JOB_WORDING}</span>{' '}</>}
+                <RoleLabel role={role} />
+                <ReviewerVerdict verdict={reviewer.verdict} advisory={advisory} />{' '}
+                <span data-testid="reviewer-status">{advisory ? advisedWording(reviewer) : isCritiqueReviewer(reviewer.reviewer_id) ? critiqueOutcomeWording(reviewer) : outcomeWording(reviewer)}</span>
+                <ReviewerTime reviewer={reviewer} />
+              </p>
+              <p className="projects-muted">
+                <span data-testid="reviewer-counts">{advisory ? advisoryFindingsWording(reviewer) : severityCounts(reviewer.findings)}</span>
+                {reviewer.launched_at !== null && reviewer.accepted_at !== null && <> · launched <Time iso={reviewer.launched_at} seconds /></>}
+                {reviewer.accepted_at !== null && <> · {isCritiqueReviewer(reviewer.reviewer_id) ? CRITIQUE_DECIDED_WORDING : 'file accepted'} <Time iso={reviewer.accepted_at} seconds /></>}
+              </p>
+            </li>
+          )
+        })}
       </ul>
     </section>
   )
@@ -501,9 +508,7 @@ function ReviewResultView({ review, scope, definitionNodes, snapshotNodes, input
             ))}
           </ul>
         )}
-        <p className="projects-muted">
-          A finding links to a captured file only where its message names the file's path verbatim. Blocking means an unresolved P0 or P1 finding from any reviewer; a quote links only where the task text contains it verbatim. Workers are the lanes this run had{lanes.length > 0 ? ` (${lanes.join(', ')})` : ''}; “multiple workers” covers findings that concern more than one lane. Reviewer names the reviewer that raised the finding; the same finding raised by several reviewers is listed once per reviewer, never merged.
-        </p>
+        <p className="projects-muted" data-testid="findings-legend">{findingsLegend(judged, reviewers.some(reviewer => isCritiqueReviewer(reviewer.reviewer_id)), lanes)}</p>
       </section>
 
       <ReviewerStrip review={review} reviewers={reviewers} />

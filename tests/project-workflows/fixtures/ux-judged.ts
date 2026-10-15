@@ -63,7 +63,8 @@ const done = (session: string | null = null): NodeState => ({ status: 'succeeded
 const states: Record<string, NodeState> = {
   launch_engine: done(SESSIONS.engine), launch_viewer: done(SESSIONS.viewer), handoff: done(),
   verify_engine: done(SESSIONS.engine), verify_viewer: done(SESSIONS.viewer), candidate: { ...done(), lanes: LANES.map(lane => ({ worker: lane, attempt: 1 })) },
-  review: { status: 'failed', attempt: 1 },
+  // `review: 1` serves the review's result URI, so the run page's Now banner and step sheet read the judged review too.
+  review: { status: 'failed', attempt: 1, review: 1 },
 }
 
 type Fixture = { runId: string; section: JudgedPanelRecord; live: JudgedPanelRecord | null; review: RawReview }
@@ -76,8 +77,14 @@ export const UX_JUDGED_DEFINITION: WorkflowDefinition = definition(PROJECT.proje
 
 const records = (): InternalEvent[] => rows.map(([clock, node, status, message], index) => ({ sequence: index + 1, time: at(clock), node, status, message }))
 
-/** review.json as the export's review section (1.4.0): its reviewers with their own findings, the run-wide transport native. */
+/**
+ * review.json as the export's review section (1.4.0): its reviewers with their own findings, the run-wide transport native.
+ * On a judged record (it lists `judge`) a built-in with a verdict has status `accepted`, as the engine writes it; the judge,
+ * critique and the fallback record's built-ins take their status from their verdict.
+ */
 function rawReviewSection(review: RawReview): RawReviewSection {
+  const judged = review.reviewers.some(entry => entry.reviewer_id === 'judge')
+  const builtin = (id: string) => id !== 'judge' && id !== 'critique'
   const findings = review.findings.map(finding => ({ severity: finding.severity, message: finding.message, disposition: finding.disposition, worker: finding.worker ?? null, requirement: finding.requirement ?? null, reviewer: finding.reviewer }))
   return {
     attempt: 1, transport: 'native', reviewer_session_id: review.reviewer, independent: true, bundle_sha256: review.bundle_sha256, candidate_commit: CANDIDATE_COMMIT,
@@ -85,7 +92,7 @@ function rawReviewSection(review: RawReview): RawReviewSection {
     reviewers: review.reviewers.map(entry => ({
       reviewer_id: entry.reviewer_id, transport: 'native', session_id: entry.session_id ?? '', verdict: entry.verdict,
       findings: findings.filter(finding => finding.reviewer === entry.reviewer_id), launched_at: null, accepted_at: entry.accepted_at,
-      status: entry.verdict === 'approved' ? 'accepted' : 'blocked',
+      status: entry.verdict === 'approved' || (judged && builtin(entry.reviewer_id) && entry.verdict !== null) ? 'accepted' : 'blocked',
     })),
   }
 }

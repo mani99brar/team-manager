@@ -148,6 +148,26 @@ test(`[scenario:panel-review-section] On the judged run the review section shows
   expect(await attributes(entries, 'data-reviewer')).toEqual(['general', 'coverage', 'judge'])
   expect(await texts(entries.getByTestId('reviewer-role'))).toEqual(['advisory (the judge decided)', 'advisory (the judge decided)', 'deciding reviewer'])
   await expect(entries.nth(2).getByTestId('reviewer-verdict')).toHaveAttribute('data-status', 'blocked')
+  // C1 d, C3: an advisory card keeps its verdict for the record but is neutral, reads "advised", and its findings went to the judge.
+  // V4: the engine writes status accepted for a built-in of a judged record (it keeps its verdict); the judge's follows its verdict.
+  expect(await attributes(entries, 'data-status')).toEqual(['accepted', 'accepted', 'blocked'])
+  expect(await texts(entries.getByTestId('reviewer-status'))).toEqual(['advised blocking', 'advised blocking', 'blocked the candidate'])
+  expect(await texts(entries.getByTestId('reviewer-counts'))).toEqual(['findings passed to the judge', 'findings passed to the judge', '1 P1, 1 P2'])
+  for (const index of [0, 1]) {
+    await expect(entries.nth(index)).toHaveClass(/\btone-idle\b/)
+    await expect(entries.nth(index).getByTestId('reviewer-verdict')).not.toHaveClass(/status-failed/)
+  }
+  await expect(entries.nth(2)).toHaveClass(/\btone-fail\b/)
+  // C3: the figures and the filter toggles name the judge only, never an empty general/coverage.
+  const figures = page.getByTestId('figure-reviewers')
+  expect(await attributes(figures.locator('[data-reviewer]'), 'data-reviewer')).toEqual(['judge'])
+  await expect(page.getByTestId('findings-filters')).not.toContainText('general')
+  await expect(page.getByTestId('findings-filters')).not.toContainText('coverage')
+  // C4: the judged legend.
+  const legend = page.getByTestId('findings-legend')
+  await expect(legend).toContainText('Blocking means an unresolved P0 or P1 ruling the judge confirmed; the built-in reviewers are advisory and reach this list only through a ruling;')
+  await expect(legend).toContainText('Each ruling\'s Reviewer is the judge, and its [J<n> from …] prefix names the findings it merged.')
+  await expect(legend).not.toContainText('from any reviewer')
   const findings = result.getByTestId('finding')
   await expect(findings).toHaveCount(2)
   expect(await attributes(findings, 'data-reviewer')).toEqual(['judge', 'judge'])
@@ -160,6 +180,21 @@ test(`[scenario:panel-review-section] On the judged run the review section shows
 
   // The Sessions list on the run page: one row per seat, none with a resume command, and the judge's with the bare command.
   await page.goto(runPage(RUN_JUDGED))
+  // C1 b: the Now banner's cause is the judge's ruling; the built-ins are advisory, never named as having blocked.
+  const reason = page.getByTestId('now-reason')
+  await expect(reason).toContainText('judge blocked the candidate: 1 open P1 — [J1 from general-1, C1, M1] settle does not wait for a seat relaunched on resume')
+  await expect(reason).toContainText('general and coverage advised (the judge decided).')
+  await expect(reason).not.toContainText(/(general|coverage) (approved|blocked)/)
+  // C1 c: the step sheet says the judge decided; its advisory entries are labelled and neutral.
+  await openStepSheet(page, 'review')
+  await expect(stepSheet(page).getByTestId('sheet-did')).toHaveText('Review blocked by judge blocked; the judge decided, advisory: general advised blocking, coverage advised blocking; 2 findings, 1 blocking.')
+  const sheetReviewers = stepSheet(page).getByTestId('sheet-reviewers').locator('.state')
+  expect(await texts(sheetReviewers)).toEqual(['general blocked · advisory', 'coverage blocked · advisory', 'judge blocked · 2 findings'])
+  expect(await attributes(sheetReviewers, 'data-role')).toEqual(['advisory', 'advisory', 'deciding'])
+  expect(await attributes(sheetReviewers, 'title')).toEqual(['advisory (the judge decided)', 'advisory (the judge decided)', null])
+  for (const index of [0, 1]) await expect(sheetReviewers.nth(index)).toHaveClass(/\btone-idle\b/)
+  await expect(sheetReviewers.nth(2)).toHaveClass(/\btone-fail\b/)
+  await page.keyboard.press('Escape')
   const sessions = page.getByTestId('sessions-section')
   await expect(sessions).toBeVisible()
   const panelRow = (key: string) => sessions.locator(`[data-testid="session-row"][data-session-key="${key}"]`)
@@ -172,12 +207,20 @@ test(`[scenario:panel-review-section] On the judged run the review section shows
   await expect(judgeRow).toContainText('Panel · review · judge')
   await expect(judgeRow.getByTestId('session-resume-command')).toHaveText(`claude --resume ${JUDGE_SESSION}`)
   expect(await judgeRow.getByTestId('session-resume-command').innerText()).not.toContain('cd ')
+  // C2: the judge's worktree is removed, so its note never says to run it there.
+  await expect(judgeRow.getByTestId('session-resume-note')).toHaveText('its worktree was removed; run it from any directory')
   await renderedText(sessions)
 
   // The graph draws the built-in reviewers' cards and the panel's, never a judge card ([L12] B2): the judge is reached
   // through the Panel and Review surfaces above.
   for (const nodeId of ['reviewer-general', 'reviewer-coverage', 'panel']) await expect(graphNode(page, nodeId)).toHaveCount(1)
   await expect(graphNode(page, 'reviewer-judge')).toHaveCount(0)
+  // V2: the advisory built-ins' cards are neutral and say they advised; none reads as a blocking (fail) card.
+  for (const nodeId of ['reviewer-general', 'reviewer-coverage']) {
+    await expect(graphNode(page, nodeId)).toHaveClass(/\btone-idle\b/)
+    await expect(graphNode(page, nodeId)).not.toHaveClass(/\btone-fail\b/)
+    await expect(graphNode(page, nodeId)).toContainText('advised blocking')
+  }
   await expect(page.locator('[data-node-id="reviewer-judge"]')).toHaveCount(0)
 })
 
