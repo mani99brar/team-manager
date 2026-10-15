@@ -103,7 +103,7 @@ Each item of PRD §11 is proved by a named test:
     - [L8]: the known limit stated in the handoff doc and RUNBOOK;
     - [L9]: `npm ci` before the full suite.
 
-16. **Run 003 follow-up ([L10], widened by [L11], with proof (c) and the merge note per [L12]):** every test module that takes a browser slot runs under an isolated queue: `isolate_registry()` per test, and `setUpModule` in `test_browser_rules` and `test_critique`, through one helper. [L11] (a)-(d) are proved, and the handoff merge note lists every touched file.
+16. **Run 003 follow-up ([L10], widened by [L11], the merge note per [L12], proof (c) per [L13]):** every test module that takes a browser slot runs under an isolated queue: `isolate_registry()` per test, and `setUpModule` in `test_browser_rules` and `test_critique`, through one helper. [L11] (a)-(d) are proved, and the handoff merge note lists every touched file.
 
 The worker's Proof table names a test for each item.
 
@@ -117,4 +117,4 @@ Stop and report `blocked`, with what you found, when:
 
 ## Changes after launch
 
-Changes after launch are `[L<n>]` bullets in `decisions.md`, and they win over this task: [L1]-[L3] (challenge attempt 1) [L4]-[L9] (follow-up run 002) and [L10]-[L12] (follow-up run 003).
+Changes after launch are `[L<n>]` bullets in `decisions.md`, and they win over this task: [L1]-[L3] (challenge attempt 1) [L4]-[L9] (follow-up run 002) and [L10]-[L13] (follow-up run 003).
