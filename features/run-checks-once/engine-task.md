@@ -8,6 +8,7 @@ Spec: `features/run-checks-once/prd.md`. Binding decisions: `features/run-checks
 
 ## Context
 
+- **Follow-up run 004 ([L14]).** Your prompt starts with the restore of your owned paths from run 003's reviewed candidate `c451d93`, which already meets items 1-16. Keep repair-1 as it is, fix discovery attribution, rewrite the merge note per [L14], then run your checks once and hand off.
 - **Follow-up run 003 ([L10]).** Your prompt starts with the restore of your owned paths from run 002's lane snapshot `8eb67b6`, which already meets items 1-15. Make only the [L10] change as widened by [L11], then run your checks and hand off.
 - **Follow-up run 002 ([L4]-[L9], done at 8eb67b6).** Your prompt starts with the restore of your owned paths from 001's reviewed candidate `f62e844`, which already meets items 1-14 below as 001 delivered them. Then apply `features/run-checks-once/carry/repair-2.diff` ([L4]), and fix [L5]-[L7] and [L8]'s docs. Run 001's review blockers and their triage are summarised in decisions.md [L4]-[L8].
 - **Candidate gate** (`workflow/pipeline.py`):
@@ -105,6 +106,13 @@ Each item of PRD §11 is proved by a named test:
 
 16. **Run 003 follow-up ([L10], widened by [L11], the merge note per [L12], proof (c) per [L13]):** every test module that takes a browser slot runs under an isolated queue: `isolate_registry()` per test, and `setUpModule` in `test_browser_rules` and `test_critique`, through one helper. [L11] (a)-(d) are proved, and the handoff merge note lists every touched file.
 
+17. **Run 004 follow-up ([L14]):**
+    - repair-1's two SharedExecution tests still pass;
+    - the `discover -s tests` Attribution test shows snapshot attribution, the brief's rerun line and `test_file`;
+    - the parser covers `-t`, `-s` and the positional start directory;
+    - the merge note is rebuilt from the diff stat, naming both overlaps;
+    - triage D is stated as a known limit.
+
 The worker's Proof table names a test for each item.
 
 ## Stop
@@ -117,4 +125,4 @@ Stop and report `blocked`, with what you found, when:
 
 ## Changes after launch
 
-Changes after launch are `[L<n>]` bullets in `decisions.md`, and they win over this task: [L1]-[L3] (challenge attempt 1) [L4]-[L9] (follow-up run 002) and [L10]-[L13] (follow-up run 003).
+Changes after launch are `[L<n>]` bullets in `decisions.md`, and they win over this task: [L1]-[L3] (challenge attempt 1) [L4]-[L9] (follow-up run 002) [L10]-[L13] (follow-up run 003) and [L14] (follow-up run 004).
