@@ -97,8 +97,10 @@ change. Browser reds ran in the worker phase for every scenario and in the candi
   the readings with `recordHomeReadings`, stamped `new Date(homeMeta.settledAt).toISOString()` ([L12]) from each successful home
   poll, and passes the set to the rail badge, the feature page, `RunsHome`, `projectRunInfo` and `ProjectPage`. "Stale" is a reading
   older than the last successful home poll, never extended; no new staleness check or debounce ([L13]); a failed poll keeps the last
-  classification. The card wording is the interrupted kind's ("run interrupted", "Interrupted at … · the controller stopped", next
-  step "resume the run on the run page"). Proof: lists.test.ts "a running latest run whose controller has read not_running…" (six
+  classification. The card says its own words (hand-fix 2 below): the chip "controller not running", the summary "Interrupted at
+  <step>: the controller is not running; sessions keep running", next step "resume the run on the run page"; a served interrupt
+  keeps "run interrupted" and "Interrupted at … · the controller stopped". Its row time reads interrupted, never a ticking span
+  (hand-fix 1). Proof: lists.test.ts "a running latest run whose controller has read not_running…" (six
   tests, including the identical-input check against `servedDisagreement`) and `[scenario:triage-controller-stopped]` (title
   "(n)", rail Triage badge, project rail row and card waits move by one; a later `running` reading, one reading, unknown and null
   leave everything as it was; the non-latest run never moves; passes three times in each phase).
@@ -119,13 +121,39 @@ Each has one `screenshot:<id>`; untagged siblings: "A reviewer with no verdict k
 ## Existing assertions I changed (each follows from an item)
 
 - revamp-pages.spec.ts: `review-one-list` (`:487-489`) and `node-compact` (`:558-559`) measure the first `finding-message`'s bottom
-  (D4); `review-one-list` `:245-246`: the blocking P1 card's stripe is `--fail`, not `--p1` (D5 makes the old line false; the
+  (D4); `revamp-review` `:245-246`: the blocking P1 card's stripe is `--fail`, not `--p1` (D5 makes the old line false; the
   non-blocking P1 keeps `--p1`, asserted in `findings-groups`).
 - revamp-lists.spec.ts: `triage-filters` `:1469`, `:1485` (D21's string); `:1478` (D12: the section's sub no longer says
   "No run matches."; the section's `run-filter-none` does, once); `run-filters` "project page's scope line…" (`:1437`, `:1441`: D8's
   " · the first 50 runs of each feature" on the partly read page that has a next page).
 - dispatch.spec.ts: `:203` and `:209` (D20's literals).
 - lists.test.ts: the Triage strings and the closed-set test (D8, D21, [L10]).
+
+## Hand-fixes after review (cook decision 017)
+
+Three review defects fixed by hand on `cook/ux-critique-fixes-d-fix`, each test red on the code before and green after; browser
+scenarios run alone in both phases.
+
+1. `2e7388f` D32 ticking span. `rowTime(run, now, cls?)`: a running, unfinished run with no served interrupt whose class needs
+   `interrupted` is `{ kind: 'stopped', how: 'interrupted', since: movedAt(run) }` (its last activity, else its last update: the
+   latest move the list knows of, not the controller's stop time). `RunRow` and the step chart's `runWhen` pass the class.
+   Red: lists.test.ts got `{ kind: 'live', … ms: 7200000 }`; dispatch.test.ts got "started Oct 13 · running 4h00m";
+   `triage-controller-stopped` (worker) got "started 19:00 · 1h00m · last activity 1 h ago" in the pinned Triage row. Green:
+   unit 165/165; the scenario passes in both phases, now also checking the pinned Triage row, the project page's step chart
+   ("interrupted", word "interrupted", unchanged after a poll) and the feature page's row (no `.run-row-span`).
+2. `5e3d277` D32 wording. Discriminator `kind === 'interrupted' && run.activity?.attention?.kind !== 'interrupted'`:
+   `rowSummary` says "Interrupted at <step>: the controller is not running; sessions keep running" and the Needs-you chip
+   "controller not running"; served interrupts are unchanged. `ProjectPage`'s "interrupted; waits on you" is shared by both kinds
+   and stays. Red: lists.test.ts summary did not match /controller is not running/; the scenario received "Interrupted at Launch ui
+   worker · the controller stopped". Green: unit 166/166; the scenario passes in both phases.
+3. `9ee22af` findings-groups mock. `NON_BLOCKING_P1` (a `window.fetch` init script) is replaced by `answerNonBlockingP1`, a
+   `page.route` on `/reviews/<n>` (the mocks' `mockResponse` in the worker phase, `route.fetch()` in the candidate phase) that
+   changes only the `generalUi` finding to a resolved P1, with a served-count assertion. Red, with the handler registered but the
+   body unmodified: "expect(plainP1).toHaveCount(1) … Received: 0" in both phases. Green: both phases.
+
+Rulings recorded for this hand-fix in decisions.md: [L19] (D16's resume-command flex rule as built), [L20] (the only existing
+assertions that may move: `revamp-review` `:246`, run-filters `:1437`/`:1441`, triage-filters `:1478`) and [L21] ([L6] stands for
+D15; [O10](d)'s hysteresis withdrawn).
 
 ## D32 seed survey ([L3], [L9], [L12])
 
