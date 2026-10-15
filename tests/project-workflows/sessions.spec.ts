@@ -150,9 +150,10 @@ async function expectSessionFacts(page: Page, row: SessionRow) {
 
 test(`[scenario:sessions-reviewer] The 'Reviewer · general' page shows its session block and resume command (the ~/ form on the exposed project in the worker phase, the bare form with "run it in the session's worktree" on the unexposed one), its verdict and only its own findings, its earlier round's verdict; coverage says late blocked; the critique page shows its session and findings; no absolute path (${phase})`, async ({ page }, testInfo) => {
   await page.goto(nodePage(RUN_SESSIONS, 'reviewer-general'))
-  // The header names the reviewer as its stage card does and points at the (blocked) verdict below, never "This step completed.".
+  // The header names the reviewer as its stage card does and leads with its (blocked) verdict, never "This step completed."
+  // ([scenario:reviewer-verdict] below checks the lead in full).
   await expect(page.getByTestId('node-executor')).toHaveText('one reviewer')
-  await expect(page.getByTestId('node-status-meaning')).toHaveText('The reviewer finished; its verdict is below.')
+  await expect(page.getByTestId('node-status-meaning')).toHaveText('Blocked · round 2 · 2 open P1 · session succeeded')
   const body = page.getByTestId('reviewer-body')
   await expect(body.getByTestId('reviewer-verdict')).toContainText('blocked')
   await expect(body.getByTestId('reviewer-verdict')).toContainText('round 2')
