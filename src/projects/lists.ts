@@ -75,6 +75,7 @@ type ClassKey = Pick<RunSummary, 'project_id' | 'workflow_id' | 'run_id'>
 const groupKey = (run: Pick<RunSummary, 'project_id' | 'workflow_id'>) => `${run.project_id}\u0000${run.workflow_id}`
 const classKey = (run: ClassKey) => `${groupKey(run)}\u0000${run.run_id}`
 const NO_CLASS: RunClass = { needs: null, supersededBy: null }
+const NO_STOPPED: ReadonlySet<string> = new Set()
 /** Whether `a` was created after `b`: a later `created_at`, a tie going to the greater `run_id`. */
 const createdAfter = (a: Pick<RunSummary, 'created_at' | 'run_id'>, b: Pick<RunSummary, 'created_at' | 'run_id'>) =>
   ms(a.created_at) > ms(b.created_at) || (ms(a.created_at) === ms(b.created_at) && a.run_id > b.run_id)
@@ -86,8 +87,15 @@ const createdAfter = (a: Pick<RunSummary, 'created_at' | 'run_id'>, b: Pick<RunS
  * status; the latest run of its project and workflow needs a decision when it is paused at the design challenge, and needs
  * the operator when it is interrupted while paused or running. Every other run needs nobody. The feature text is never read:
  * the project and the workflow are the key. Pass the whole loaded list, in any order.
+ *
+ * `stopped` is the set of run keys (`registryKey`) whose controller has read `not_running` for 15 s (`controllerNotRunning`
+ * over the readings the page keeps across polls); the latest, running run in it needs the operator as an interrupted one
+ * does, as on its run page. Without it, or for a run that is not in it, nothing changes: status alone never decides.
  */
-export function classifyRuns(runs: readonly Pick<RunSummary, 'project_id' | 'workflow_id' | 'run_id' | 'created_at' | 'status' | 'activity' | 'accepted'>[]): Map<string, RunClass> {
+export function classifyRuns(
+  runs: readonly Pick<RunSummary, 'project_id' | 'workflow_id' | 'run_id' | 'created_at' | 'status' | 'activity' | 'accepted'>[],
+  stopped: ReadonlySet<string> = NO_STOPPED,
+): Map<string, RunClass> {
   const newest = new Map<string, (typeof runs)[number]>()
   for (const run of runs) {
     const best = newest.get(groupKey(run))
@@ -105,6 +113,7 @@ export function classifyRuns(runs: readonly Pick<RunSummary, 'project_id' | 'wor
       if (attention.kind === 'paused' && attention.node_id === 'challenge' && run.status === 'paused') cls = { needs: 'decision', supersededBy: null }
       else if (attention.kind === 'interrupted' && (run.status === 'paused' || run.status === 'running')) cls = { needs: 'interrupted', supersededBy: null }
     }
+    if (cls.needs === null && cls.supersededBy === null && latest && run.status === 'running' && !isFinished(run) && stopped.has(registryKey(run))) cls = { needs: 'interrupted', supersededBy: null }
     classes.set(classKey(run), cls)
   }
   return classes
@@ -615,9 +624,21 @@ export const NEXT_STEP: Record<NeedKind, string> = {
   interrupted: 'resume the run on the run page',
 }
 
+/** The line under a run list that could not read some of its runs: "1 run cannot be read: <run id>", "2 runs cannot be read: <id>, <id>". */
+export function unreadRunsText(runIds: readonly string[]): string {
+  return `${runIds.length} ${runIds.length === 1 ? 'run' : 'runs'} cannot be read: ${runIds.join(', ')}`
+}
+
 /** The lanes a workflow definition launches (`launch_<lane>` nodes), in definition order. */
 export function laneNamesOf(nodes: readonly { node_id: string }[]): string[] {
   return nodes.filter(node => node.node_id.startsWith('launch_')).map(node => node.node_id.slice('launch_'.length))
+}
+
+/** The run keys whose controller has read `not_running` for 15 s in the kept readings, the `stopped` argument of `classifyRuns`. */
+export function stoppedRunKeys(readings: ReadonlyMap<string, readonly ControllerReading[]>): Set<string> {
+  const keys = new Set<string>()
+  for (const [key, list] of readings) if (list.at(-1)?.value === 'not_running' && controllerNotRunning(list)) keys.add(key)
+  return keys
 }
 
 /**

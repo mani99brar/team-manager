@@ -53,6 +53,9 @@ export function SignalRun({ detail, rows, timeline, events, inputs, review, atte
   const [height, setHeight] = useState<number | null>(null)
   // The run frame's measured width, never the viewport's: the dock takes its own column from 1200 px of it.
   const [frameWidth, setFrameWidth] = useState(0)
+  // The page scrollbar's width, read with the frame: the column decision counts it back in (below), so the Sessions table's scrollbar
+  // appearing after load does not flip a column to an overlay.
+  const [gutter, setGutter] = useState(0)
   const cueText = sessions ? sessionsCueText(sessions) : null
   const nodes = useMemo(() => stageNodes({ detail, rows, timeline, events, inputs, review, attention, reviewRound, sessions, panels }, formatSpan), [detail, rows, timeline, events, inputs, review, attention, reviewRound, sessions, panels])
   const labels = useMemo(() => new Map(detail.definition.nodes.map(node => [node.node_id, node.label])), [detail.definition.nodes])
@@ -72,6 +75,7 @@ export function SignalRun({ detail, rows, timeline, events, inputs, review, atte
       const top = element.getBoundingClientRect().top + window.scrollY
       setHeight(Math.max(MIN_STAGE_HEIGHT + cueHeight + 2, window.innerHeight - top - 4))
       setFrameWidth(element.clientWidth)
+      setGutter(Math.max(0, window.innerWidth - document.documentElement.clientWidth))
     }
     measure()
     window.addEventListener('resize', measure)
@@ -109,12 +113,13 @@ export function SignalRun({ detail, rows, timeline, events, inputs, review, atte
   const closeFromDock = (event: KeyboardEvent<HTMLDivElement>) => {
     if (event.key === 'Escape' && selected !== null && event.target instanceof Element && event.target.closest('.sb-live')) select(null)
   }
-  const column = frameWidth >= DOCK_COLUMN_FRAME
+  // A column from a run frame of 1200 px, measured as it would be without the page's scrollbar.
+  const column = frameWidth + gutter >= DOCK_COLUMN_FRAME
   return (
     <div ref={frame} className={`sb-frame${column ? ' dock-col' : ''}`} data-testid="run-board" data-dock={column ? 'column' : 'overlay'} style={height === null ? undefined : { height }} onKeyDown={closeFromDock}>
       <GlyphDefs />
       <LiveDock detail={detail} now={now} clock={clock} nodes={nodes} nowId={nowId} latest={latest} timeline={timeline} inputs={inputs} open={dockOpen} onOpenChange={setDockOpen} onGo={goTo} nodeHref={nodeHref} onNavigate={onNavigate} spent={sessions ? spentText(sessions.totals) : null} />
-      <RunStage ref={stage} nodes={nodes} nowId={nowId} selectedId={selected} onSelect={select} reservedLeft={dockReserve(frameWidth, dockOpen)} sheetOpen={selectedNode !== null} cued={hasCue}>
+      <RunStage ref={stage} nodes={nodes} nowId={nowId} selectedId={selected} onSelect={select} reservedLeft={column ? 0 : dockReserve(frameWidth, dockOpen)} sheetOpen={selectedNode !== null} cued={hasCue}>
         {selectedNode && (
           <NodeSheet node={selectedNode} now={now} isFocus={selectedNode.id === (now?.focus?.node_id ?? null)} href={nodeHref(selectedNode.id)} onNavigate={onNavigate} onClose={() => select(null)}>
             {sheetExtras?.(selectedNode.id)}

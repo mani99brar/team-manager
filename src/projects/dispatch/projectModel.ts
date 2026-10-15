@@ -66,9 +66,10 @@ export const FAILED_RUN_INFO: ProjectRunInfo = { ...EMPTY, state: 'failed', allB
 /**
  * The run state of one project from its registry runs. Null is a read that has not settled (`loading`: nothing is claimed,
  * neither failed nor empty); a project whose read failed, or whose every workflow's run list failed, is `failed` (`allBad`).
- * Every count reads the project's one classification (`classifyRuns`), so a run needing the operator counts once, as a wait.
+ * Every count reads the project's one classification (`classifyRuns`, with the run keys whose controller read `not_running` for
+ * 15 s), so a run needing the operator counts once, as a wait.
  */
-export function projectRunInfo(entry: ProjectRuns | null): ProjectRunInfo {
+export function projectRunInfo(entry: ProjectRuns | null, stopped: ReadonlySet<string> = new Set()): ProjectRunInfo {
   if (entry === null) return { ...EMPTY, state: 'loading', allBad: false }
   if (entry.error !== null) return { ...EMPTY, state: 'failed', allBad: true }
   const workflows = entry.workflows
@@ -76,7 +77,7 @@ export function projectRunInfo(entry: ProjectRuns | null): ProjectRunInfo {
   const readable = workflows.filter(w => w.error === null)
   const allBad = workflows.length > 0 && readable.length === 0
   const badFeatures = workflows.filter(w => w.error !== null).length
-  const classes = classifyRuns(runs)
+  const classes = classifyRuns(runs, stopped)
   const cls = (run: RunSummary) => classOf(classes, run)
   const waits = runs.filter(run => cls(run).needs !== null).length
   const paused = runs.filter(run => run.status === 'paused' && cls(run).needs === null && cls(run).supersededBy === null).length

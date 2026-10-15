@@ -97,7 +97,7 @@ export function linesNamed(message: string, path: string): [number, number][] {
 }
 
 /** Abbreviations whose full stop does not end a sentence. */
-const ABBREVIATION = /(?:^|[\s(])(?:e\.g|i\.e|vs|cf|no|fig)$/i
+const ABBREVIATION = /(?:^|[\s(])(?:e\.g|i\.e|vs|cf|no|fig|etc|approx|incl|mr|mrs|ms|dr|al)$/i
 
 /**
  * A finding message split at its first sentence: `lead` is that sentence, `rest` the remainder with its leading space
@@ -107,6 +107,8 @@ export function splitFirstSentence(message: string): { lead: string; rest: strin
   for (const match of message.matchAll(/[.!?]+(?=\s)/g)) {
     const end = match.index + match[0].length
     if (ABBREVIATION.test(message.slice(0, match.index))) continue
+    // A full stop followed by a lowercase word continues the sentence ("etc. are kept").
+    if (match[0] === '.' && /^\s+\p{Ll}/u.test(message.slice(end))) continue
     return { lead: message.slice(0, end), rest: message.slice(end) }
   }
   return { lead: message, rest: '' }

@@ -106,6 +106,8 @@ type Props = {
 
 export function GithubColumn({ project, git, github, runBranches, others, primaryName, viewerLogin, readAt, onShowAhead, aheadOpen, onNavigate, compact = false }: Props) {
   const notReadText = githubNotReadText(github)
+  // A project whose git could not be read says why once, in its git line; its GitHub is not read as a consequence, never said again.
+  const gitUnavailable = git?.status === 'unavailable'
   if (compact) {
     const ahead = git !== null && (git.ahead_commits.length > 0 || git.landings.length > 0 || (git.origin?.compare === 'compared' && (git.origin.ahead ?? 0) > 0))
     return (
@@ -113,7 +115,7 @@ export function GithubColumn({ project, git, github, runBranches, others, primar
         <p className="dispatch-gline" id="g-local" data-testid="dispatch-gh-local" tabIndex={-1}>
           <span className="dispatch-gh-title">Local and GitHub</span>
           {' · '}{git === null ? 'git state not available.' : syncPhrase(git, project.project_id, primaryName)}
-          {' · '}<span data-testid="dispatch-gh-local-notread">{notReadText}</span>
+          {!gitUnavailable && <>{' · '}<span data-testid="dispatch-gh-local-notread">{notReadText}</span></>}
           {ahead && (
             <> {' · '}<button type="button" className="dispatch-gh-ahead-btn" data-testid="dispatch-ahead-button" aria-pressed={aheadOpen} onClick={onShowAhead}>Commits ahead and landings</button></>
           )}
@@ -168,7 +170,7 @@ export function GithubColumn({ project, git, github, runBranches, others, primar
                     {github?.default_branch ? <>GitHub's <code>{github.default_branch}</code> has no commits.</> : githubNoHeadText(null)}
                   </p>
                 )
-                : <p className="dispatch-gsub dispatch-muted" data-testid="dispatch-gh-local-notread">{notReadText}</p>}
+                : gitUnavailable ? null : <p className="dispatch-gsub dispatch-muted" data-testid="dispatch-gh-local-notread">{notReadText}</p>}
             {git.origin?.compare === 'compared' && (git.origin.ahead ?? 0) > 0 && (
               <p className="dispatch-gsub" data-testid="dispatch-ahead-naming">
                 Of the {git.origin.ahead} ahead, {git.ahead_naming_run} name a run; {(git.origin.ahead ?? 0) - git.ahead_naming_run} do not name a known run. Runs never push.

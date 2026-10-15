@@ -178,9 +178,12 @@ export function NodeHeader({ definition, status, attempt, timing, clock, cause, 
     <header className={`node-header ${toneClass(verdict ? verdict.lead.tone : status === 'no_record' ? 'idle' : statusTone(status))}`} data-testid="node-header">
       <div className="node-title-row">
         <h3 id="node-detail-title" tabIndex={-1}>{definition.label} <span className="projects-muted node-detail-id">({definition.node_id})</span></h3>
-        {status === 'no_record'
-          ? <span className="status-badge status-cancelled" data-status="no_record" title="Ended without a record: a later attempt replaced it before any verdict."><span>No record</span></span>
-          : <StatusBadge status={status} />}
+        {/* A reviewer leads with its verdict: the session's outcome is muted metadata below, never a toned badge beside the title. */}
+        {definition.node_id.startsWith('reviewer-') && verdict !== null
+          ? null
+          : status === 'no_record'
+            ? <span className="status-badge status-cancelled" data-status="no_record" title="Ended without a record: a later attempt replaced it before any verdict."><span>No record</span></span>
+            : <StatusBadge status={status} />}
         <span className="node-executor-line"><span aria-hidden="true">· </span><span data-testid="node-executor" data-executor={executorCategory(definition.kind)}>{executorOf(definition.kind, reviewTransport, definition.node_id)}</span></span>
       </div>
       <p className="node-timing" data-testid="node-timing">

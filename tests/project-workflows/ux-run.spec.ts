@@ -17,6 +17,8 @@ import {
 import { RUN_ACCEPTED_ABANDONED, RUN_ACCEPTED_BLOCKED, UX_ACCEPTED_WORKFLOW_ID } from './fixtures/ux-accepted.ts'
 import { RUN_CHALLENGE, UX_REFINE_WORKFLOW_ID } from './fixtures/ux-refine.ts'
 import { REVAMP_PAGES_WORKFLOW_ID, RUN_REVAMP_BLOCKED, RUN_REVAMP_DONE, RUN_REVAMP_RUNNING } from './fixtures/ux-revamp-pages.ts'
+import { installProjectMocks } from './mock.ts'
+import { RUN_SESSIONS, UX_SESSIONS_WORKFLOW_ID } from './fixtures/sessions.ts'
 import { attach, expectNoExecutionControls, graphNode, installHooks, liveDock, nodeDetail, nodeListItem, openRunDetails, openStepSheet, phase, runUrl, stepSheet, workflowUrl } from './support.ts'
 
 installHooks()
@@ -840,4 +842,71 @@ test(`[scenario:identity-line] The identity line shows "definition current" or "
   await expect(page.getByTestId('definition-changed')).toBeVisible()
   await expect(branch).toBeHidden()
   expect(await pageWidth(page)).toBeLessThanOrEqual(390)
+})
+
+/**
+ * A column stays a column when the Sessions table's scrollbar appears after load. The suite's default Chromium hides its
+ * scrollbars (`--hide-scrollbars`), so this one test launches its own browser without that flag, on a page with the same
+ * mocks and context options as the default one, and closes it in `finally`.
+ */
+test(`[scenario:dock-column-hold] A dock column stays a column when the sessions load and their scrollbar appears; resizing still switches at 1200 px (${phase})`, async ({ playwright, baseURL }, testInfo) => {
+  test.slow()
+  const browser = await playwright.chromium.launch({ ignoreDefaultArgs: ['--hide-scrollbars'] })
+  try {
+    const context = await browser.newContext({ baseURL, timezoneId: 'UTC', locale: 'en-GB', reducedMotion: 'reduce' })
+    const page = await context.newPage()
+    if (phase === 'worker') await installProjectMocks(page)
+    // The sessions are held back, so the page has no scrollbar until they arrive.
+    let release: () => void = () => {}
+    const gate = new Promise<void>(resolve => { release = resolve })
+    await page.route(url => url.pathname.endsWith(`/runs/${RUN_SESSIONS}/sessions`), async route => {
+      await gate
+      await route.fallback()
+    })
+    const gutterOf = () => page.evaluate('window.innerWidth - document.documentElement.clientWidth') as Promise<number>
+    const board = page.getByTestId('run-board')
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await page.goto(runUrl(RUN_SESSIONS, undefined, UX_SESSIONS_WORKFLOW_ID))
+    await expect(page.getByTestId('run-stage')).toBeVisible({ timeout: 30_000 })
+    await expect(page.getByTestId('sessions-cue')).toHaveCount(0)
+    // The page scrolls as soon as the stage has its height (the workspace's own padding sits below the frame), so the scrollbar
+    // is there before the sessions arrive; the frame is sized so that it measures 1205 px without it.
+    const gutter = await gutterOf()
+    expect(gutter, 'this browser draws a page scrollbar').toBeGreaterThan(0)
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const measured = await frameWidthOf(page)
+      if (measured === 1205 - gutter) break
+      await page.setViewportSize({ width: page.viewportSize()!.width + (1205 - gutter - measured), height: 900 })
+    }
+    const before = { gutter: await gutterOf(), frame: await frameWidthOf(page) }
+    expect(before.frame + before.gutter, 'the frame is 1205 px wide without the scrollbar').toBe(1205)
+    expect(before.frame, 'and under 1200 px with it').toBeLessThan(1200)
+    await expect(board, 'the column holds before the sessions arrive').toHaveAttribute('data-dock', 'column')
+    release()
+    await expect(page.getByTestId('sessions-cue')).toBeVisible()
+    await expect(board, 'and when they have loaded').toHaveAttribute('data-dock', 'column')
+    const after = { gutter: await gutterOf(), frame: await frameWidthOf(page) }
+    testInfo.annotations.push({ type: 'dock-column-hold', description: `before the sessions: gutter ${before.gutter} px, run-board clientWidth ${before.frame} px; after: gutter ${after.gutter} px, run-board clientWidth ${after.frame} px` })
+    expect(after.frame + after.gutter, 'the scrollbar and the frame still make 1205 px').toBe(1205)
+    await attach(page, testInfo, 'dock-column-hold')
+
+    // Genuine resizing still switches at 1200 px, counted without the scrollbar: the frame and the scrollbar together.
+    const sizeToTotal = async (total: number) => {
+      for (let attempt = 0; attempt < 6; attempt += 1) {
+        const measured = (await frameWidthOf(page)) + (await gutterOf())
+        if (measured === total) return
+        await page.setViewportSize({ width: page.viewportSize()!.width + (total - measured), height: 900 })
+        await page.waitForTimeout(150)
+      }
+      expect((await frameWidthOf(page)) + (await gutterOf())).toBe(total)
+    }
+    await sizeToTotal(1199)
+    await expect(board).toHaveAttribute('data-dock', 'overlay')
+    await sizeToTotal(1200)
+    await expect(board).toHaveAttribute('data-dock', 'column')
+    await sizeToTotal(1199)
+    await expect(board).toHaveAttribute('data-dock', 'overlay')
+  } finally {
+    await browser.close()
+  }
 })

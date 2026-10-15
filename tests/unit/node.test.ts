@@ -163,6 +163,7 @@ describe('reviewerLead: a reviewer\'s node page leads with its verdict, by value
     assert.equal(reviewerLead({ verdict: 'blocked', round: null, open: { p0: 0, p1: 0 }, status: 'succeeded' }).text, 'Blocked')
     assert.deepEqual(reviewerLead({ verdict: 'late blocked', round: 1, open: { p0: 0, p1: 1 }, status: 'succeeded' }), { text: 'Late, blocked · round 1 · 1 open P1', tone: 'fail', verdict: 'blocked' })
     assert.deepEqual(reviewerLead({ verdict: 'approved', round: 1, open: { p0: 0, p1: 0 }, status: 'succeeded' }), { text: 'Approved · round 1', tone: 'ok', verdict: 'approved' })
+    assert.deepEqual(reviewerLead({ verdict: 'failed', round: 1, open: null, status: 'failed' }), { text: 'Failed · round 1', tone: 'fail', verdict: 'failed' })
   })
   test('still running, failed session, stopped session and no record at all', () => {
     assert.deepEqual(reviewerLead({ verdict: null, round: 2, open: null, status: 'running' }), { text: 'No verdict yet', tone: 'run', verdict: null })
@@ -188,5 +189,19 @@ describe('splitFirstSentence: the card head is the first sentence, the rest fold
     assert.deepEqual(splitFirstSentence('No test proves it'), { lead: 'No test proves it', rest: '' })
     assert.equal(splitFirstSentence('Use a tag, e.g. the id. Then it works.').lead, 'Use a tag, e.g. the id.')
     assert.equal(splitFirstSentence('Is it set? Yes it is.').lead, 'Is it set?')
+  })
+  test('etc., approx. and a full stop before a lowercase word do not end the head sentence', () => {
+    for (const [message, lead] of [
+      ['Values a, b, etc. are kept. Second.', 'Values a, b, etc. are kept.'],
+      ['Takes approx. 5 s here. Then more.', 'Takes approx. 5 s here.'],
+      ['Ask Dr. Smith about it. Then more.', 'Ask Dr. Smith about it.'],
+      ['The file is read. then it is parsed. Last.', 'The file is read. then it is parsed.'],
+      ['Use a tag, e.g. the id. Then it works.', 'Use a tag, e.g. the id.'],
+      ['It is i.e. the same vs. the old one. More.', 'It is i.e. the same vs. the old one.'],
+    ] as const) {
+      const split = splitFirstSentence(message)
+      assert.equal(split.lead, lead)
+      assert.equal(split.lead + split.rest, message)
+    }
   })
 })

@@ -89,7 +89,12 @@
   .ss-row { grid-template-columns: minmax(0, 1fr); row-gap: 2px; padding: 6px 0 10px; }
   .ss-row .ss-item::before { content: attr(data-label) ": "; color: var(--muted); }
   .ss-row-resume { justify-content: flex-start; }
-  .ss-resume-cmd { flex-basis: 100%; }
+  .ss-row .ss-resume-cmd { flex-basis: 100%; }
+}
+/* On a node page the command may shrink and wrap beside its Copy button, so Copy stays on the command's first line however long the
+   command is; the Sessions table's opened command keeps its own line (above). A phone keeps its stacked layout. */
+@media (min-width: 481px) {
+  .ss-resume:not(.ss-resume-open) > .ss-resume-cmd { flex: 1 1 20ch; }
 }
 @media (max-width: 720px) {
   .ss-row-label a { min-height: 44px; }

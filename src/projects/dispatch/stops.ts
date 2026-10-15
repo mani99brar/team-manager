@@ -3,10 +3,11 @@
  * own recorded steps. A run whose steps are not read (pending or failed) has no stop: nothing is claimed from their absence.
  */
 import type { RunSummary } from '../api.ts'
-import { monthDay, rowTime, stoppedLabel, type RunClass } from '../lists.ts'
+import { isFinished, monthDay, rowTime, stoppedLabel, type RunClass } from '../lists.ts'
+import { OVERRIDE_LABEL, STATUS_LABEL } from '../status.ts'
 import { formatSpan, type Zone } from '../time.ts'
 import { PHASES, phaseOf } from './phases.ts'
-import type { ProjectStepsRun } from './types.ts'
+import type { ProjectStepsRun, ProjectStepsWorkflow } from './types.ts'
 
 /**
  * One run of the chart: its summary, its class in the project's classified run list, and its recorded steps once the
@@ -88,5 +89,31 @@ export function runWhen(entry: ChartRun, now: number, zone: Zone): string {
   if (time.kind === 'finished') return `${started} · ran ${formatSpan(time.ms)}`
   if (time.kind === 'live') return `${started} · running ${formatSpan(time.ms)}`
   if (time.kind === 'stopped') return stoppedLabel(time.how, time.since, now, zone)
+  // An unfinished run's last move as a date, never a growing span: "awaiting approval since Oct 11".
+  if (time.kind === 'updated' && !isFinished(entry.run)) return `${started} · ${(STATUS_LABEL[entry.run.status] ?? entry.run.status).toLowerCase()} since ${monthDay(time.at, now, zone)}`
   return started
 }
+
+/** A run's word on a row and in a header: its need when it needs the operator, else its status. */
+export function runWord(entry: ChartRun): string {
+  const { run, cls } = entry
+  if (run.accepted) return OVERRIDE_LABEL
+  if (cls.needs === 'question') return 'question'
+  if (cls.needs === 'approval') return 'awaiting approval'
+  if (cls.needs === 'pane') return 'needs you'
+  if (cls.needs === 'decision') return 'decision waits'
+  if (cls.needs === 'interrupted') return 'interrupted'
+  return STATUS_LABEL[run.status]
+}
+
+/** A feature's state word on its header: what its most urgent run is, else its latest run's outcome (the feature's, never the filter's). */
+export function stateWord(group: { runsRead: 'loading' | 'failed' | 'read'; steps: Pick<ProjectStepsWorkflow, 'error'> | null; rank: number; outcome: string | null }): string | null {
+  if (group.runsRead !== 'read' || group.steps?.error) return null
+  if (group.rank === 0) return 'needs you'
+  if (group.rank === 1) return 'running'
+  if (group.rank === 2) return 'paused'
+  return group.outcome === null ? 'no runs' : group.outcome
+}
+
+/** The status command with the run's directory as `<runs root>/<run id>`: the served project has no runs root, so it is a named placeholder. */
+export const statusCommand = (runId: string | null) => `python -m workflow status <runs root>/${runId ?? '<run-id>'} --by operator`

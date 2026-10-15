@@ -25,7 +25,7 @@ function countsText(info: ProjectRunInfo): string {
   return parts.length ? `: ${parts.join(', ')}` : ''
 }
 
-function Card({ data, onNavigate }: { data: CardData; onNavigate: (pathname: string) => void }) {
+function Card({ data, githubLoading, onNavigate }: { data: CardData; githubLoading: boolean; onNavigate: (pathname: string) => void }) {
   const { project, dispatch, info } = data
   const git = dispatch?.git ?? null
   const github = dispatch?.github ?? null
@@ -76,7 +76,10 @@ function Card({ data, onNavigate }: { data: CardData; onNavigate: (pathname: str
         <span className="dispatch-card-foot">
           {read
             ? <><span>{plural(github.open_prs ?? 0, 'open PR')}</span><span>{plural(github.open_issues ?? 0, 'open issue')}</span></>
-            : <span className="dispatch-muted">{githubNotReadText(github ?? null)}</span>}
+            : githubLoading
+              ? <span className="dispatch-muted">GitHub: reading…</span>
+              // A project that is not a git repository says so once, in its git line above; its GitHub reason is not repeated.
+              : git?.status === 'unavailable' ? null : <span className="dispatch-muted">{githubNotReadText(github ?? null)}</span>}
           <span className="dispatch-card-open" aria-hidden="true">Open ›</span>
         </span>
       </AppLink>
@@ -111,12 +114,12 @@ export function ProjectsPage({ cards, overview, repositoryCount, runsReadAt, run
             ? <>{plural(cards.length, 'project')} · repositories not read</>
             : <>{plural(cards.length, 'project')} in {plural(repositoryCount, 'repository').replace('repositorys', 'repositories')}</>}
           {' · '}<span data-testid="dispatch-runs-read">{runsReadAt !== null ? <>runs read <Time iso={new Date(runsReadAt).toISOString()} /></> : runsError ? `runs not read: ${runsError}` : 'reading runs…'}</span>
-          {oldestGithub ? <>{' · '}GitHub read <Time iso={oldestGithub} /></> : noGithubRemote ? null : <>{' · '}GitHub not read</>}
+          {oldestGithub ? <>{' · '}GitHub read <Time iso={oldestGithub} /></> : noGithubRemote || repositoryCount === null ? null : <>{' · '}GitHub not read</>}
         </p>
         <p className="dispatch-muted">Each card opens the project's own page: runs by feature on the step chart, local against origin, pull requests and issues. Ordered as the rail is.</p>
       </header>
       <ul className="dispatch-cards" data-testid="dispatch-cards">
-        {cards.map(data => <Card key={data.project.project_id} data={data} onNavigate={onNavigate} />)}
+        {cards.map(data => <Card key={data.project.project_id} data={data} githubLoading={repositoryCount === null} onNavigate={onNavigate} />)}
       </ul>
     </section>
   )

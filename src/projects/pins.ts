@@ -45,6 +45,8 @@ export type PinStore = {
   /** Pins a run at the head of the list (a pinned run moves there, once); the oldest pin beyond 50 drops. */
   add: (target: PinTarget) => void
   remove: (target: PinTarget) => void
+  /** Re-reads the storage and notifies the subscribers when the pins changed (another tab wrote them). */
+  sync: () => void
   toggle: (target: PinTarget) => void
   /** False once the storage could not be read or written: the pins then last for this page session only. */
   saved: () => boolean
@@ -68,14 +70,35 @@ export function createPinStore(storage: PinStorage | null, clock: () => Date = (
       try { listener() } catch { /* a listener's failure never reaches the caller */ }
     }
   }
+  /** Re-reads the storage (another tab may have written since): the pins this store holds follow it; on a throw the memory list stays. */
+  const refresh = () => {
+    if (storage === null || !saved) return
+    try {
+      const stored = parsePins(storage.getItem(PINS_KEY))
+      if (stored !== null) pins = stored
+    } catch { saved = false /* unreadable: the pins in memory stay and are never written over what another tab stored */ }
+  }
   const has = (target: PinTarget) => pins.some(pin => same(pin, target))
   const add = (target: PinTarget) => {
+    refresh()
     const pin: Pin = { project_id: target.project_id, workflow_id: target.workflow_id, run_id: target.run_id, pinned_at: clock().toISOString() }
     write([pin, ...pins.filter(other => !same(other, pin))].slice(0, PINS_MAX))
   }
-  const remove = (target: PinTarget) => { if (has(target)) write(pins.filter(pin => !same(pin, target))) }
+  const remove = (target: PinTarget) => {
+    refresh()
+    if (has(target)) write(pins.filter(pin => !same(pin, target)))
+  }
   return {
     list: () => pins,
+    /** Takes the storage's pins and tells the subscribers (a `storage` event from another tab). */
+    sync: () => {
+      const before = pins
+      refresh()
+      if (pins === before || JSON.stringify(pins) === JSON.stringify(before)) { pins = before; return }
+      for (const listener of [...listeners]) {
+        try { listener() } catch { /* a listener's failure never reaches the caller */ }
+      }
+    },
     has,
     add,
     remove,
@@ -94,6 +117,11 @@ export function pinStore(): PinStore {
     let storage: PinStorage | null
     try { storage = (globalThis as unknown as { localStorage: PinStorage }).localStorage ?? null } catch { storage = null }
     shared = createPinStore(storage)
+    const store = shared
+    try {
+      const target = globalThis as unknown as { addEventListener?: (type: 'storage', listener: (event: { key: string | null }) => void) => void }
+      target.addEventListener?.('storage', event => { if (event.key === PINS_KEY || event.key === null) store.sync() })
+    } catch { /* no window: the store works for this page alone */ }
   }
   return shared
 }

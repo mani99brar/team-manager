@@ -10,12 +10,16 @@
 /* Findings as cards (docs/PRD_VIEWER_REVAMP.md 5.4): a stripe in the severity's colour; the filter row above them. */
 .review-findings-head { margin: 4px 0 6px; }
 .findings-filters { margin-bottom: 8px; }
+/* A caption names the toggles after it (State, Severity, Reviewer, Lane); the row stays one group. */
+.findings-filter-label { align-self: center; margin-left: 8px; color: var(--muted); font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.06em; }
 .finding-cards { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
 .finding-cards > li { min-width: 0; }
 .projects-shell .finding-card { gap: 6px; }
 .projects-shell .finding-card.sev-p0 { border-left-color: var(--p0); }
 .projects-shell .finding-card.sev-p1 { border-left-color: var(--p1); }
 .projects-shell .finding-card.sev-p2 { border-left-color: var(--p2); }
+/* A blocking finding wears the fail stripe, whatever its severity. */
+.projects-shell .finding-card.finding-blocking { border-left-color: var(--fail); }
 .finding-card-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .finding-reviewer, .finding-lane { font-size: max(0.85rem, var(--type-floor)); }
 .finding-reviewer { font-weight: 400; }

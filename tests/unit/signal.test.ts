@@ -360,6 +360,16 @@ describe('dockWords: when a run stopped or ended', () => {
     assert.deepEqual(words({ runningSince: null }), { word: null, since: null })
   })
 
+  test('a run waiting to start or on an approval says since when, without ticking', () => {
+    const runningSince = '2026-10-10T08:00:00Z'
+    assert.deepEqual(words({ status: 'awaiting_approval', runningSince }), { word: null, since: 'awaiting approval since Oct 10' })
+    assert.deepEqual(words({ status: 'awaiting_approval', runningSince, clock: CLOCK + 3_600_000 }), words({ status: 'awaiting_approval', runningSince }))
+    assert.doesNotMatch(words({ status: 'awaiting_approval', runningSince }).since ?? '', /for /)
+    assert.deepEqual(words({ status: 'pending', runningSince }), { word: null, since: 'pending since Oct 10' })
+    assert.deepEqual(words({ status: 'awaiting_approval', runningSince: null }), { word: null, since: null })
+    assert.match(words({ runningSince }).since ?? '', /^for /)
+  })
+
   test('a paused run says days since it stopped, and "today" under a day', () => {
     assert.deepEqual(words({ status: 'paused', stoppedSince: '2026-10-02T09:00:00Z' }), { word: 'paused', since: '12 d (since Oct 2)' })
     assert.deepEqual(words({ status: 'paused', stoppedSince: '2026-10-14T08:00:00Z' }), { word: 'paused', since: 'today (since Oct 14)' })

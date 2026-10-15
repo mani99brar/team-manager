@@ -10,7 +10,7 @@ import { validateRunDetail, type RunActivity, type RunDetail, type RunSummary } 
 import {
   controllerSuffix, dayKey, cardElapsed, dayLabel, filterRecent, firstRows, groupByDay, groupByProject, homeSections, laneNamesOf, latestFeature, latestRun,
   NEXT_STEP, PREFIX_GROUP_MIN, projectFacts, projectPrefix, projectTone, railEntries, readsNextPage, RECENT_FILTERS, RECENT_SHOWN, recentCounts,
-  recordHomeReadings, recordReading, RECENT_WINDOW_MS, reviewStepsOf, rowSummary, rowTime, searchRows, servedDisagreement, servedNow, sincePausedLabel, stepTally, waitingKind, workflowTitle, type ServedRun,
+  recordHomeReadings, recordReading, stoppedRunKeys, RECENT_WINDOW_MS, reviewStepsOf, rowSummary, rowTime, searchRows, servedDisagreement, servedNow, sincePausedLabel, stepTally, waitingKind, workflowTitle, type ServedRun,
   classifyRuns, classOf, rowLook, stoppedLabel, type RunClass,
   compareLive, HOME_SECTION_ORDER, liveRank, sectionOrderWords, sortHomeSections, sortRuns, type HomeSections,
   LISTS_IDLE_POLL_MS, LISTS_POLL_MS, listsPollMs, mergeRunRows, registryKey,
@@ -615,6 +615,51 @@ describe('Needs you: the closed set of runs that need the operator (M2)', () => 
   })
 })
 
+describe('a running latest run whose controller has read not_running for 15 s needs the operator (D32)', () => {
+  const running = (runId: string, created: string, attention: RunActivity['attention'] = null) =>
+    summary(runId, 'running', { created, activity: activity({ attention, controller: 'not_running' }) })
+  const stoppedOf = (run: RunSummary, readings: ControllerReading[]) => stoppedRunKeys(new Map([[registryKey(run), readings]]))
+  const needsOf = (runs: RunSummary[], stopped: ReadonlySet<string>, runId: string) => classOf(classifyRuns(runs, stopped), runs.find(item => item.run_id === runId)!).needs
+  const held = [reading(0, 'not_running'), reading(15, 'not_running')]
+
+  test('a 15 s not_running pair gives interrupted, with the run page\'s next step', () => {
+    const run = running('r', '2026-03-20T10:00:00Z')
+    assert.equal(needsOf([run], stoppedOf(run, held), 'r'), 'interrupted')
+    assert.equal(NEXT_STEP.interrupted, 'resume the run on the run page')
+  })
+  test('one reading, under 15 s, unknown, null and a missing reading leave it under Running', () => {
+    const run = running('r', '2026-03-20T10:00:00Z')
+    for (const readings of [[reading(0, 'not_running')], [reading(0, 'not_running'), reading(14.9, 'not_running')], [reading(0, 'unknown'), reading(30, 'unknown')], [reading(0, null), reading(30, null)], []]) {
+      assert.equal(needsOf([run], stoppedOf(run, readings), 'r'), null)
+    }
+    assert.equal(needsOf([run], new Set(), 'r'), null)
+    assert.equal(classOf(classifyRuns([run]), run).needs, null, 'without the argument status alone puts nothing in Needs you')
+  })
+  test('a later running reading, or the run finishing, takes it out of Needs you on that poll', () => {
+    const run = running('r', '2026-03-20T10:00:00Z')
+    assert.equal(needsOf([run], stoppedOf(run, [...held, reading(30, 'running')]), 'r'), null)
+    const done = { ...run, status: 'failed' as const, activity: { ...run.activity!, finished_at: '2026-03-20T11:00:00Z' } }
+    assert.equal(needsOf([done], stoppedOf(done, held), 'r'), null)
+  })
+  test('a running run that is not its feature\'s latest is never moved', () => {
+    const old = running('old', '2026-03-20T09:00:00Z')
+    const newer = summary('new', 'succeeded', { created: '2026-03-20T10:00:00Z' })
+    assert.equal(needsOf([old, newer], stoppedOf(old, held), 'old'), null)
+  })
+  test('a waiting question keeps its own need; a run already served interrupted stays so', () => {
+    const asking = running('q', '2026-03-20T10:00:00Z', { kind: 'question', node_id: 'launch_ui', since: '2026-03-20T10:30:00Z' })
+    assert.equal(needsOf([asking], stoppedOf(asking, held), 'q'), 'question')
+  })
+  test('classifyRuns and servedDisagreement agree over identical inputs', () => {
+    const detail = runningDetail(activity({ controller: 'not_running' }))
+    const exported = deriveNow({ detail, events: [], inputs: null })
+    for (const readings of [held, [reading(0, 'not_running'), reading(10, 'not_running')], [reading(0, 'not_running')], [reading(0, 'unknown'), reading(20, 'unknown')], [...held, reading(20, 'running')]]) {
+      const stopped = servedDisagreement(exported, served(detail, readings)) === 'controller-stopped'
+      assert.equal(needsOf([detail.summary], stoppedOf(detail.summary, readings), detail.summary.run_id) === 'interrupted', stopped)
+    }
+  })
+})
+
 describe('a row\'s time: dates and days for a stopped run, a span only while it runs (M14)', () => {
   const at = (runId: string, status: RunSummary['status'], attention: RunActivity['attention'], finished: string | null = null) =>
     summary(runId, status, { created: '2026-03-08T12:00:00Z', activity: activity({ attention, finished_at: finished, last_activity_at: '2026-03-10T12:00:00Z' }) })
@@ -706,6 +751,38 @@ describe('the Triage pin store ([O10])', () => {
     const none = createPinStore(null, clock)
     assert.doesNotThrow(() => none.toggle(target('c')))
     assert.equal(none.saved(), false)
+  })
+  test('two stores over one storage share their pins: a stale store never erases another tab\'s pin', () => {
+    const fake = fakeStorage()
+    const a = createPinStore(fake.storage, clock)
+    const b = createPinStore(fake.storage, clock)
+    a.add(target('1'))
+    b.add(target('2'))
+    assert.deepEqual((JSON.parse(fake.value()!) as { run_id: string }[]).map(pin => pin.run_id).sort(), ['1', '2'])
+    b.remove(target('2'))
+    assert.deepEqual(b.list().map(pin => pin.run_id), ['1'])
+    assert.deepEqual((JSON.parse(fake.value()!) as { run_id: string }[]).map(pin => pin.run_id), ['1'])
+  })
+  test('a storage event from another tab replaces the list and calls the subscribers', () => {
+    const fake = fakeStorage()
+    const a = createPinStore(fake.storage, clock)
+    const b = createPinStore(fake.storage, clock)
+    let calls = 0
+    b.subscribe(() => { calls += 1 })
+    a.add(target('9'))
+    assert.deepEqual(b.list(), [])
+    b.sync()
+    assert.deepEqual(b.list().map(pin => pin.run_id), ['9'])
+    assert.equal(calls, 1)
+    b.sync()
+    assert.equal(calls, 1)
+  })
+  test('a throwing storage still works from memory across add, remove and sync', () => {
+    const store = createPinStore(fakeStorage(null, { throwOnRead: true }).storage, clock)
+    store.add(target('a')); store.add(target('b'))
+    store.sync()
+    store.remove(target('a'))
+    assert.deepEqual(store.list().map(pin => pin.run_id), ['b'])
   })
   test('pinning and unpinning issue no request: only the storage is touched', () => {
     const original = globalThis.fetch
@@ -866,7 +943,7 @@ describe('Triage sections: placement, order and the sorts', () => {
   test('the scope line counts the runs in the state sections (Pinned apart, the reads beyond seven days left out)', () => {
     const unfiltered = state(sections).reduce((sum, list) => sum + list.length, 0)
     assert.equal(unfiltered, rows.length - 1)
-    assert.equal(scopeLine('triage', unfiltered, unfiltered, false), `${unfiltered} of ${unfiltered} runs · live runs and runs finished in the last 7 days`)
+    assert.equal(scopeLine('triage', unfiltered, unfiltered, false), `${unfiltered} of ${unfiltered} runs · runs updated in the last 7 days and the 50 most recently updated runs of each feature`)
   })
   test('the classification is computed once over the unfiltered list: hiding a successor never makes its predecessor need the operator', () => {
     const before = classifyRuns(rows.map(row => row.run))
@@ -979,14 +1056,24 @@ describe('the filter bar model (runFilter)', () => {
     assert.equal(scopeLine('feature', 3, 60, false), '3 of 60 runs, all loaded')
     assert.equal(scopeLine('project', 3, 80, true), '3 of 80 runs · the first 50 runs of each feature')
     assert.equal(scopeLine('project', 3, 8, false), '3 of 8 runs, all loaded')
-    assert.equal(scopeLine('triage', 1, 9, false), '1 of 9 runs · live runs and runs finished in the last 7 days')
-    assert.equal(scopeLine('triage', 1, 9, true), '1 of 9 runs · live runs and runs finished in the last 7 days')
+    assert.equal(scopeLine('triage', 1, 9, false), '1 of 9 runs · runs updated in the last 7 days and the 50 most recently updated runs of each feature')
+    assert.equal(scopeLine('triage', 1, 9, true), '1 of 9 runs · runs updated in the last 7 days and the 50 most recently updated runs of each feature')
+  })
+  test('Triage\'s scope line states what the home read holds, by updated_at', () => {
+    assert.equal(scopeLine('triage', 2, 9, false), '2 of 9 runs · runs updated in the last 7 days and the 50 most recently updated runs of each feature')
   })
   test('the project page\'s scope line never says "all loaded" or "0 of 0 runs" while reading, after a failed read or with an unread feature', () => {
-    const closed = [
-      /^\d+ of \d+ runs · Load more runs$/, /^\d+ of \d+ runs, all loaded$/, /^\d+ of \d+ runs · the first 50 runs of each feature$/,
-      /^\d+ of \d+ runs · live runs and runs finished in the last 7 days$/, /^Reading runs…$/, /^Runs not read: .+$/, /^\d+ of \d+ runs · \d+ features? cannot be read$/,
-    ]
+    // The closed set is keyed by surface: Triage, the project page and All time; the forbidden Triage phrases apply to Triage alone.
+    const closed = {
+      triage: [/^\d+ of \d+ runs · runs updated in the last 7 days and the 50 most recently updated runs of each feature$/],
+      project: [
+        /^\d+ of \d+ runs · Load more runs$/, /^\d+ of \d+ runs, all loaded$/, /^\d+ of \d+ runs · the first 50 runs of each feature$/, /^Reading runs…$/,
+        /^Runs not read: .+$/, /^\d+ of \d+ runs · \d+ features? cannot be read$/, /^\d+ of \d+ runs · \d+ features? cannot be read · the first 50 runs of each feature$/,
+      ],
+      all: [/^\d+ of \d+ runs · every project · Load more runs$/, /^\d+ of \d+ runs · every project, all loaded$/],
+    }
+    const forbiddenOnTriage = [/live runs/, /finished in the last 7 days/, /latest 50/, /first 50 runs/, /every unfinished run/, /all loaded/]
+    const inSet = (surface: keyof typeof closed, line: string) => closed[surface].some(re => re.test(line)) && (surface !== 'triage' || !forbiddenOnTriage.some(re => re.test(line)))
     const loading = projectScopeLine({ kind: 'loading' }, 0, 0, false)
     const failed = projectScopeLine({ kind: 'failed', reason: 'HTTP 500' }, 0, 0, false)
     const partly = projectScopeLine({ kind: 'ready', unread: '1 feature cannot be read' }, 2, 7, false)
@@ -994,16 +1081,26 @@ describe('the filter bar model (runFilter)', () => {
     assert.equal(loading, 'Reading runs…')
     assert.equal(failed, 'Runs not read: HTTP 500')
     assert.equal(partly, '2 of 7 runs · 1 feature cannot be read')
-    assert.equal(partlyMore, '2 of 70 runs · 2 features cannot be read')
+    assert.equal(partlyMore, '2 of 70 runs · 2 features cannot be read · the first 50 runs of each feature')
     assert.equal(projectScopeLine({ kind: 'ready', unread: null }, 3, 8, false), '3 of 8 runs, all loaded')
     assert.equal(projectScopeLine({ kind: 'ready', unread: null }, 3, 80, true), '3 of 80 runs · the first 50 runs of each feature')
     for (const line of [loading, failed, partly, partlyMore]) {
       assert.doesNotMatch(line, /all loaded/)
       assert.doesNotMatch(line, /0 of 0 runs/)
     }
-    const every = [loading, failed, partly, partlyMore, projectScopeLine({ kind: 'ready', unread: null }, 3, 8, false), projectScopeLine({ kind: 'ready', unread: null }, 3, 80, true),
-      scopeLine('feature', 3, 50, true), scopeLine('triage', 1, 9, false)]
-    for (const line of every) assert.ok(closed.some(re => re.test(line)), `scope line outside the closed set: ${line}`)
+    for (const line of [loading, failed, partly, partlyMore, projectScopeLine({ kind: 'ready', unread: null }, 3, 8, false), projectScopeLine({ kind: 'ready', unread: null }, 3, 80, true),
+      scopeLine('feature', 3, 50, true)]) assert.ok(inSet('project', line), `project scope line outside the closed set: ${line}`)
+    for (const line of [scopeLine('triage', 1, 9, false), scopeLine('triage', 1, 9, true)]) assert.ok(inSet('triage', line), `Triage scope line outside the closed set: ${line}`)
+    for (const line of [scopeLine('all', 1, 9, false), scopeLine('all', 1, 9, true)]) assert.ok(inSet('all', line), `All time scope line outside the closed set: ${line}`)
+    // The set rejects the old Triage strings and any Triage string that claims more than the read holds.
+    for (const bad of ['1 of 9 runs · live runs and runs finished in the last 7 days', '1 of 9 runs · the first 50 runs of each feature', '1 of 9 runs · the latest 50 runs of each feature',
+      '1 of 9 runs · runs updated in the last 7 days and the first 50 runs of each feature', '1 of 9 runs · every unfinished run, all loaded']) assert.ok(!inSet('triage', bad), `Triage accepted: ${bad}`)
+    // The project page's partial-read string states the 50-run cut only while a feature has more.
+    const cut = projectScopeLine({ kind: 'ready', unread: '1 feature cannot be read' }, 3, 60, true)
+    assert.equal(cut, '3 of 60 runs · 1 feature cannot be read · the first 50 runs of each feature')
+    assert.ok(inSet('project', cut))
+    const noCut = projectScopeLine({ kind: 'ready', unread: '1 feature cannot be read' }, 3, 60, false)
+    assert.doesNotMatch(noCut, /first 50|all loaded/)
   })
   test('the closed choices: Triage dates any, today, 7 days and All time; the project page adds 30 days and no All time; sorts name their keys', () => {
     assert.deepEqual(DATE_CHOICES.triage.map(id => DATE_FILTER_LABEL[id]), ['Any date', 'Today', '7 days', 'All time'])

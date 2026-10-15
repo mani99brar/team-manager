@@ -10,7 +10,7 @@ import { attach, gotoProjectOpen, installHooks, liveDock, openAllFeatures, phase
 import { PROJECT, RUN_FAILED, WORKFLOW_ID } from './fixtures.ts'
 import { RUN_SESSIONS, UX_SESSIONS_WORKFLOW_ID } from './fixtures/sessions.ts'
 import { REVAMP_PAGES_WORKFLOW_ID, RUN_REVAMP_BLOCKED, RUN_REVAMP_DONE, RUN_REVAMP_RUNNING } from './fixtures/ux-revamp-pages.ts'
-import { mockDispatchResponse } from './mock.ts'
+import { installProjectMocks, mockDispatchResponse } from './mock.ts'
 import {
   DISPATCH_BUSY, DISPATCH_LOCAL, DISPATCH_NOORIGIN, DISPATCH_TRIO, DISPATCH_UNREADABLE, DISPATCH_WIDGETS, DISPATCH_WIDGETS_WT, RUN_WT_DROPPED,
 } from './fixtures/dispatch.ts'
@@ -200,13 +200,13 @@ test(`[scenario:dispatch-chart] The step chart: sticky axis once, solid/dotted t
   const broken = page.locator('li[data-workflow-id="broken"]')
   await expect(broken).toContainText('cannot be read')
   await expect(broken).toContainText('plan.json is missing')
-  await expect(broken).toContainText('python -m workflow status broken-001 --by operator')
+  await expect(broken).toContainText('python -m workflow status <runs root>/broken-001 --by operator')
   // A workflow whose runs could not be listed: Trio's extra workflow, its row with the literal `<run-id>` placeholder ([P34]).
   await gotoProjectOpen(page, projectUrl(DISPATCH_TRIO))
   const locked = page.locator('li[data-workflow-id="trio-locked"]')
   await expect(locked).toContainText('cannot be read')
   await expect(locked).toContainText('could not be listed')
-  await expect(locked).toContainText('python -m workflow status <run-id> --by operator')
+  await expect(locked).toContainText('python -m workflow status <runs root>/<run-id> --by operator')
   // Every feature's steps stay reachable from a "Steps of this definition" fold, once per revision above the chart, the
   // unreadable workflow's included (V7, [P30]); no feature carries a fold of its own.
   const lockedFold = page.getByTestId('dispatch-defs').getByTestId('dispatch-def').filter({ hasText: 'trio-locked' })
@@ -1044,4 +1044,102 @@ test(`The current definition's node labels, glyphs and meta lines stay inside th
   })
   expect(outside.longest.length, 'the definition has labels').toBeGreaterThan(5)
   expect(outside.found).toEqual([])
+})
+
+test(`[scenario:narrow-chart-rows] At 1024 px with a run selected the chart's rows lay out: the date and the landing note wrap inside the chart, a run id is never a column of two characters, and the status command names a runs root (${phase})`, async ({ page }, testInfo) => {
+  test.slow()
+  await page.setViewportSize({ width: 1024, height: 900 })
+  await gotoProjectOpen(page, projectUrl(DISPATCH_WIDGETS))
+  await run(page, 'ui-polish-002').click()
+  await expect(page.getByTestId('dispatch-pane')).toBeVisible()
+  expect(await chartContainerWidth(page), 'the chart container is under 640px with a run selected').toBeLessThan(640)
+  const chart = page.getByTestId('dispatch-chart')
+  const chartBox = await box(chart)
+  // The date and the landing note of every row fit inside their own box.
+  const notes = chart.locator('.dispatch-run-when, .dispatch-off')
+  expect(await notes.count()).toBeGreaterThan(0)
+  for (const [index, fits] of (await notes.evaluateAll(elements => elements.map(element => element.scrollWidth <= element.clientWidth))).entries()) expect(fits, `note ${index} fits its box`).toBe(true)
+  // Nothing in the chart reaches past its right edge.
+  const beyond = await chart.evaluate(element => {
+    const right = element.getBoundingClientRect().right
+    return [...element.querySelectorAll('*')].filter(node => node.getClientRects().length > 0 && node.getBoundingClientRect().right > right + 1).map(node => `${node.tagName}.${node.className}`)
+  })
+  expect(beyond, 'no descendant ends right of the chart').toEqual([])
+  // A run id is one or two lines, never broken at every hyphen into a narrow column.
+  for (const id of await chart.locator('.dispatch-run-id').all()) {
+    const lines = await id.evaluate(element => {
+      const range = element.ownerDocument.createRange()
+      range.selectNodeContents(element)
+      return new Set([...range.getClientRects()].map(rect => Math.round(rect.top))).size
+    })
+    expect(lines, `${await id.innerText()} is at most two lines`).toBeLessThanOrEqual(2)
+    expect((await box(id)).width, `${await id.innerText()} is not a narrow column`).toBeGreaterThan(60)
+  }
+  expect(chartBox.width).toBeGreaterThan(0)
+  await attach(page, testInfo, 'narrow-chart-rows')
+})
+
+test(`The chart's status command reads <runs root>/<run id> with the run id filled in and never a bare run id after status (${phase})`, async ({ page }) => {
+  await page.setViewportSize({ width: 1024, height: 900 })
+  await gotoProjectOpen(page, projectUrl(DISPATCH_WIDGETS))
+  const commands = page.locator('li[data-workflow-id="broken"] code')
+  await expect(commands).toHaveText(['python -m workflow status <runs root>/broken-001 --by operator'])
+  expect(await page.locator('.dispatch-chart').innerText()).not.toMatch(/workflow status (?!<runs root>)/)
+})
+
+test(`[scenario:github-once] A project that is not a git repository says so once and never also "GitHub not read"; while the overview loads the cards say "reading…", and a failed overview keeps "GitHub not read" (${phase})`, async ({ page }, testInfo) => {
+  test.slow()
+  await page.setViewportSize({ width: 1440, height: 900 })
+  const foot = (id: string) => card(page, id).locator('.dispatch-card-foot')
+  // The overview held in flight: every card's foot says reading, and nothing says "not read".
+  let release: () => void = () => {}
+  const gate = new Promise<void>(resolve => { release = resolve })
+  await page.route(url => url.pathname === '/api/dispatch/projects', async route => {
+    await gate
+    await route.fallback()
+  })
+  await page.goto(PROJECTS)
+  await expect(page.getByTestId('dispatch-cards')).toBeVisible({ timeout: 30_000 })
+  await expect(page.getByTestId('dispatch-projects-meta')).toContainText('repositories: reading…')
+  const cards = page.locator('.dispatch-card')
+  expect(await cards.count()).toBeGreaterThan(0)
+  for (const text of await cards.allInnerTexts()) expect(text).not.toContain('not read')
+  expect(await page.getByTestId('dispatch-projects-meta').innerText()).not.toContain('not read')
+  for (const text of await page.locator('.dispatch-card-foot').allInnerTexts()) expect(text).toContain('GitHub: reading…')
+  release()
+  await expect(page.getByTestId('dispatch-projects-meta')).toContainText('projects in', { timeout: 30_000 })
+  await expect(page.locator('.dispatch-card-foot').filter({ hasText: 'GitHub: reading…' })).toHaveCount(0)
+
+  // The normal text: a non-git project says "not a git repository" once; no GitHub remote once; another reason keeps its words.
+  const noGit = await card(page, DISPATCH_UNREADABLE).innerText()
+  expect(occurrences(noGit, 'not a git repository'), noGit).toBe(1)
+  expect(noGit).not.toContain('GitHub not read')
+  const local = await card(page, DISPATCH_LOCAL).innerText()
+  expect(occurrences(local, 'no GitHub remote'), local).toBe(1)
+  await attach(page, testInfo, 'github-once')
+
+  // Any other not-read reason is said as before, on its card.
+  await page.unrouteAll({ behavior: 'ignoreErrors' })
+  if (phase === 'worker') await installProjectMocks(page)
+  await answerOverview(page, project => { if (project.project_id === DISPATCH_TRIO) project.github = { status: 'unavailable', reason: 'gh is not installed', ...NOT_READ } })
+  await page.goto(PROJECTS)
+  await expect(page.getByTestId('dispatch-projects-meta')).toContainText('projects in', { timeout: 30_000 })
+  await expect(foot(DISPATCH_TRIO)).toContainText('GitHub not read: gh is not installed')
+
+  // An overview that failed: the cards say "GitHub not read".
+  await page.unrouteAll({ behavior: 'ignoreErrors' })
+  if (phase === 'worker') await installProjectMocks(page)
+  await page.route(url => url.pathname === '/api/dispatch/projects', route => route.fulfill({ status: 500, json: { error: { code: 'INTERNAL', message: 'The overview failed.' } } }))
+  await page.goto(PROJECTS)
+  await expect(page.getByTestId('dispatch-projects-meta')).toContainText('repositories not read', { timeout: 30_000 })
+  for (const text of await page.locator('.dispatch-card-foot').allInnerTexts()) expect(text).toContain('GitHub not read')
+
+  // The non-git project's own page: the Local and GitHub card never says "GitHub not read"; the header keeps "git not read".
+  await page.unrouteAll({ behavior: 'ignoreErrors' })
+  if (phase === 'worker') await installProjectMocks(page)
+  await gotoProjectOpen(page, projectUrl(DISPATCH_UNREADABLE))
+  // The git read has answered (the header says why it could not be read) before the card is judged.
+  await expect(page.getByTestId('dispatch-project-header')).toContainText('git not read', { timeout: 30_000 })
+  await expect(page.getByTestId('dispatch-gh-local')).toBeVisible()
+  expect(await page.getByTestId('dispatch-gh-local').innerText()).not.toContain('GitHub not read')
 })

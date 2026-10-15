@@ -5,7 +5,7 @@ import {
   describeApiError, fetchHomeRuns, fetchProjects, fetchReviewResult, fetchRunDetail, fetchRuns, fetchWorkflowRuns, fetchWorkflows, ProjectsApiError,
   type RunPage, type RunSummary,
 } from './api.ts'
-import { classifyRuns, classOf, endedAt, isFinished, laneNamesOf, latestFeature, LISTS_POLL_MS, listsPollMs, RECENT_WINDOW_MS, recordReading, reviewStepsOf, sortRuns, workflowTitle, type ServedRun } from './lists.ts'
+import { classifyRuns, classOf, endedAt, isFinished, laneNamesOf, latestFeature, LISTS_POLL_MS, listsPollMs, RECENT_WINDOW_MS, recordHomeReadings, recordReading, registryKey, reviewStepsOf, stoppedRunKeys, sortRuns, unreadRunsText, workflowTitle, type ServedRun } from './lists.ts'
 import { FilterBar, NoMatch } from './FilterBar.tsx'
 import { useListState } from './dispatch/listState.ts'
 import { cappedScopeLine, filterItems, scopeLine, statusCounts } from './runFilter.ts'
@@ -183,6 +183,17 @@ export function ProjectsView({ route, refreshToken, onRefreshingChange, onNaviga
   // The rail rows and the Projects cards: every project's run state (from the registry runs) joined with the dispatch
   // overview's git and GitHub, ordered needs-you, running, readable, unreadable, then by last activity ([D6]).
   const homeRunsData = homeRuns.status === 'ready' ? homeRuns.data : null
+  // The controller readings of every listed run, one per successful home poll (the same clock as the run page's own reading), so a
+  // latest running run whose controller read `not_running` for 15 s needs the operator on every list, as on its run page. A failed
+  // poll adds no reading and the last successful classification stays until the next successful poll.
+  const [homeReadings, setHomeReadings] = useState<Map<string, ControllerReading[]>>(() => new Map())
+  useEffect(() => {
+    if (homeRunsData === null || homeMeta.settledAt === null) return
+    const at = new Date(homeMeta.settledAt).toISOString()
+    const served = homeRunsData.flatMap(entry => entry.workflows.flatMap(item => (item.error === null ? item.runs : []))).map(run => ({ key: registryKey(run), value: run.activity?.controller ?? null }))
+    setHomeReadings(previous => recordHomeReadings(previous, served, at))
+  }, [homeRunsData, homeMeta.settledAt])
+  const stopped = useMemo(() => stoppedRunKeys(homeReadings), [homeReadings])
   const overviewMap = useMemo(() => new Map((overviewData?.projects ?? []).map(entry => [entry.project_id, entry])), [overviewData])
   // Until the registry run read settles, every project is `loading` (no "cannot be read", no zero counts); a failed request
   // is a failed read for every project.
@@ -192,7 +203,7 @@ export function ProjectsView({ route, refreshToken, onRefreshingChange, onNaviga
     const runsByProject = new Map((homeRunsData ?? []).map(entry => [entry.project.project_id, entry]))
     return projectsData.map(project => {
       const entry = runsByProject.get(project.project_id) ?? null
-      const info = homeFailed && entry === null ? FAILED_RUN_INFO : projectRunInfo(entry)
+      const info = homeFailed && entry === null ? FAILED_RUN_INFO : projectRunInfo(entry, stopped)
       const dispatch = overviewMap.get(project.project_id) ?? null
       const git = dispatch?.git ?? null
       const isPrimary = git !== null && git.clone_primary === project.project_id
@@ -202,7 +213,7 @@ export function ProjectsView({ route, refreshToken, onRefreshingChange, onNaviga
       const railInfo: RailInfo = { projectId: project.project_id, name: project.name, waits: info.waits, paused: info.paused, running: info.running, allBad: info.allBad, lastActivity: info.lastActivity, unpushed, loading: info.state === 'loading' }
       return { project, dispatch, info, primaryName, railInfo, unpushed }
     })
-  }, [projectsData, homeRunsData, overviewMap, homeFailed])
+  }, [projectsData, homeRunsData, overviewMap, homeFailed, stopped])
   const orderedProjects = useMemo(() => {
     const byId = new Map(dispatchProjects.map(entry => [entry.project.project_id, entry]))
     return railOrder(dispatchProjects.map(entry => entry.railInfo)).map(railInfo => byId.get(railInfo.projectId)!).filter(Boolean)
@@ -277,7 +288,7 @@ export function ProjectsView({ route, refreshToken, onRefreshingChange, onNaviga
   const reviewers = featureReviewers.status === 'ready' ? featureReviewers.data : []
   // Neither the reviewers nor the review steps show until the reviewer read has settled (or there is none to make).
   const reviewersSettled = reviewersKey === null || featureReviewers.status === 'ready' || featureReviewers.status === 'error'
-  const featureClasses = useMemo(() => classifyRuns(runs), [runs])
+  const featureClasses = useMemo(() => classifyRuns(runs, stopped), [runs, stopped])
   // "All time" reads every remaining page; otherwise the list never reads past the page count its URL can restore.
   const allTime = route?.level === 'workflow' && list.search.date === 'all'
   const atPageCap = pages.length >= MAX_LIST_PAGES && !allTime
@@ -404,7 +415,7 @@ export function ProjectsView({ route, refreshToken, onRefreshingChange, onNaviga
           <p>The backend's project registry is empty. Projects are registered by the operator in the server configuration, not from this page.</p>
         </EmptyPanel>
       )
-    } else content = <RunsHome projects={projects.data} runs={homeRuns} meta={homeMeta} now={listClock} pollMs={homeCadence} note={info} onNavigate={onNavigate} list={list} folds={folds} onFold={setFold} />
+    } else content = <RunsHome projects={projects.data} runs={homeRuns} stopped={stopped} meta={homeMeta} now={listClock} pollMs={homeCadence} note={info} onNavigate={onNavigate} list={list} folds={folds} onFold={setFold} />
   } else if (route.level === 'project') {
     if (workflows.status === 'loading' || workflows.status === 'idle') content = <LoadingPanel>Loading workflows of {projectName}…</LoadingPanel>
     else if (workflows.status === 'error' && notFound(workflows.error)) {
@@ -426,7 +437,7 @@ export function ProjectsView({ route, refreshToken, onRefreshingChange, onNaviga
       content = (
         <ProjectPage key={route.projectId} project={projectEntry} workflows={workflows.data} list={list} folds={folds} onFold={setFold} onClearFolds={clearFolds}
           projectRuns={projectRuns.status === 'ready' ? projectRuns.data : []}
-          runsState={projectRunsState}
+          runsState={projectRunsState} stopped={stopped}
           steps={projectStepsData} stepsRead={projectStepsRead} dispatch={overviewMap.get(route.projectId) ?? null} overview={overviewData}
           allProjects={projectsData ?? []} now={listClock} zone={zone} onNavigate={onNavigate} />
       )
@@ -452,6 +463,9 @@ export function ProjectsView({ route, refreshToken, onRefreshingChange, onNaviga
       // At the page cap (outside "All time") a cursor remains that this list cannot follow: it says why, never "Load more runs".
       const capped = atPageCap && nextCursor !== null
       const scope = capped ? cappedScopeLine(shown.length, runs.length, MAX_LIST_PAGES) : scopeLine('feature', shown.length, runs.length, nextCursor !== null)
+      // Runs the server could not read (the first page names them): one line, never a run row.
+      const unreadRuns = (firstPageData?.errors ?? []).map(entry => entry.run_id)
+      const unreadLine = unreadRuns.length === 0 ? null : <p className="projects-muted feature-unread-runs" role="status" data-testid="feature-unread-runs">{unreadRunsText(unreadRuns)}</p>
       const readingOlder = allTime && extra.loading ? `Reading older runs… (${runs.length} read)` : null
       content = (
         <div className="workflow-view">
@@ -497,9 +511,12 @@ export function ProjectsView({ route, refreshToken, onRefreshingChange, onNaviga
               </ol>
             )}
             {runs.length === 0 ? (
-              <EmptyPanel title="No runs have been recorded for this workflow." testId="empty-runs">
-                <p>The workflow definition exists (see its current graph below) but it has never been run, or its runs are stored elsewhere. Runs are started from the workflow CLI.</p>
-              </EmptyPanel>
+              // A list whose every run could not be read says so in place of "no runs": it is not a workflow that never ran.
+              unreadRuns.length > 0 ? unreadLine : (
+                <EmptyPanel title="No runs have been recorded for this workflow." testId="empty-runs">
+                  <p>The workflow definition exists (see its current graph below) but it has never been run, or its runs are stored elsewhere. Runs are started from the workflow CLI.</p>
+                </EmptyPanel>
+              )
             ) : (
               shown.length === 0 ? <NoMatch onClear={list.clear} /> : (
                 <ul className="run-rows run-list" data-testid="run-list">
@@ -509,6 +526,7 @@ export function ProjectsView({ route, refreshToken, onRefreshingChange, onNaviga
                 </ul>
               )
             )}
+            {runs.length > 0 && unreadLine}
             {nextCursor && !capped && (
               <div className="projects-actions">
                 <button type="button" className="button" disabled={extra.loading} aria-busy={extra.loading}

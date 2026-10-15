@@ -144,9 +144,13 @@ function useAllRuns(active: boolean): AllRead & { retry: () => void } {
   return { ...read, retry }
 }
 
+const NO_STOPPED: ReadonlySet<string> = new Set()
+
 type HomeProps = {
   projects: readonly Project[]
   runs: Resource<ProjectRuns[]>
+  /** The run keys whose controller has read `not_running` for 15 s: a latest running run in it needs the operator. */
+  stopped?: ReadonlySet<string>
   meta: ResourceMeta
   now: number
   /** The home read's cadence in force, so the live status reads stale only after a poll is late at that cadence. */
@@ -170,7 +174,7 @@ const itemOf = (row: Row, classes: RunClasses): FilterItem => ({ run: row.run, c
  * as cards and a searchable, filterable Recent grouped by day. Everything renders from the run lists' served activity; no run
  * detail is read for it.
  */
-export function RunsHome({ projects, runs, meta, now, pollMs, note = null, onNavigate, list, folds, onFold }: HomeProps) {
+export function RunsHome({ projects, runs, stopped = NO_STOPPED, meta, now, pollMs, note = null, onNavigate, list, folds, onFold }: HomeProps) {
   const [zone] = useTimeZone()
   const loaded = runs.status === 'ready' ? runs.data : null
   const rows = useMemo(() => loaded?.flatMap(entry => rowsOf(entry.project, entry.workflows)) ?? [], [loaded])
@@ -192,8 +196,8 @@ export function RunsHome({ projects, runs, meta, now, pollMs, note = null, onNav
   // The list's one classification, over every loaded run before any filter: every section, row, card and count below reads
   // it, so hiding a run never changes what another needs. Under "All time" it covers every run read; the tab title, the
   // badges and Pinned still count the home read only.
-  const homeClasses = useMemo(() => classifyRuns(rows.map(row => row.run)), [rows])
-  const allClasses = useMemo(() => (allTime ? classifyRuns(allRows.map(row => row.run)) : homeClasses), [allTime, allRows, homeClasses])
+  const homeClasses = useMemo(() => classifyRuns(rows.map(row => row.run), stopped), [rows, stopped])
+  const allClasses = useMemo(() => (allTime ? classifyRuns(allRows.map(row => row.run), stopped) : homeClasses), [allTime, allRows, homeClasses, stopped])
   const classes = homeClasses
   const all = homeSections(rows, now, zone, classes)
   // The one bar filters the full set before sectioning: each section keeps its runs that match, in the chosen sort.
@@ -265,7 +269,8 @@ export function RunsHome({ projects, runs, meta, now, pollMs, note = null, onNav
       ))}
     </ul>
   )
-  const sub = (rows: Row[], empty: string, words = order) => (filtering && rows.length === 0 ? 'No run matches.' : rows.length === 0 ? empty : [stepTally(rows), words].filter(Boolean).join(' · '))
+  // "No run matches." is said once: by the body's `NoMatch` when the section had runs the filter hid, else by the sub.
+  const sub = (rows: Row[], total: Row[], empty: string, words = order) => (filtering && rows.length === 0 && total.length === 0 ? 'No run matches.' : rows.length === 0 && total.length === 0 ? empty : [stepTally(rows), words].filter(Boolean).join(' · '))
   const none = (shown: Row[], total: Row[]) => filtering && shown.length === 0 && total.length > 0 && <NoMatch />
 
   return (
@@ -314,7 +319,7 @@ export function RunsHome({ projects, runs, meta, now, pollMs, note = null, onNav
             {!allTime && (<>
             {quiet && <p className="home-quiet" data-testid="home-quiet">Nothing waits on you, moved today or runs</p>}
             <Section id="needs-you" headingId="needs-you-title" data-testid="needs-you" className="home-section" hidden={quiet} title={heading('Needs you', sections.needsYou, all.needsYou)}
-              sub={filtering && sections.needsYou.length === 0 ? 'No run matches.' : all.needsYou.length === 0 ? 'nothing waits on you' : `${sectionOrderWords(filter.sort, true)}; the command is on the run page`}>
+              sub={filtering && sections.needsYou.length === 0 && all.needsYou.length === 0 ? 'No run matches.' : all.needsYou.length === 0 ? 'nothing waits on you' : `${sectionOrderWords(filter.sort, true)}; the command is on the run page`}>
               {none(sections.needsYou, all.needsYou)}
               {sections.needsYou.length > 0 && (
                 <ul className="home-cards">
@@ -323,17 +328,17 @@ export function RunsHome({ projects, runs, meta, now, pollMs, note = null, onNav
               )}
             </Section>
             <Section id="running-runs" headingId="running-title" data-testid="running-runs" className="home-section" hidden={quiet} title={heading('Running', sections.running, all.running)}
-              sub={sub(sections.running, 'nothing is running')}>
+              sub={sub(sections.running, all.running, 'nothing is running')}>
               {none(sections.running, all.running)}
               {sections.running.length > 0 && rowsList(sections.running)}
             </Section>
             <Section id="today-runs" headingId="today-title" data-testid="today-runs" className="home-section" hidden={quiet} title={heading('Today', sections.today, all.today)}
-              sub={sub(sections.today, 'nothing finished today')}>
+              sub={sub(sections.today, all.today, 'nothing finished today')}>
               {none(sections.today, all.today)}
               {sections.today.length > 0 && rowsList(sections.today)}
             </Section>
             <Section id="paused-runs" headingId="paused-title" data-testid="paused-runs" className="home-section" title={heading('Paused', sections.paused, all.paused)}
-              sub={sub(sections.paused, 'nothing is paused')}>
+              sub={sub(sections.paused, all.paused, 'nothing is paused')}>
               {none(sections.paused, all.paused)}
               {sections.paused.length > 0 && rowsList(pausedShown)}
               {sections.paused.length > pausedShown.length && (
@@ -467,7 +472,7 @@ function Recent({ rows, total, filtering, sort, classes, now, zone, onNavigate, 
   const shown = list.search.older ? { groups, hidden: 0 } : firstRows(groups, RECENT_SHOWN)
   return (
     <Section id="recent-runs" headingId="recent-title" data-testid="recent-runs" className="home-section" title={`Recent · ${filtering ? `${rows.length} of ${total}` : total}`}
-      sub={filtering && rows.length === 0 ? 'No run matches.' : `finished in the last 7 days, before today · ${sectionOrderWords(sort)}`}>
+      sub={filtering && total === 0 ? 'No run matches.' : `finished in the last 7 days, before today · ${sectionOrderWords(sort)}`}>
       <div className="home-tools">
         <div className="ui-filters" role="group" aria-label="Group recent runs">
           <FilterButton pressed={byProject} onClick={() => list.change({ group: !byProject })}>Group by project</FilterButton>
@@ -496,6 +501,7 @@ type GroupsProps = {
   projectId: string
   workflows: readonly WorkflowDefinition[]
   runs: Resource<WorkflowRuns[]>
+  stopped?: ReadonlySet<string>
   now: number
   onNavigate: (pathname: string) => void
 }
@@ -506,7 +512,7 @@ type GroupsProps = {
  * run's status and activity, then the feature's run rows. Runs of any age are listed here; only Runs home's Recent stops at
  * seven days.
  */
-export function ProjectRunGroups({ projectId, workflows, runs, now, onNavigate }: GroupsProps) {
+export function ProjectRunGroups({ projectId, workflows, runs, stopped = NO_STOPPED, now, onNavigate }: GroupsProps) {
   const loaded = runs.status === 'ready' ? runs.data : null
   return (
     <ul className="lists-groups" data-testid="workflows-list">
@@ -516,7 +522,7 @@ export function ProjectRunGroups({ projectId, workflows, runs, now, onNavigate }
         const labels = labelsOf(workflow)
         const count = entry === null ? null : `${entry.runs.length}${entry.more ? '+' : ''} ${entry.runs.length === 1 && !entry.more ? 'run' : 'runs'}`
         const last: RunSummary | null = entry ? latestRun(entry.runs) : null
-        const classes = classifyRuns(entry?.runs ?? [])
+        const classes = classifyRuns(entry?.runs ?? [], stopped)
         return (
           <li key={workflow.workflow_id} className="lists-group" data-workflow-id={workflow.workflow_id}>
             <AppLink href={workflowPathname(projectId, workflow.workflow_id)} onNavigate={onNavigate}

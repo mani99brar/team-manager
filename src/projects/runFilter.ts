@@ -155,11 +155,12 @@ export function statusCounts(items: readonly FilterItem[], state: RunFilterState
  * The scope line, in its closed set: Triage under "All time" "<k> of <n> runs · every project · Load more runs" until every
  * page answered, then "<k> of <n> runs · every project, all loaded"; the feature page "<k> of <n> runs · Load more runs" while a cursor remains, "<k> of <n>
  * runs, all loaded" once none does; the project page "· the first 50 runs of each feature" while any feature has more, else
- * "all loaded"; Triage "· live runs and runs finished in the last 7 days". `<k>` counts the matching runs, `<n>` the runs read.
+ * "all loaded"; Triage "· runs updated in the last 7 days and the 50 most recently updated runs of each feature" (the home read is by
+ * `updated_at`, so it never says "latest" or "first"). `<k>` counts the matching runs, `<n>` the runs read.
  */
 export function scopeLine(kind: ScopeKind, matched: number, read: number, more: boolean): string {
   const head = `${matched} of ${read} runs`
-  if (kind === 'triage') return `${head} · live runs and runs finished in the last 7 days`
+  if (kind === 'triage') return `${head} · runs updated in the last 7 days and the 50 most recently updated runs of each feature`
   // "All time": `more` while a cursor remains or a page failed, so "all loaded" is said only once every page answered.
   if (kind === 'all') return more ? `${head} · every project · Load more runs` : `${head} · every project, all loaded`
   if (!more) return `${head}, all loaded`
@@ -180,13 +181,14 @@ export type ProjectRead = { kind: 'loading' } | { kind: 'failed'; reason: string
 /**
  * The project page's scope line, in the closed set of `scopeLine` plus three strings the page already shows: "Reading runs…"
  * while the lists are read, "Runs not read: <reason>" when they failed, and "<k> of <n> runs · <unread>" (the page's own
- * "N feature(s) cannot be read") when some feature's list failed. It says "all loaded" only when every feature was read and
+ * "N feature(s) cannot be read") when some feature's list failed, followed by "· the first 50 runs of each feature" while any feature
+ * has more. It says "all loaded" only when every feature was read and
  * none has more runs.
  */
 export function projectScopeLine(read: ProjectRead, matched: number, total: number, more: boolean): string {
   if (read.kind === 'loading') return 'Reading runs…'
   if (read.kind === 'failed') return `Runs not read: ${read.reason}`
-  if (read.unread !== null) return `${matched} of ${total} runs · ${read.unread}`
+  if (read.unread !== null) return more ? `${matched} of ${total} runs · ${read.unread} · the first 50 runs of each feature` : `${matched} of ${total} runs · ${read.unread}`
   return scopeLine('project', matched, total, more)
 }
 

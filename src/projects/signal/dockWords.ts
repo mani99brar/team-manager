@@ -1,5 +1,5 @@
-import { stoppedLabel } from '../lists.ts'
-import type { RunStatus } from '../status.ts'
+import { monthDay, stoppedLabel } from '../lists.ts'
+import { STATUS_LABEL, type RunStatus } from '../status.ts'
 import { formatAgo, formatSpan, type Zone } from '../time.ts'
 
 export type DockWordsInput = {
@@ -42,5 +42,8 @@ export function dockWords(input: DockWordsInput): { word: string | null; since: 
     if (input.stoppedSince === null) return { word: how, since: null }
     return { word: how, since: stoppedLabel(how, input.stoppedSince, clock, zone).slice(how.length + 1) }
   }
-  return { word: null, since: input.runningSince === null ? null : `for ${formatSpan(Math.max(0, clock - Date.parse(input.runningSince)))}` }
+  if (input.runningSince === null) return { word: null, since: null }
+  // Only a running run ticks; one that waits to start or on an approval says since when, never a growing span.
+  if (status !== 'running') return { word: null, since: `${(STATUS_LABEL[status] ?? status).toLowerCase()} since ${monthDay(input.runningSince, clock, zone)}` }
+  return { word: null, since: `for ${formatSpan(Math.max(0, clock - Date.parse(input.runningSince)))}` }
 }

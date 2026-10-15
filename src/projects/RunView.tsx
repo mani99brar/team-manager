@@ -161,7 +161,7 @@ export function RunView({ scope, detail, current, selectedNodeId, selectedAttemp
 
   // A reviewer's step chip takes the tone and verdict of its card on the graph (the sessions' reviewer row), not the session's status.
   const verdicts = useMemo(() => {
-    const map = new Map<string, { tone: Tone; verdict: 'approved' | 'blocked' | null }>()
+    const map = new Map<string, { tone: Tone; verdict: 'approved' | 'blocked' | 'failed' | null }>()
     if (sessionsData === null) return map
     for (const node of definition.nodes) {
       if (!node.node_id.startsWith('reviewer-') || !isProjectedSessionNode(node.node_id)) continue

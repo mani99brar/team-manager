@@ -13,7 +13,7 @@ type Props = {
   runHref: string
   nodeHref: (nodeId: string) => string
   /** A reviewer step's verdict by node id: its chip is toned by the verdict (as the graph's card is), not by the session's status. */
-  verdicts?: ReadonlyMap<string, { tone: Tone; verdict: 'approved' | 'blocked' | null }>
+  verdicts?: ReadonlyMap<string, { tone: Tone; verdict: 'approved' | 'blocked' | 'failed' | null }>
   onNavigate: (pathname: string) => void
 }
 
@@ -46,8 +46,9 @@ export function StepStrip({ detail, rows, current, runHref, nodeHref, verdicts, 
           const position = layout.positions.get(row.node_id)
           const alone = position ? [...layout.positions.values()].filter(other => other.column === position.column).length === 1 : true
           const verdict = verdicts?.get(row.node_id) ?? null
-          // A blocked reviewer reads as blocked in glyph and name too, never as its session's success.
-          const blocked = verdict?.verdict === 'blocked' && !row.attention
+          // A reviewer whose verdict is a fail (blocked, or failed) reads as one in glyph and name too, never as its session's success.
+          const failVerdict = verdict !== null && verdict.verdict !== null && verdict.tone === 'fail' && !row.attention ? verdict.verdict : null
+          const blocked = failVerdict !== null
           const glyph = row.attention ? '?' : blocked ? STATUS_GLYPH.failed : STATUS_GLYPH[row.shown]
           return (
             <li
@@ -63,7 +64,7 @@ export function StepStrip({ detail, rows, current, runHref, nodeHref, verdicts, 
                 current={row.node_id === current}
                 className={`step-chip status-row-${row.shown} ${toneClass(verdict && !row.attention ? verdict.tone : stateTone({ status: row.shown, attention: row.attention }))}`}
                 data-verdict={verdict?.verdict ?? undefined}
-                aria-label={`${row.label}, ${blocked ? 'blocked' : STATUS_LABEL[row.shown].toLowerCase()}${row.attention ? ', waits on you' : ''}`}
+                aria-label={`${row.label}, ${failVerdict === 'blocked' ? 'blocked' : failVerdict === 'failed' ? 'failed' : STATUS_LABEL[row.shown].toLowerCase()}${row.attention ? ', waits on you' : ''}`}
                 title={row.label}
               >
                 <span className={`step-glyph status-text-${blocked ? 'failed' : row.shown}`} aria-hidden="true">{glyph}</span>

@@ -153,20 +153,33 @@ export function fetchWorkflows(projectId: string, signal?: AbortSignal): Promise
   return requestJson(paths.workflows(projectId), input => schemas.workflowList.parse(input).workflows, signal)
 }
 
-export type RunPage = { runs: RunSummary[]; nextCursor: string | null }
+/** A run of a workflow that the server could not read, as its run list names it (first page only). */
+export type RunReadError = { run_id: string; code: string; message: string }
+export type RunPage = { runs: RunSummary[]; nextCursor: string | null; errors?: RunReadError[] }
+
+/** The run list's optional `errors`, exactly the shape the server serves; the contract's strict list schema does not know the key yet. */
+const runReadErrors = z.array(z.strictObject({ run_id: z.string(), code: z.string(), message: z.string() }))
 
 export function fetchRuns(projectId: string, workflowId: string, options: { cursor?: string | null } = {}, signal?: AbortSignal): Promise<RunPage> {
   return requestJson(paths.runs(projectId, workflowId, options), input => {
-    const page = schemas.runList.parse(input)
+    // Taken off the answer before the strict parse (a no-op once the contract lists the key).
+    let list = input
+    let errors: RunReadError[] | undefined
+    if (typeof input === 'object' && input !== null && !Array.isArray(input) && 'errors' in input) {
+      const { errors: raw, ...rest } = input as Record<string, unknown>
+      errors = runReadErrors.parse(raw)
+      list = rest
+    }
+    const page = schemas.runList.parse(list)
     for (const run of page.runs) {
       if (run.project_id !== projectId || run.workflow_id !== workflowId) throw new Error(`run ${run.run_id} belongs to another scope.`)
     }
-    return { runs: page.runs, nextCursor: page.next_cursor }
+    return { runs: page.runs, nextCursor: page.next_cursor, ...(errors !== undefined && errors.length > 0 ? { errors } : {}) }
   }, signal)
 }
 
 /** One workflow's runs as a list shows them: the pages read, whether more exist, or why they could not be read. */
-export type WorkflowRuns = { workflow: WorkflowDefinition; runs: RunSummary[]; more: boolean; error: unknown }
+export type WorkflowRuns = { workflow: WorkflowDefinition; runs: RunSummary[]; more: boolean; error: unknown; errors?: RunReadError[] }
 /** One project's workflows with their runs, or why its workflows could not be read. */
 export type ProjectRuns = { project: Project; workflows: WorkflowRuns[]; error: unknown }
 
@@ -180,14 +193,19 @@ export type ReadsNextPage = (runs: readonly RunSummary[], nextCursor: string | n
 export async function fetchWorkflowRuns(projectId: string, workflows: readonly WorkflowDefinition[], more: ReadsNextPage, signal?: AbortSignal): Promise<WorkflowRuns[]> {
   return Promise.all(workflows.map(async (workflow): Promise<WorkflowRuns> => {
     const runs: RunSummary[] = []
+    let errors: RunReadError[] = []
     let next: string | null = null
     try {
       do {
         const page: RunPage = await fetchRuns(projectId, workflow.workflow_id, { cursor: next }, signal)
         runs.push(...page.runs)
+        if (page.errors !== undefined) errors = page.errors
         next = page.nextCursor
       } while (next !== null && more(runs, next))
-      return { workflow, runs, more: next !== null, error: null }
+      if (errors.length === 0) return { workflow, runs, more: next !== null, error: null }
+      // Some runs could not be read: the readable ones stay (the list is read), and a list with none readable reads as failed.
+      const first = errors[0]
+      return { workflow, runs, more: next !== null, errors, error: runs.length === 0 ? new Error(`${first.code}: ${first.message}`) : null }
     } catch (error) {
       if (signal?.aborted) throw error
       return { workflow, runs, more: next !== null, error }

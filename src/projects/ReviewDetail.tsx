@@ -19,11 +19,11 @@ import { useRunCapturedFiles } from './files.ts'
 import { AppLink, ErrorPanel, LoadingPanel } from './panels.tsx'
 import { outcomeWording, severityCounts, type Reviewer } from './reviewers.ts'
 import { runPathname } from './routes.ts'
-import { BLOCKING_ONLY, blockingFindings, filterFindings, findingFilterIds, orderFindings, reviewerTime } from './node/panels.ts'
+import { BLOCKING_ONLY, blockingFindings, filterFindings, findingFilterIds, OPEN_ONLY, orderFindings, reviewerTime, type FindingFilter } from './node/panels.ts'
 import { reviewSummary, shortRevision } from './status.ts'
 import { Time } from './Time.tsx'
 import { formatSpan } from './time.ts'
-import { Card, Chip, FilterToggles, SeverityChip } from './ui/index.tsx'
+import { Card, Chip, FilterButton, SeverityChip } from './ui/index.tsx'
 import { severityClass, severityTone, toneClass, type Tone } from './tone.ts'
 import type { Resource } from './useResource.ts'
 
@@ -122,6 +122,7 @@ function FindingCard({ finding, scope, definitionNodes, inputs, onOpenRequiremen
   const evidence = evidenceOf(finding) !== null || missingScreenshot(finding)
   const more = rest.trim() !== '' || files.length > 0 || finding.requirement !== null || evidence
   const bodyId = useId()
+  const foldedId = useId()
   return (
     <Card
       tone={blocking ? 'fail' : 'idle'}
@@ -144,12 +145,13 @@ function FindingCard({ finding, scope, definitionNodes, inputs, onOpenRequiremen
         {lead}
         <span id={bodyId} className="finding-rest" hidden={!open}>{rest}</span>
         {more && (
-          <button type="button" className="button button-small finding-more" aria-expanded={open} aria-controls={bodyId} data-testid="finding-more" onClick={() => setOpen(value => !value)}>
+          <button type="button" className="button button-small finding-more" aria-expanded={open} aria-controls={`${bodyId} ${foldedId}`} aria-label={`${open ? 'Less' : 'More'}: rest of the message, files and fields`}
+            data-testid="finding-more" onClick={() => setOpen(value => !value)}>
             {open ? 'Less' : 'More'}
           </button>
         )}
       </p>
-      <div className="finding-body" hidden={!open}>
+      <div id={foldedId} className="finding-body" hidden={!open}>
         {files.map(([path, nodeId]) => (
           <AppLink
             key={path}
@@ -386,6 +388,46 @@ function InlineDiff({ scope, views }: { scope: RunScope; views: DiffView[] }) {
   )
 }
 
+/**
+ * The findings filter row: one group of toggles under visible captions (State, Severity, Reviewer, Lane), All first. Each caption
+ * names its own buttons (`aria-labelledby`), the state is one choice (the page releases the other), and Open only sits last
+ * under a State caption of its own so it never reads as a lane.
+ */
+function FindingsFilterRow({ total, toggles, selected, onToggle }: {
+  total: number
+  toggles: ReturnType<typeof findingFilterIds>
+  selected: ReadonlySet<string>
+  onToggle: (id: string, pressed: boolean) => void
+}) {
+  const base = useId()
+  const captionId = (name: string) => `${base}-caption-${name}`
+  const button = (filter: FindingFilter, caption: string) => {
+    const pressed = selected.has(filter.id)
+    return (
+      <FilterButton key={filter.id} id={`${base}-${filter.id}`} pressed={pressed} data-filter={filter.id} aria-labelledby={`${captionId(caption)} ${base}-${filter.id}`} onClick={() => onToggle(filter.id, !pressed)}>
+        {filter.label} {filter.count}
+      </FilterButton>
+    )
+  }
+  const caption = (name: string, text: string) => <span key={`caption-${name}`} id={captionId(name)} className="findings-filter-label">{text}</span>
+  const allPressed = selected.has(ALL_FINDINGS)
+  return (
+    <div className="ui-filters findings-filters" role="group" data-testid="findings-filters" aria-label="Narrow the findings">
+      <FilterButton pressed={allPressed} data-filter={ALL_FINDINGS} onClick={() => onToggle(ALL_FINDINGS, !allPressed)}>All {total}</FilterButton>
+      {caption('state', 'State')}
+      {button(toggles.blocking, 'state')}
+      {caption('severity', 'Severity')}
+      {toggles.severities.map(filter => button(filter, 'severity'))}
+      {toggles.reviewers.length > 0 && caption('reviewer', 'Reviewer')}
+      {toggles.reviewers.map(filter => button(filter, 'reviewer'))}
+      {toggles.lanes.length > 0 && caption('lane', 'Lane')}
+      {toggles.lanes.map(filter => button(filter, 'lane'))}
+      {caption('state-last', 'State')}
+      {button(toggles.open, 'state-last')}
+    </div>
+  )
+}
+
 function ReviewResultView({ review, scope, definitionNodes, snapshotNodes, inputs, refreshToken, onNavigate, onOpenRequirement, onOpenFile }: { review: ReviewResult } & Omit<Props, 'review' | 'onRetry' | 'unscopedUri'>) {
   const approved = review.verdict === 'approved'
   const reviewers = review.reviewers
@@ -429,6 +471,9 @@ function ReviewResultView({ review, scope, definitionNodes, snapshotNodes, input
       const next = new Set(previous)
       if (on) next.add(id)
       else next.delete(id)
+      // The state is one choice: pressing Open P0/P1 releases Open only, and the other way round.
+      if (on && id === BLOCKING_ONLY) next.delete(OPEN_ONLY)
+      if (on && id === OPEN_ONLY) next.delete(BLOCKING_ONLY)
       return next
     })
   }
@@ -444,6 +489,34 @@ function ReviewResultView({ review, scope, definitionNodes, snapshotNodes, input
       </p>
       {blockedBy !== null && <p className="projects-error-inline" role="status" data-testid="review-blocked-by">{blockedBy}</p>}
       <p className="review-summary" data-testid="review-summary">{reviewSummary(review)}</p>
+      <section className="evidence-section" aria-labelledby="review-findings-title" data-testid="review-findings" data-filters={pressedIds.length === 0 ? 'all' : pressedIds.join(' ')}>
+        <div className="ui-section-header review-findings-head">
+          <h4 id="review-findings-title">Findings</h4>
+          <span className="ui-sub" data-testid="findings-shown">{visible.length === review.findings.length ? `${review.findings.length} ${review.findings.length === 1 ? 'finding' : 'findings'}` : `${visible.length} of ${review.findings.length} shown`} · P0, P1, P2, then by lane</span>
+        </div>
+        {review.findings.length > 0 && (
+          <FindingsFilterRow total={review.findings.length} toggles={toggles} selected={pressedIds.length === 0 ? ALL_PRESSED : pressed} onToggle={onToggle} />
+        )}
+        {visible.length === 0 ? (
+          <p className="projects-muted" data-testid="findings-empty">
+            {review.findings.length > 0 && onlyReviewer !== null ? `Reviewer ${onlyReviewer} recorded no findings.`
+              : review.findings.length > 0 ? 'No finding matches the pressed filters.'
+                : several ? 'No reviewer recorded a finding.' : 'The reviewer recorded no findings.'}
+          </p>
+        ) : (
+          <ul className="finding-cards">
+            {visible.map(finding => (
+              <li key={review.findings.indexOf(finding)}>
+                <FindingCard finding={finding} scope={scope} definitionNodes={definitionNodes} inputs={inputs} onOpenRequirement={onOpenRequirement} onOpenFile={onOpenFile} capturedFiles={capturedFiles} />
+              </li>
+            ))}
+          </ul>
+        )}
+        <p className="projects-muted">
+          A finding links to a captured file only where its message names the file's path verbatim. Blocking means an unresolved P0 or P1 finding from any reviewer; a quote links only where the task text contains it verbatim. Workers are the lanes this run had{lanes.length > 0 ? ` (${lanes.join(', ')})` : ''}; “multiple workers” covers findings that concern more than one lane. Reviewer names the reviewer that raised the finding; the same finding raised by several reviewers is listed once per reviewer, never merged.
+        </p>
+      </section>
+
       <dl className="projects-facts">
         <div>
           <dt>{several ? 'Reviewers' : 'Reviewer'}</dt>
@@ -483,41 +556,6 @@ function ReviewResultView({ review, scope, definitionNodes, snapshotNodes, input
       </dl>
 
       {review.diff !== null && diffScoped && <InlineDiff scope={scope} views={diffViews} />}
-
-      <section className="evidence-section" aria-labelledby="review-findings-title" data-testid="review-findings" data-filters={pressedIds.length === 0 ? 'all' : pressedIds.join(' ')}>
-        <div className="ui-section-header review-findings-head">
-          <h4 id="review-findings-title">Findings</h4>
-          <span className="ui-sub" data-testid="findings-shown">{visible.length === review.findings.length ? `${review.findings.length} ${review.findings.length === 1 ? 'finding' : 'findings'}` : `${visible.length} of ${review.findings.length} shown`} · P0, P1, P2, then by lane</span>
-        </div>
-        {review.findings.length > 0 && (
-          <FilterToggles
-            className="findings-filters"
-            data-testid="findings-filters"
-            aria-label="Narrow the findings"
-            filters={[{ id: ALL_FINDINGS, label: 'All', count: review.findings.length }, ...rowToggles]}
-            selected={pressedIds.length === 0 ? ALL_PRESSED : pressed}
-            onToggle={onToggle}
-          />
-        )}
-        {visible.length === 0 ? (
-          <p className="projects-muted" data-testid="findings-empty">
-            {review.findings.length > 0 && onlyReviewer !== null ? `Reviewer ${onlyReviewer} recorded no findings.`
-              : review.findings.length > 0 ? 'No finding matches the pressed filters.'
-                : several ? 'No reviewer recorded a finding.' : 'The reviewer recorded no findings.'}
-          </p>
-        ) : (
-          <ul className="finding-cards">
-            {visible.map(finding => (
-              <li key={review.findings.indexOf(finding)}>
-                <FindingCard finding={finding} scope={scope} definitionNodes={definitionNodes} inputs={inputs} onOpenRequirement={onOpenRequirement} onOpenFile={onOpenFile} capturedFiles={capturedFiles} />
-              </li>
-            ))}
-          </ul>
-        )}
-        <p className="projects-muted">
-          A finding links to a captured file only where its message names the file's path verbatim. Blocking means an unresolved P0 or P1 finding from any reviewer; a quote links only where the task text contains it verbatim. Workers are the lanes this run had{lanes.length > 0 ? ` (${lanes.join(', ')})` : ''}; “multiple workers” covers findings that concern more than one lane. Reviewer names the reviewer that raised the finding; the same finding raised by several reviewers is listed once per reviewer, never merged.
-        </p>
-      </section>
 
       <ReviewerStrip reviewers={reviewers} />
     </div>

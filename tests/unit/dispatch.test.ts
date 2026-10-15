@@ -7,7 +7,7 @@
 import { describe, test } from 'node:test'
 import { classifyRuns } from '../../src/projects/lists.ts'
 import { featureOpen, orderFeatureRuns, orderFeatures } from '../../src/projects/dispatch/projectModel.ts'
-import { runWhen } from '../../src/projects/dispatch/stops.ts'
+import { runWhen, runWord, stateWord, statusCommand } from '../../src/projects/dispatch/stops.ts'
 import assert from 'node:assert/strict'
 import { CHART_COLUMNS, endedText, PHASE_SHORT, PHASES, phaseLegend, phaseOf } from '../../src/projects/dispatch/phases.ts'
 import {
@@ -518,5 +518,29 @@ describe('the project page order and folds', () => {
     const paused = summaryOf('x', 'paused', '2026-10-01T10:00:00Z', '2026-10-03T10:00:00Z')
     paused.activity = { ...paused.activity!, attention: { kind: 'paused', node_id: 'review', since: '2026-10-03T10:00:00Z' } }
     assert.equal(runWhen(entry(paused), now, 'utc'), 'paused 10 d (since Oct 3)')
+  })
+  test('a feature header\'s state word is the feature\'s latest outcome, whatever the filter keeps; the status command names a runs root', () => {
+    const group = (outcome: string | null) => ({ runsRead: 'read' as const, steps: null, rank: 3, outcome })
+    const latest = summaryOf('r-new', 'succeeded', '2026-10-10T00:00:00Z', '2026-10-13T00:00:00Z')
+    // The outcome is taken from the latest unfiltered run, so a filter that keeps only an older failed run or nothing leaves it.
+    const outcome = runWord({ run: latest, cls: { needs: null, supersededBy: null }, steps: null }).toLowerCase()
+    assert.equal(outcome, 'succeeded')
+    assert.equal(stateWord(group(outcome)), 'succeeded')
+    assert.equal(stateWord(group(null)), 'no runs')
+    assert.equal(stateWord({ ...group(outcome), rank: 0 }), 'needs you')
+    assert.equal(stateWord({ ...group(outcome), runsRead: 'failed' }), null)
+    assert.equal(statusCommand('broken-001'), 'python -m workflow status <runs root>/broken-001 --by operator')
+    assert.equal(statusCommand(null), 'python -m workflow status <runs root>/<run-id> --by operator')
+  })
+  test('an awaiting-approval row says since when it waited, never a growing span', () => {
+    const entry = (run: RunSummary) => ({ run, cls: { needs: null, supersededBy: null }, steps: null })
+    const waiting = summaryOf('x', 'awaiting_approval', '2026-10-09T10:00:00Z', '2026-10-11T08:00:00Z')
+    const morning = T('2026-10-13T09:00:00Z')
+    assert.equal(runWhen(entry(waiting), morning, 'utc'), 'started Oct 9 · awaiting approval since Oct 11')
+    assert.equal(runWhen(entry(waiting), morning + 3_600_000, 'utc'), runWhen(entry(waiting), morning, 'utc'))
+    assert.equal(runWhen(entry(summaryOf('p', 'pending', '2026-10-09T10:00:00Z', '2026-10-10T08:00:00Z')), morning, 'utc'), 'started Oct 9 · pending since Oct 10')
+    // Finished, running and paused rows keep their words.
+    assert.equal(runWhen(entry(summaryOf('x', 'succeeded', '2026-10-09T10:00:00Z', '2026-10-09T11:05:00Z')), morning, 'utc'), 'started Oct 9 · ran 1h05m')
+    assert.match(runWhen(entry(summaryOf('x', 'running', '2026-10-13T08:00:00Z', '2026-10-13T08:30:00Z')), morning, 'utc'), /^started Oct 13 · running /)
   })
 })

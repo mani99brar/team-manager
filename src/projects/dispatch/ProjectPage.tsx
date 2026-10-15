@@ -23,7 +23,7 @@ import { GithubColumn } from './GithubColumn.tsx'
 import { ReadingPane, type StepsRead } from './ReadingPane.tsx'
 import { AheadPane } from './AheadPane.tsx'
 import { StepChart, type ChartRun, type FeatureGroup } from './StepChart.tsx'
-import { runStepsRead } from './stops.ts'
+import { runStepsRead, runWord } from './stops.ts'
 import type { DispatchOverview, Landing, ProjectDispatch, ProjectSteps } from './types.ts'
 
 /** What the reading pane docks for: a selected run, or the commits-ahead and landings list from the Local and GitHub card. */
@@ -51,6 +51,8 @@ type Props = {
   workflows: readonly WorkflowDefinition[]
   projectRuns: readonly WorkflowRuns[]
   runsState: RunsState
+  /** The run keys whose controller has read `not_running` for 15 s: a latest running run in it needs the operator. */
+  stopped?: ReadonlySet<string>
   steps: ProjectSteps | null
   stepsRead: StepsRead
   dispatch: ProjectDispatch | null
@@ -68,6 +70,7 @@ type Props = {
 }
 
 const FEATURE_FOLD = 'feature:'
+const NO_STOPPED: ReadonlySet<string> = new Set()
 
 /** The project page's order in words, for its sub-header. */
 const PROJECT_ORDER = {
@@ -76,7 +79,7 @@ const PROJECT_ORDER = {
   oldest: 'earliest activity first · runs oldest created first',
 } as const
 
-export function ProjectPage({ project, workflows, projectRuns, runsState, steps, stepsRead, dispatch, overview, allProjects, now, zone, onNavigate, list, folds, onFold, onClearFolds }: Props) {
+export function ProjectPage({ project, workflows, projectRuns, runsState, stopped = NO_STOPPED, steps, stepsRead, dispatch, overview, allProjects, now, zone, onNavigate, list, folds, onFold, onClearFolds }: Props) {
   const git = dispatch?.git ?? null
   const github = dispatch?.github ?? null
   const [selected, setSelected] = useState<Selection>(null)
@@ -90,7 +93,7 @@ export function ProjectPage({ project, workflows, projectRuns, runsState, steps,
     ? allProjects.find(p => p.project_id === git.clone_primary)?.name ?? git.clone_primary : null
 
   // The project's one classification of its listed runs (page 1 of each workflow): every row, tone and count below reads it.
-  const classes = useMemo(() => classifyRuns(projectRuns.flatMap(w => w.runs)), [projectRuns])
+  const classes = useMemo(() => classifyRuns(projectRuns.flatMap(w => w.runs), stopped), [projectRuns, stopped])
 
   // The registry run summaries per workflow, newest first, each joined with its recorded steps once the dispatch steps are
   // read: a feature's rows and run count come from the summaries, so a pending steps read never makes it read "0 runs".
@@ -113,7 +116,13 @@ export function ProjectPage({ project, workflows, projectRuns, runsState, steps,
       const runsRead = runsState.kind === 'loading' ? 'loading' as const : runsState.kind === 'failed' || (listed && listed.error !== null) ? 'failed' as const : 'read' as const
       const rank = registryRuns.reduce((best, run) => Math.min(best, liveRank(run, classOf(classes, run))), 3)
       const lastActivity = registryRuns.length === 0 ? null : registryRuns.reduce((max, run) => Math.max(max, lastActivityAt(run)), 0)
-      return { workflow, steps: stepsWorkflow, runs, total: runs.length, headTone, landings, runsRead, rank, lastActivity, more: listed?.more ?? false }
+      // The feature's own latest run, before any filter: its word is the header's state word whatever the filter keeps.
+      const latestUpdated = registryRuns.reduce<RunSummary | null>((best, run) => (best === null || ms(run.updated_at) > ms(best.updated_at) ? run : best), null)
+      const outcome = latestUpdated === null ? null : runWord({ run: latestUpdated, cls: classOf(classes, latestUpdated), steps: null }).toLowerCase()
+      // Runs the list could not read, minus those the chart's steps rows already name: no run is called unreadable twice.
+      const named = new Set((stepsWorkflow?.errors ?? []).map(err => err.run_id))
+      const unreadRuns = (listed?.errors ?? []).map(err => err.run_id).filter(runId => !named.has(runId))
+      return { workflow, steps: stepsWorkflow, runs, total: runs.length, headTone, landings, runsRead, rank, lastActivity, more: listed?.more ?? false, outcome, unreadRuns }
     })
   }, [workflows, projectRuns, steps, git, classes, runsState, list.filter.sort])
 
@@ -133,7 +142,8 @@ export function ProjectPage({ project, workflows, projectRuns, runsState, steps,
   const matched = filtered.reduce((sum, group) => sum + group.runs.length, 0)
   // A feature whose list failed is named in the scope line, so a partly read project never reads "all loaded". Once the read
   // is ready a group's `runsRead` is 'failed' exactly when its list carries an error, so this is the count of those groups.
-  const unreadFeatures = projectRuns.filter(w => w.error !== null).length
+  // A list that served some runs but named others it could not read counts too: it is not fully read.
+  const unreadFeatures = projectRuns.filter(w => w.error !== null || (w.errors ?? []).length > 0).length
   const unreadText = unreadFeatures > 0 ? `${unreadFeatures} feature${unreadFeatures === 1 ? '' : 's'} cannot be read` : null
   const scope = projectScopeLine(runsState.kind === 'ready' ? { kind: 'ready', unread: unreadText } : runsState, matched, allItems.length, groups.some(group => group.more))
   // The operator's own feature toggles hold until the filter changes.
@@ -245,8 +255,17 @@ export function ProjectPage({ project, workflows, projectRuns, runsState, steps,
   const allRuns = useMemo(() => projectRuns.flatMap(w => w.runs.map(run => ({ run, workflowId: w.workflow.workflow_id }))), [projectRuns])
   // The recorded Claude spend, once the overview is read; nothing before, or when this server sends none.
   const spendText = spendFigure(overview === null ? null : overviewMap.get(project.project_id)?.spend)
-  const waitingRuns = allRuns.filter(({ run }) => classOf(classes, run).needs !== null)
-  const runningRuns = allRuns.filter(({ run }) => run.status === 'running' && classOf(classes, run).needs === null)
+  const waitingAll = allRuns.filter(({ run }) => classOf(classes, run).needs !== null)
+  const runningAll = allRuns.filter(({ run }) => run.status === 'running' && classOf(classes, run).needs === null)
+  // While the bar filters, the block keeps the runs the chart would keep (the same match), classified before the filter.
+  const keepNeeds = ({ run, workflowId }: (typeof allRuns)[number]) => {
+    const group = groups.find(candidate => candidate.workflow.workflow_id === workflowId)
+    const entry = group?.runs.find(candidate => candidate.run.run_id === run.run_id)
+    return group !== undefined && entry !== undefined && matchesFilter(itemOf(group, entry), list.filter, context)
+  }
+  const waitingRuns = filtering ? waitingAll.filter(keepNeeds) : waitingAll
+  const runningRuns = filtering ? runningAll.filter(keepNeeds) : runningAll
+  const needsTotal = waitingAll.length + runningAll.length
 
   return (
     <div className={`dispatch-project ${selected ? 'has-pane' : ''}`} data-testid="dispatch-project">
@@ -299,12 +318,14 @@ export function ProjectPage({ project, workflows, projectRuns, runsState, steps,
       <div className={`dispatch-project-body${github?.status === 'not_github' ? ' dispatch-project-body-wide' : ''}`}>
         <div className="dispatch-project-main">
           <section className="dispatch-needs" aria-label="Needs you and running" data-testid="dispatch-needs">
-            <h2 className="dispatch-needs-h">Needs you and running</h2>
+            <h2 className="dispatch-needs-h">Needs you and running{filtering && runsState.kind === 'ready' && ` · ${waitingRuns.length + runningRuns.length} of ${needsTotal}`}</h2>
             {runsState.kind === 'loading'
               ? <p className="dispatch-muted" data-testid="dispatch-needs-loading">Reading runs…</p>
               : runsState.kind === 'failed'
                 ? <p className="dispatch-muted" data-testid="dispatch-needs-failed">Runs not read: {runsState.reason}</p>
-                : waitingRuns.length === 0 && runningRuns.length === 0 && unreadText === null
+                : waitingRuns.length === 0 && runningRuns.length === 0 && filtering
+                  ? <><p className="dispatch-muted" data-testid="dispatch-needs-no-match">No run matches.</p>{unreadText && <p className="dispatch-muted" data-testid="dispatch-needs-unread"> · {unreadText}</p>}</>
+                  : waitingRuns.length === 0 && runningRuns.length === 0 && unreadText === null
                   ? <p className="dispatch-muted" data-testid="dispatch-needs-none">Nothing waits on you; nothing running.</p>
                   : (
                     <>

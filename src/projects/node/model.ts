@@ -354,7 +354,7 @@ export function phaseState<T extends PhaseTone>(rows: readonly { at: string; seq
 // ---- A reviewer's verdict lead (the review step and the projected reviewer nodes) ------------------------------------
 
 /** What a reviewer's header leads with: the verdict in words, its tone and the verdict word for the step strip. */
-export type VerdictLead = { text: string; tone: Tone; verdict: 'approved' | 'blocked' | null }
+export type VerdictLead = { text: string; tone: Tone; verdict: 'approved' | 'blocked' | 'failed' | null }
 
 type VerdictInput = {
   /** The verdict word a reviewer recorded: `approved`, `blocked` or `late blocked`; null while undecided. */
@@ -382,6 +382,7 @@ export function reviewerLead(input: VerdictInput | null): VerdictLead {
     const openWords = open === null ? [] : [open.p0 > 0 ? `${open.p0} open P0` : '', open.p1 > 0 ? `${open.p1} open P1` : ''].filter(Boolean)
     return { text: [verdict === 'blocked' ? 'Blocked' : 'Late, blocked', ...roundWords, ...(openWords.length > 0 ? [openWords.join(', ')] : [])].join(' · '), tone: 'fail', verdict: 'blocked' }
   }
+  if (verdict === 'failed') return { text: ['Failed', ...roundWords].join(' · '), tone: 'fail', verdict: 'failed' }
   if (verdict !== null) return { text: [sentenceCase(verdict), ...roundWords].join(' · '), tone: 'idle', verdict: null }
   if (status === 'running') return { text: 'No verdict yet', tone: 'run', verdict: null }
   if (status === 'failed') return { text: 'No verdict · the session failed', tone: 'fail', verdict: null }

@@ -9,14 +9,13 @@
  * command, with the literal `<run-id>` placeholder for a whole-workflow failure ([P21]).
  */
 import type { WorkflowDefinition } from '../api.ts'
-import { dayKey, monthDay } from '../lists.ts'
+import { dayKey, monthDay, unreadRunsText } from '../lists.ts'
 import { runPathname, workflowPathname } from '../routes.ts'
 import type { Zone } from '../time.ts'
 import { AppLink } from '../panels.tsx'
-import { OVERRIDE_LABEL, STATUS_LABEL } from '../status.ts'
 import { stateTone, toneClass, type Tone } from '../tone.ts'
 import { CHART_COLUMNS, endedText, PHASE_SHORT, PHASES, phaseLegend, phaseOf } from './phases.ts'
-import { endedCounts, landingKnown, noStopWording, runStepsRead, runWhen, stopOf, type ChartRun, type StepsReadState } from './stops.ts'
+import { endedCounts, landingKnown, noStopWording, runStepsRead, runWhen, runWord, stateWord, statusCommand, stopOf, type ChartRun, type StepsReadState } from './stops.ts'
 import { landingWording } from './derive.ts'
 import { StateGlyph } from './common.tsx'
 import type { Landing, ProjectStepsRun, ProjectStepsWorkflow } from './types.ts'
@@ -25,17 +24,6 @@ import type { Landing, ProjectStepsRun, ProjectStepsWorkflow } from './types.ts'
 const num = (runId: string) => runId.replace(/^.*-(\d+)$/, '$1')
 
 export type { ChartRun } from './stops.ts'
-
-function runWord(entry: ChartRun): string {
-  const { run, cls } = entry
-  if (run.accepted) return OVERRIDE_LABEL
-  if (cls.needs === 'question') return 'question'
-  if (cls.needs === 'approval') return 'awaiting approval'
-  if (cls.needs === 'pane') return 'needs you'
-  if (cls.needs === 'decision') return 'decision waits'
-  if (cls.needs === 'interrupted') return 'interrupted'
-  return STATUS_LABEL[run.status]
-}
 
 function runTone(entry: ChartRun): Tone {
   return entry.cls.needs !== null ? 'warn' : stateTone({ status: entry.run.status, accepted: entry.run.accepted })
@@ -174,6 +162,10 @@ export type FeatureGroup = {
   lastActivity: number | null
   /** Whether the feature has more runs than the page read (its first page only). */
   more: boolean
+  /** The word of the feature's latest run before any filter ("succeeded", "failed"), null without a read run: the header's state word. */
+  outcome: string | null
+  /** The runs of this feature's list the server could not read and the chart's steps rows do not already name, by run id. */
+  unreadRuns?: readonly string[]
 }
 
 type Props = {
@@ -195,16 +187,6 @@ type Props = {
   zone: Zone
   /** The features' order in words, shown above the definition folds. */
   order?: string
-}
-
-/** A feature's state word on its header: what its most urgent run is, else its latest run's outcome. */
-function stateWord(group: FeatureGroup): string | null {
-  if (group.runsRead !== 'read' || group.steps?.error) return null
-  if (group.rank === 0) return 'needs you'
-  if (group.rank === 1) return 'running'
-  if (group.rank === 2) return 'paused'
-  const latest = group.runs.reduce<ChartRun | null>((best, entry) => (best === null || Date.parse(entry.run.updated_at) > Date.parse(best.run.updated_at) ? entry : best), null)
-  return latest === null ? 'no runs' : runWord(latest).toLowerCase()
 }
 
 export function StepChart({ projectId, defaultBranch, groups, filtering, stepsRead, selectedRunId, onSelect, onNavigate, isOpen, onToggle, now, zone, order }: Props) {
@@ -278,7 +260,7 @@ export function StepChart({ projectId, defaultBranch, groups, filtering, stepsRe
                   <div className="dispatch-badrows">
                     <p className="dispatch-badrow" role="alert">
                       <span className="dispatch-word">cannot be read</span> {error.message}
-                      {' · '}<code>python -m workflow status &lt;run-id&gt; --by operator</code>
+                      {' · '}<code>{statusCommand(null)}</code>
                     </p>
                   </div>
                 )
@@ -292,7 +274,7 @@ export function StepChart({ projectId, defaultBranch, groups, filtering, stepsRe
                       {(group.steps?.errors ?? []).map(err => (
                         <p key={err.run_id} className="dispatch-badrow" role="alert">
                           <span className="dispatch-word">cannot be read</span> {err.message}
-                          {' · '}<code>python -m workflow status {err.run_id} --by operator</code>
+                          {' · '}<code>{statusCommand(err.run_id)}</code>
                         </p>
                       ))}
                     </div>
@@ -314,6 +296,9 @@ export function StepChart({ projectId, defaultBranch, groups, filtering, stepsRe
                     )}
                   </>
                 )}
+              {(group.unreadRuns ?? []).length > 0 && (
+                <p className="dispatch-muted dispatch-unread-runs" data-testid="dispatch-unread-runs">{unreadRunsText(group.unreadRuns!)}</p>
+              )}
               {/* keep the run links discoverable for keyboard and deep-linking without leaving the pane */}
               {group.runs.map(entry => (
                 <a key={`link-${entry.run.run_id}`} className="visually-hidden" href={runPathname(projectId, group.workflow.workflow_id, entry.run.run_id)}

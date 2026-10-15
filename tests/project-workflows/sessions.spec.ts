@@ -17,6 +17,7 @@ import {
   UX_SESSIONS_HIDDEN_WORKFLOW_ID, UX_SESSIONS_WORKFLOW_ID,
 } from './fixtures/sessions.ts'
 import { RUN_PANEL_OLD, UX_PANEL_WORKFLOW_ID } from './fixtures/ux-panel.ts'
+import { STATUS_GLYPH } from '../../src/projects/steps.ts'
 import { attach, graphNode, installHooks, nodeDetail, openStepSheet, phase, renderedText, runUrl, stepSheet, workflowUrl } from './support.ts'
 
 installHooks()
@@ -538,4 +539,87 @@ test(`[scenario:reviewer-verdict] A reviewer's page leads with its verdict ('Blo
   await page.goto(runUrl(RUN_SUCCEEDED, 'launch_adapter'))
   await expect(page.getByTestId('node-status-meaning')).toContainText('not workflow completion')
   await expect(page.getByTestId('node-verdict')).toHaveCount(0)
+})
+
+/**
+ * The failed-verdict reviewer: reviewer-coverage's sessions row answers a `failed` verdict and a failed session (the seeds keep
+ * their three reviewers and every count that reads them), by `page.route` in both phases, from the payload both phases serve.
+ */
+async function answerFailedVerdict(page: Page, change: (row: SessionRow) => SessionRow = row => ({ ...row, verdict: 'failed', status: 'failed' })) {
+  const payload = { ...PAYLOAD, sessions: PAYLOAD.sessions.map(row => (row.key === 'reviewer:coverage:2' ? change(row) : row)) }
+  await page.route(url => url.pathname.endsWith(`/runs/${RUN_SESSIONS}/sessions`), route => route.fulfill({ json: payload }))
+}
+
+test(`[scenario:reviewer-tones] A reviewer's title row shows no green session badge: the verdict leads and the session outcome is muted metadata; a failed verdict is a fail in the step strip's glyph, tone and name (${phase})`, async ({ page }, testInfo) => {
+  test.slow()
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await answerFailedVerdict(page)
+  const chip = (id: string) => page.getByTestId('run-node-list').locator(`li[data-node-id="${id}"] .step-chip`)
+  const titleRow = () => page.getByTestId('node-header').locator('.node-title-row')
+  for (const [id, outcome, verdict] of [['reviewer-general', '· session succeeded', 'blocked'], ['reviewer-critique', '· session succeeded', 'approved'], ['reviewer-coverage', '· session failed', 'failed']] as const) {
+    await page.goto(nodePage(RUN_SESSIONS, id))
+    await expect(nodeDetail(page)).toHaveAttribute('data-node-id', id)
+    await expect(page.getByTestId('node-verdict')).toHaveAttribute('data-verdict', verdict)
+    // No toned badge beside the title: neither the succeeded badge nor any ok-toned element, and no badge at all.
+    await expect(titleRow().locator('.status-succeeded, .tone-ok, [class*="tone-ok"], .status-badge')).toHaveCount(0)
+    const metadata = page.getByTestId('node-verdict-outcome')
+    await expect(metadata).toHaveText(outcome)
+    await expect(metadata).toHaveClass(/projects-muted/)
+  }
+  // The failed verdict leads in the fail tone, and the strip's chip says failed in its glyph, tone, data-verdict and name.
+  await expect(page.getByTestId('node-header')).toHaveClass(/\btone-fail\b/)
+  await page.goto(nodePage(RUN_SESSIONS, 'reviewer-general'))
+  const failed = chip('reviewer-coverage')
+  await expect(failed).toHaveAttribute('data-verdict', 'failed')
+  await expect(failed).toHaveClass(/\btone-fail\b/)
+  await expect(failed.locator('.step-glyph')).toHaveText(STATUS_GLYPH.failed)
+  await expect(failed).toHaveAttribute('aria-label', 'Reviewer · coverage, failed')
+  expect(await failed.getAttribute('aria-label')).not.toContain('succeeded')
+  // The blocked and approved chips keep stage A's assertions.
+  await expect(chip('reviewer-general')).toHaveAttribute('data-verdict', 'blocked')
+  await expect(chip('reviewer-general')).toHaveClass(/\btone-fail\b/)
+  await expect(chip('reviewer-general')).toHaveAttribute('aria-label', 'Reviewer · general, blocked')
+  await expect(chip('reviewer-critique')).toHaveAttribute('data-verdict', 'approved')
+  await expect(chip('reviewer-critique')).toHaveClass(/\btone-ok\b/)
+  await attach(page, testInfo, 'reviewer-tones')
+})
+
+test(`A reviewer with no verdict keeps data-verdict 'none' and no verdict on its chip; a worker's badge is unchanged (${phase})`, async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await answerFailedVerdict(page, row => ({ ...row, verdict: null, status: 'succeeded' }))
+  await page.goto(nodePage(RUN_SESSIONS, 'reviewer-coverage'))
+  await expect(page.getByTestId('node-verdict')).toHaveAttribute('data-verdict', 'none')
+  await expect(page.getByTestId('run-node-list').locator('li[data-node-id="reviewer-coverage"] .step-chip')).not.toHaveAttribute('data-verdict', /./)
+  // The panel node and a worker keep the toned badge.
+  await page.goto(runUrl(RUN_SUCCEEDED, 'launch_adapter'))
+  await expect(page.getByTestId('node-header').locator('.node-title-row .status-badge')).toHaveCount(1)
+})
+
+test(`[scenario:resume-copy-row] On a node page the Copy button sits on the resume command's first line at 1280 px; the run page's Sessions table still shows each command on its own line (${phase})`, async ({ page }, testInfo) => {
+  test.slow()
+  await page.setViewportSize({ width: 1280, height: 900 })
+  await page.goto(nodePage(RUN_SESSIONS, 'reviewer-general'))
+  const block = page.getByTestId('session-block')
+  const command = block.getByTestId('session-resume-command')
+  await expect(command).toBeVisible()
+  const copy = block.getByTestId('session-resume-copy')
+  const text = (await command.boundingBox())!
+  const button = (await copy.boundingBox())!
+  const lineHeight = await command.evaluate(element => parseFloat((globalThis as unknown as { getComputedStyle: (node: unknown) => { lineHeight: string } }).getComputedStyle(element).lineHeight) || 20)
+  // The button's vertical range overlaps the command's first line: the same row.
+  expect(button.y, 'Copy starts above the end of the first line').toBeLessThan(text.y + lineHeight)
+  expect(button.y + button.height, 'Copy ends below the start of the first line').toBeGreaterThan(text.y)
+  await attach(page, testInfo, 'resume-copy-row')
+
+  // The Sessions table: each opened command takes its row alone, Copy under it.
+  await page.goto(runPage(RUN_SESSIONS))
+  const row = page.getByTestId('sessions-section').locator('.ss-row').filter({ has: page.getByTestId('session-resume-toggle') }).first()
+  await row.getByTestId('session-resume-toggle').click()
+  const own = row.getByTestId('session-resume-command')
+  await expect(own).toBeVisible()
+  const ownBox = (await own.boundingBox())!
+  const rowBox = (await row.boundingBox())!
+  const ownCopy = (await row.getByTestId('session-resume-copy').boundingBox())!
+  expect(ownBox.width, 'the command takes the row').toBeGreaterThan(rowBox.width * 0.6)
+  expect(ownBox.y, 'the command is on a line of its own, under the row\'s buttons').toBeGreaterThanOrEqual(ownCopy.y + ownCopy.height - 1)
 })

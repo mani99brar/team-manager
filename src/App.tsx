@@ -457,14 +457,16 @@ function App() {
   }, [guardLeave, requestView, writeHistory, leaveList, replaceListSearch])
   const navigateToSource = useCallback((source: Source) => guardLeave(() => navigate({ source, locationId: null, path: '' }, { reveal: true })), [guardLeave, navigate])
   const inProjects = location.kind === 'projects'
-  // A Projects list restores its own scroll position after its first settled read, so the browser's restore is turned off there.
+  const projectsRoute = location.kind === 'projects' ? parseProjectsPathname(location.pathname) : null
+  // A Projects list restores its own scroll position after its first settled read, so the browser's restore is turned off on
+  // the list levels only; a run or node page keeps the browser's own restore, which puts Back to a run page where it was.
+  const listLevel = projectsRoute !== null && (projectsRoute.level === 'triage' || projectsRoute.level === 'project' || projectsRoute.level === 'workflow' || projectsRoute.level === 'projects')
   useEffect(() => {
     if (!inProjects || !('scrollRestoration' in window.history)) return
     const previous = window.history.scrollRestoration
-    window.history.scrollRestoration = 'manual'
+    window.history.scrollRestoration = listLevel ? 'manual' : 'auto'
     return () => { window.history.scrollRestoration = previous }
-  }, [inProjects])
-  const projectsRoute = location.kind === 'projects' ? parseProjectsPathname(location.pathname) : null
+  }, [inProjects, listLevel])
   const rootSource: Source | null = location.kind === 'folder' || location.kind === 'file' ? location.ref.source : location.kind === 'legacy' ? location.source : null
 
   // Focus the originating file action once the browsing view has rendered it again.

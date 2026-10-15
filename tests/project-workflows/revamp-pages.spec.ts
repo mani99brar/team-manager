@@ -242,8 +242,8 @@ test(`[scenario:revamp-review] The review node opens on four figures, findings a
   await expect(cards(page)).toContainText([BLOCKED_FINDINGS.coverageUi, BLOCKED_FINDINGS.generalUi, BLOCKED_FINDINGS.generalAdapter, BLOCKED_FINDINGS.coverageAdapter])
   await expect(cards(page).first()).toHaveClass(/finding-blocking/)
   await expect(cards(page).nth(1)).not.toHaveClass(/finding-blocking/)
-  // The severity stripe: P1's colour on the P1 card, P2's on the others; the chip says the severity in words.
-  expect((await style(cards(page).first(), 'borderLeftColor')).borderLeftColor).toBe(await token(page, '--p1'))
+  // The severity stripe: a blocking P1 card wears the fail colour (DESIGN.md: the blocking mark wins), P2's on the others; the chip says the severity in words.
+  expect((await style(cards(page).first(), 'borderLeftColor')).borderLeftColor).toBe(await token(page, '--fail'))
   expect((await style(cards(page).nth(1), 'borderLeftColor')).borderLeftColor).toBe(await token(page, '--p2'))
   await expect(cards(page).first().locator('.ui-sev')).toHaveText('P1')
   await expect(cards(page).first().getByTestId('finding-reviewer')).toHaveText('coverage')
@@ -484,9 +484,11 @@ test(`[scenario:review-one-list] The blocked review is one findings list that op
   await expect(card.locator('.finding-card-head')).toContainText('P1 coverage ui open blocks integration')
   await expect(message.locator('.finding-rest')).toBeHidden()
   await expect(message).toContainText(BLOCKED_FINDINGS.coverageUi)
-  const top = (await box(card)).y
-  testInfo.annotations.push({ type: 'first-finding-top', description: String(top) })
-  expect(top).toBeLessThan(900)
+  // The head sentence is wholly on the first screen: the message's bottom, not only the card's top.
+  const messageBox = await box(message)
+  const bottom = messageBox.y + messageBox.height
+  testInfo.annotations.push({ type: 'first-finding-message-bottom', description: String(bottom) })
+  expect(bottom).toBeLessThan(900)
 
   // More expands the rest, the requirement and the fields; Less folds them again.
   const more = card.getByTestId('finding-more')
@@ -528,6 +530,120 @@ test(`[scenario:review-one-list] The blocked review is one findings list that op
   await attach(page, testInfo, 'review-one-list')
 })
 
+/** One finding of the blocked review recorded as a resolved P1 (a P1 that blocks nothing), in the browser, in both phases. */
+const NON_BLOCKING_P1 = `(() => {
+  const original = window.fetch.bind(window)
+  const message = ${JSON.stringify(BLOCKED_FINDINGS.generalUi)}
+  window.fetch = async (input, init) => {
+    const response = await original(input, init)
+    const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+    if (!/\\/reviews\\/\\d+$/.test(new URL(url, window.location.href).pathname)) return response
+    const body = await response.clone().json()
+    const tweak = finding => (finding.message === message ? { ...finding, severity: 'P1', disposition: 'resolved' } : finding)
+    body.findings = body.findings.map(tweak)
+    body.reviewers = body.reviewers.map(reviewer => ({ ...reviewer, findings: reviewer.findings.map(tweak) }))
+    return new Response(JSON.stringify(body), { status: response.status, headers: response.headers })
+  }
+})()`
+
+test(`[scenario:findings-groups] The findings filter is one group under visible captions (State, Severity, Reviewer, Lane), the state is one choice, a card's More names what it opens, and a blocking card wears the fail stripe (${phase})`, async ({ page }, testInfo) => {
+  test.slow()
+  await page.addInitScript(NON_BLOCKING_P1)
+  await page.clock.install({ time: new Date(REVAMP_NOW) })
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.goto(revampUrl(RUN_REVAMP_BLOCKED, 'review'))
+  await expect(nodeDetail(page)).toHaveAttribute('data-node-id', 'review')
+
+  // One group, its captions visible in order, each labelling exactly its own buttons; All is the reset choice and has no caption.
+  await expect(findings(page).getByRole('group')).toHaveCount(1)
+  const captions = filters(page).locator('.findings-filter-label')
+  await expect(captions).toHaveText(['State', 'Severity', 'Reviewer', 'Lane', 'State'])
+  for (const caption of await captions.all()) await expect(caption).toBeVisible()
+  const labelled = await filters(page).locator('button').evaluateAll(buttons => buttons.map(button => {
+    const doc = button.ownerDocument
+    const first = (button.getAttribute('aria-labelledby') ?? '').split(' ')[0]
+    return { filter: button.getAttribute('data-filter'), caption: first === '' ? null : doc.getElementById(first)?.textContent ?? null, own: (button.getAttribute('aria-labelledby') ?? '').split(' ')[1] === button.id }
+  }))
+  expect(labelled.map(item => [item.filter, item.caption])).toEqual([
+    ['all', null], ['blocking', 'State'], ['severity:P0', 'Severity'], ['severity:P1', 'Severity'], ['severity:P2', 'Severity'],
+    ['reviewer:general', 'Reviewer'], ['reviewer:coverage', 'Reviewer'], ['lane:ui', 'Lane'], ['lane:adapter', 'Lane'], ['open', 'State'],
+  ])
+  for (const item of labelled.filter(entry => entry.filter !== 'all')) expect(item.own, `${item.filter} names itself after its caption`).toBe(true)
+  await expect(toggle(page, 'open')).toHaveAccessibleName(/^State Open only \d+$/)
+  await expect(toggle(page, 'blocking')).toHaveAccessibleName(/^State Open P0\/P1 \d+$/)
+  await expect(toggle(page, 'severity:P1')).toHaveAccessibleName(/^Severity P1 \d+$/)
+  expect(await toggle(page, 'open').evaluate(button => button.previousElementSibling?.textContent)).toBe('State')
+
+  // The page opens on Open P0/P1; the state is one choice, whatever the clicks.
+  await expect(toggle(page, 'blocking')).toHaveAttribute('aria-pressed', 'true')
+  await expect(toggle(page, 'open')).toHaveAttribute('aria-pressed', 'false')
+  for (const id of ['open', 'open', 'blocking', 'open', 'blocking', 'blocking', 'open']) {
+    await toggle(page, id).click()
+    const [blocking, open] = await Promise.all(['blocking', 'open'].map(name => toggle(page, name).getAttribute('aria-pressed')))
+    expect(blocking === 'true' && open === 'true', `after pressing ${id}`).toBe(false)
+  }
+  await showAll(page)
+  await expect(cards(page)).toHaveCount(4)
+
+  // More keeps its visible word, names what opens, and controls both regions.
+  const blocking = page.locator('[data-testid="finding"][data-blocking="true"]')
+  const more = blocking.getByTestId('finding-more')
+  await expect(more).toHaveText('More')
+  await expect(more).toHaveAccessibleName(/^More: rest of the message, files and fields$/)
+  const controls = ((await more.getAttribute('aria-controls')) ?? '').split(' ')
+  expect(controls).toHaveLength(2)
+  expect(await blocking.locator('.finding-rest').getAttribute('id')).toBe(controls[0])
+  expect(await blocking.locator('.finding-body').getAttribute('id')).toBe(controls[1])
+  await more.click()
+  await expect(more).toHaveText('Less')
+  await expect(more).toHaveAccessibleName(/^Less: /)
+  await expect(blocking.locator('.finding-body')).toBeVisible()
+  await more.click()
+  await expect(blocking.locator('.finding-body')).toBeHidden()
+
+  // The blocking P1 wears the fail stripe; a P1 that blocks nothing keeps the P1 colour.
+  expect((await style(blocking, 'borderLeftColor')).borderLeftColor).toBe(await token(page, '--fail'))
+  const plainP1 = page.locator('[data-testid="finding"][data-severity="P1"]:not([data-blocking="true"])')
+  await expect(plainP1).toHaveCount(1)
+  expect((await style(plainP1, 'borderLeftColor')).borderLeftColor).toBe(await token(page, '--p1'))
+  await attach(page, testInfo, 'findings-groups')
+})
+
+test(`[scenario:findings-first-screen] At 1440x900 the first finding's head sentence is on the first screen, the verdict line, blocked-by and summary come before the findings and the review record after them (${phase})`, async ({ page }, testInfo) => {
+  test.slow()
+  await page.clock.install({ time: new Date(REVAMP_NOW) })
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.goto(revampUrl(RUN_REVAMP_BLOCKED, 'review'))
+  await expect(nodeDetail(page)).toHaveAttribute('data-node-id', 'review')
+  await expect(cards(page)).toHaveCount(1)
+  const message = cards(page).first().getByTestId('finding-message')
+  const messageBox = await box(message)
+  testInfo.annotations.push({ type: 'first-finding-message-bottom', description: String(messageBox.y + messageBox.height) })
+  expect(messageBox.y + messageBox.height, 'the head sentence is wholly above 900 px').toBeLessThan(900)
+  expect(await page.evaluate('window.scrollY')).toBe(0)
+
+  const result = page.getByTestId('review-result')
+  const list = findings(page)
+  for (const id of ['review-verdict', 'review-blocked-by', 'review-summary']) expect(await precedes(result.getByTestId(id), list), `${id} comes before the findings`).toBe(true)
+  for (const id of ['review-reviewer', 'review-bundle', 'review-diff']) {
+    const fact = result.getByTestId(id)
+    await expect(fact).toBeVisible()
+    expect(await precedes(list, fact), `${id} follows the findings`).toBe(true)
+  }
+  // The review record keeps its test id, its reviewer count and its reviewer entries, visible.
+  await expect(result).toBeVisible()
+  await expect(result).toHaveAttribute('data-reviewer-count', '2')
+  await expect(result).toHaveAttribute('data-verdict', 'blocked')
+  await expect(result.getByTestId('reviewer-entry')).toHaveCount(2)
+  for (const entry of await result.getByTestId('reviewer-entry').all()) await expect(entry).toBeVisible()
+  // Node-compact's other assertions: no tablist and one sticky band.
+  await expect(page.getByRole('tablist')).toHaveCount(0)
+  const sticky = await page.locator('[data-testid="run-view"] *').evaluateAll(elements => elements
+    .filter(element => (globalThis as unknown as { getComputedStyle: (node: unknown) => { position: string } }).getComputedStyle(element).position === 'sticky').length)
+  expect(sticky).toBe(1)
+  await attach(page, testInfo, 'findings-first-screen')
+})
+
 test(`[scenario:node-compact] Node pages reach their content: no tabs (an Assignment link in the one-line run bar), the step strip the only sticky band, the first finding in the first screen at 1440x900, the worker's figures on one row with the completion as a chip on the report (${phase})`, async ({ page }, testInfo) => {
   test.slow()
   await page.clock.install({ time: new Date(REVAMP_NOW) })
@@ -554,10 +670,10 @@ test(`[scenario:node-compact] Node pages reach their content: no tabs (an Assign
   expect(sticky[0]).toContain('step-strip')
   await expect(page.getByTestId('run-node-list')).toBeVisible()
 
-  // The first finding is in the first screen.
-  const first = await box(cards(page).first())
+  // The first finding's head sentence is in the first screen.
+  const first = await box(cards(page).first().getByTestId('finding-message'))
   expect(first.y).toBeGreaterThan(0)
-  expect(first.y).toBeLessThan(900)
+  expect(first.y + first.height).toBeLessThan(900)
   await attach(page, testInfo, 'node-compact')
 
   // A worker: its figure tiles share one row, there is no completion tile, and the report's heading carries the completion chip.

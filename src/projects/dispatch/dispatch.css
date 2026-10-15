@@ -150,6 +150,14 @@
   .projects-shell .dispatch-en-full { display: none; }
   .projects-shell .dispatch-en-count { display: inline; }
   .projects-shell .dispatch-legend { display: flex; }
+  /* A run row's first line wraps: the id keeps its own width (never a column of two or three characters), the date may wrap,
+     and the landing note wraps inside the chart on a line of its own. */
+  .projects-shell .dispatch-run-1 { flex-wrap: wrap; row-gap: 0; }
+  .projects-shell .dispatch-run-id { flex: 0 0 auto; max-width: 100%; overflow-wrap: anywhere; }
+  .projects-shell .dispatch-run-when { white-space: normal; min-width: 0; overflow-wrap: anywhere; }
+  .projects-shell .dispatch-run-r { margin-left: 0; flex: 1 1 100%; min-width: 0; }
+  .projects-shell .dispatch-res { flex-wrap: wrap; min-width: 0; max-width: 100%; }
+  .projects-shell .dispatch-off { min-width: 0; overflow-wrap: anywhere; }
 }
 .projects-shell .dispatch-legend-item { white-space: nowrap; }
 .projects-shell .dispatch-legend-item b { font-family: var(--font-mono); color: var(--fg); }
