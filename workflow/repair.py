@@ -31,7 +31,7 @@ from pathlib import Path
 from langgraph.checkpoint.sqlite import SqliteSaver
 
 from .actor import BY_OPERATOR, actor_record, add_actor_argument, require_actor
-from .checks import now
+from .checks import TRANSIENT_KINDS, now
 from .pipeline import Pipeline, build_pipeline, commit_env, digest_file, graph_config, report
 from .sessions import git, read_json, run_lock, save_json
 from .verification import owns, safe_path
@@ -71,24 +71,34 @@ def attempt_floor(directory: Path, phase: str, node: str) -> int:
 MAX_TRANSIENT_RERUNS = 3
 
 
-def transient_packet(path: Path) -> bool:
-    """A blocked packet whose every gate reason is a check killed for memory (result.transient_checks): its id's reasons, or
-    `Executed check failed: <its command>`. A real failure beside a kill makes the attempt a real failure; the kill is only listed."""
+def transient_packet(path: Path, kinds: tuple[str, ...] = ("memory",)) -> bool:
+    """A blocked packet whose every gate reason is a check recorded transient with one of `kinds` (result.transient_checks
+    and the execution's `transient`; a memory kill by default, which `automatic` waits on memory for): its id's reasons, or
+    `Executed check failed: <its command>`. A real failure beside a kill makes the attempt a real failure; the kill is only
+    listed. A listed check whose execution records no kind is a memory kill, the only kind recorded before "disk"."""
     if not path.is_file():
         return False
     packet = read_json(path)
     result, gate = packet.get("result", {}), packet.get("gate", {})
-    killed = result.get("transient_checks") or []
+    checks = result.get("checks", [])
+    indexes = {receipt.get("id"): receipt.get("worker_check_index") for receipt in (packet.get("evidence") or {}).get("checks", [])}
+
+    def kind(check_id: str) -> str:
+        index = indexes.get(check_id)
+        recorded = checks[index].get("transient") if isinstance(index, int) and 0 <= index < len(checks) else None
+        return recorded or "memory"
+    killed = [check_id for check_id in result.get("transient_checks") or [] if kind(check_id) in kinds]
     if gate.get("status") != "blocked" or not killed or not gate.get("reasons"):
         return False
-    commands = {f"Executed check failed: {check.get('command')}" for check in result.get("checks", []) if check.get("transient") == "memory"}
+    commands = {f"Executed check failed: {check.get('command')}" for check in checks if check.get("transient") in kinds}
     prefixes = tuple(f"{check_id}{separator}" for check_id in killed for separator in (":", "/"))
     return all(reason in commands or reason.startswith(prefixes) for reason in gate["reasons"])
 
 
 # A full disk is no verdict on the code either (RUNBOOK "Status, failures and recovery"): a step that raised errno 28, or an
-# attempt whose every gate reason's retained log ends with one of these, is transient like a memory kill. The packet itself
-# keeps `transient: "memory"` as its only value (workerResult.schema.json): the controller derives this, it never records it.
+# attempt whose every gate reason's retained log ends with one of these, is transient like a memory kill. A check whose log
+# ends with one is recorded `transient: "disk"` (checks.disk_killed, workerResult.schema.json) and read as such; packets
+# written before that record keep this log fallback (disk_packet).
 DISK_SIGNATURES = ("ENOSPC", "No space left on device", "Disk quota exceeded")
 DISK_ERRNO_FORMS = ("OSError(28", "[Errno 28]")  # A checkpoint keeps a raised step's error as its repr.
 DISK_TAIL_LINES = 20
@@ -121,11 +131,14 @@ def reason_log(packet: dict, folder: Path, reason: str) -> Path | None:
 
 
 def disk_packet(path: Path) -> bool:
-    """A blocked packet whose every gate reason is a setup or check failure whose retained log's last 20 lines name a full disk
-    (DISK_SIGNATURES). A real failure beside one makes the attempt a real failure. A reused candidate packet's logs are its
-    worker packet's."""
+    """A blocked packet whose every gate reason is a check recorded `transient: "disk"` (transient_packet), or, for a packet
+    written before that record and for setup commands, a setup or check failure whose retained log's last 20 lines name a full
+    disk (DISK_SIGNATURES). A real failure beside one makes the attempt a real failure. A reused candidate packet's logs are
+    its worker packet's."""
     if not path.is_file():
         return False
+    if transient_packet(path, ("disk",)):
+        return True
     packet = read_json(path)
     gate = packet.get("gate", {})
     if gate.get("status") != "blocked" or not gate.get("reasons"):
@@ -152,9 +165,10 @@ def disk_packet(path: Path) -> bool:
 
 
 def transient_attempt(path: Path) -> bool:
-    """Transient, memory or disk: a check killed for memory (transient_packet) or a full disk (disk_packet). Such an attempt
-    starts no repair round, never counts as an identical failure and spends no attempt, up to MAX_TRANSIENT_RERUNS together."""
-    return transient_packet(path) or disk_packet(path)
+    """Transient, memory or disk: checks recorded killed for memory or out of disk (transient_packet, one kind or both) or a
+    full disk read from the logs (disk_packet). Such an attempt starts no repair round, never counts as an identical failure
+    and spends no attempt, up to MAX_TRANSIENT_RERUNS together."""
+    return transient_packet(path, TRANSIENT_KINDS) or disk_packet(path)
 
 
 def attempt_limit(directory: Path, policy: dict, phase: str, node: str, through: int) -> int:

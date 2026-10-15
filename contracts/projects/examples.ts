@@ -55,6 +55,12 @@ export const legacyRunDetail: RunDetail = {
 export const projectList = { projects: [{ project_id: 'md-manager', name: 'MD Manager' }] }
 export const workflowList = { workflows: [runDetail.definition] }
 export const runList = { runs: [runDetail.summary], next_cursor: null }
+/** Stage D: the first page of a workflow one of whose runs cannot be read; the readable runs are still listed. */
+export const runListWithErrors = {
+  runs: [runDetail.summary],
+  next_cursor: null,
+  errors: [{ run_id: 'copied-run-002', code: 'RUN_STORAGE_INVALID', message: 'Run "copied-run-002" has malformed or contradictory persisted state: run-state.json run_id does not match its directory' }],
+}
 
 const UI_TASK = '# UI worker\n\nRender the review verdict on the review node. Show every finding with severity and disposition.\n\nApproved ownership and checks:\n{"node_id": "ui"}'
 

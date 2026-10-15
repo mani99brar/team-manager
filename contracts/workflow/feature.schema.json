@@ -396,8 +396,7 @@
             "type": "number",
             "minimum": 0.5,
             "maximum": 50,
-            "default": 5,
-            "description": "The claude provider's --max-budget-usd; informational for pi."
+            "description": "The claude provider's --max-budget-usd; informational for pi. When absent the controller applies 25 if any provider of the panel uses the claude transport, else 5 (workflow/panel.py)."
           },
           "timeout_minutes": {
             "type": "integer",

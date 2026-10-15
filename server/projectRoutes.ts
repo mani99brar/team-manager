@@ -142,11 +142,13 @@ export async function projectRoutes(scope: FastifyInstance, options: ProjectRout
     const cursor = cursorValue === undefined ? null : typeof cursorValue === 'string' && cursorValue.length > 0
       ? decodeCursor(cursorValue, { project_id: run.project.project_id, workflow_id: run.workflow.workflow_id })
       : (() => { throw new ProjectApiError(400, 'INVALID_CURSOR', 'The cursor is not a paging token issued for this workflow. Restart from the first page.') })()
-    const all = await store.listRuns(run)
+    // One unreadable run is named in `errors` on the first page instead of failing the workflow's list.
+    const { entries, errors } = await store.listRunEntries(run, { collectErrors: true })
+    const all = entries.map(entry => entry.summary)
     const remaining = cursor ? all.filter(summary => compareRuns(summary, cursor) > 0) : all
     const page = remaining.slice(0, limit)
     const next_cursor = remaining.length > limit ? encodeCursor({ project_id: run.project.project_id, workflow_id: run.workflow.workflow_id }, page[page.length - 1]) : null
-    return conform(schemas.runList, { runs: page, next_cursor }, log)
+    return conform(schemas.runList, cursor === null && errors.length > 0 ? { runs: page, next_cursor, errors } : { runs: page, next_cursor }, log)
   })
 
   scope.get(paths.run, async request => {

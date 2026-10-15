@@ -116,6 +116,17 @@ test('rejects inconsistent snapshot identity, status, graph and timestamps', () 
   }
 })
 
+test('run list errors: the first page names each unreadable run; the key is optional and its entries are closed', () => {
+  const list = schemas.runList.parse(examples.runListWithErrors)
+  assert.deepEqual(list.errors?.map(entry => [entry.run_id, entry.code]), [['copied-run-002', 'RUN_STORAGE_INVALID']])
+  assert.equal(schemas.runList.parse(examples.runList).errors, undefined, 'a list without the key parses')
+  const extra = structuredClone(examples.runListWithErrors) as { errors: Record<string, unknown>[] }
+  extra.errors[0].path = '/home/someone/runs/copied-run-002'
+  assert.throws(() => schemas.runList.parse(extra), 'an entry with an extra key is refused')
+  assert.throws(() => schemas.runList.parse({ ...examples.runList, errors: [] }), 'an empty errors list is never sent')
+  assert.throws(() => schemas.runList.parse({ ...examples.runList, errors: [{ run_id: '', code: 'X', message: '' }] }), 'an entry names its run')
+})
+
 test('run lists and details 1.5.0: activity with every attention kind and controller value, and run_dir, validate; 1.0.0 carries neither', () => {
   const detail = validateRunDetail(examples.runDetail)
   assert.equal(detail.summary.contract_version, '1.5.0')

@@ -484,6 +484,33 @@ test('sessions: a worker\'s status comes from its completion and stop evidence, 
   })
 })
 
+test('sessions: a relaunched lane keeps its archived launch sessions, ended, before its current one', async () => {
+  await withEnv(async ({ runsRoot, sessions }) => {
+    const runDir = await seedFull(runsRoot(), 'relaunched')
+    const before = JSON.stringify((await sessions('relaunched')).sessions)
+    const archivedId = 'bbbbbbbb-1111-4222-8333-444444444444'
+    // relaunch renamed the dead launch's receipt; the current receipt binds the new session.
+    await writeJson(join(runDir, 'server.launch-1.receipt.json'), { session_id: archivedId, worktree: join(runDir, 'worktree-server'), launch_requested_at: T0,
+      launch_token: 'tok-0', status: 'needs_reconciliation', requested: { model: 'claude-opus-5-5' } })
+    const rows = (await sessions('relaunched')).sessions.filter(row => row.role === 'worker' && row.lane === 'server')
+    assert.deepEqual(rows.map(row => [row.key, row.label, row.session_id, row.status]), [
+      ['worker:server:launch-1', 'Worker · server (launch 1)', archivedId, 'failed'],
+      ['worker:server', 'Worker · server', ID.server, 'running'],
+    ])
+    assert.equal(rows[0].node_id, rows[1].node_id, 'both on the lane\'s launch node')
+    assert.match(rows[0].resume?.command ?? '', new RegExp(`claude --resume ${archivedId}$`))
+    // Archives come in number order, not name order (the payload then orders every row by its start); one that does not parse
+    // is skipped.
+    await writeJson(join(runDir, 'server.launch-10.receipt.json'), { session_id: 'cccccccc-1111-4222-8333-444444444444', launch_requested_at: T0, status: 'attached_session_available' })
+    await writeJson(join(runDir, 'server.launch-2.receipt.json'), { session_id: 42 })
+    const keys = (await sessions('relaunched')).sessions.filter(row => row.lane === 'server' && row.role === 'worker').map(row => [row.key, row.status])
+    assert.deepEqual(keys, [['worker:server:launch-1', 'failed'], ['worker:server:launch-10', 'stopped'], ['worker:server', 'running']])
+    // Without an archive the rows are exactly today's.
+    for (const n of [1, 2, 10]) await rm(join(runDir, `server.launch-${n}.receipt.json`))
+    assert.equal(JSON.stringify((await sessions('relaunched')).sessions), before)
+  })
+})
+
 test('sessions: a decided reviewer whose receipt records an error is failed, not decided', async () => {
   await withEnv(async ({ runsRoot, sessions }) => {
     const runDir = await seedFull(runsRoot(), 'reverr')

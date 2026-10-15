@@ -34,6 +34,7 @@ const REASON_WORDING: Record<NonNullable<SidecarMessage['reason']>, string> = {
   herdr_unavailable: 'Herdr was unavailable',
   herdr_timeout: 'Herdr timed out',
   interrupted: 'interrupted before delivery',
+  enter_not_submitted: 'Enter did not submit it; the text is still in the input line',
 }
 
 const plural = (count: number, word: string) => `${count} ${word}${count === 1 ? '' : 's'}`

@@ -80,6 +80,26 @@ def memory_killed(code: int, log: Path) -> bool:
     return any(line == MEMORY_LINE or any(marker in line for marker in MEMORY_MARKERS) for line in tail)
 
 
+def disk_killed(code: int, log: Path) -> bool:
+    """Whether a failed check ran out of disk: its log's last lines name a full disk or quota (repair.disk_full_text, the
+    signatures and errno forms a disk-full attempt is recognised by). A passing check never is."""
+    from .repair import DISK_TAIL_LINES, disk_full_text
+    if code == 0:
+        return False
+    try:
+        return disk_full_text("\n".join(log.read_text(errors="replace").splitlines()[-DISK_TAIL_LINES:]))
+    except OSError:
+        return False
+
+
+def transient_kind(code: int, log: Path) -> str | None:
+    """The execution's `transient`: "memory" for a memory kill (memory_killed), else "disk" for a full disk (disk_killed),
+    else None."""
+    if memory_killed(code, log):
+        return "memory"
+    return "disk" if disk_killed(code, log) else None
+
+
 def text_test_counts(log: str) -> dict | None:
     text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", log)
     unit = re.search(r"^Ran (\d+) tests? in .+$", text, re.MULTILINE)
@@ -485,13 +505,16 @@ def verify_revision(run: Path, plan: dict, policy: dict, node: str, commit: str,
     return packet
 
 
+TRANSIENT_KINDS = ("memory", "disk")
+
+
 def transient_checks(worker: dict, receipts: list, executions: list, phase: str) -> list[str]:
-    """The ids of the checks that gate in this phase and were killed for memory (`transient` on their execution). A deferred
-    worker-phase check's outcome never gates, so its kill makes no attempt transient."""
+    """The ids of the checks that gate in this phase and were killed for memory or ran out of disk (`transient` on their
+    execution). A deferred worker-phase check's outcome never gates, so its kill makes no attempt transient."""
     from .verification import DEFERRED_WORKER_KINDS
     kinds = {check["id"]: check["kind"] for check in worker["checks"]}
     return [receipt["id"] for receipt in receipts
-            if executions[receipt["worker_check_index"]].get("transient") == "memory"
+            if executions[receipt["worker_check_index"]].get("transient") in TRANSIENT_KINDS
             and not (phase == "worker" and kinds[receipt["id"]] in DEFERRED_WORKER_KINDS)]
 
 
@@ -584,9 +607,10 @@ def run_lane_commands(policy: dict, worker: dict, worktree: Path, directory: Pat
             else:
                 code, start, finish = execute(argv, worktree, log, check["timeout_seconds"], check_env)
             log_id = capture.add(log, "log")
+            transient = transient_kind(code, log)
             executions.append({"command": shlex.join(check["argv"]), "cwd": str(worktree),
                                "started_at": start, "finished_at": finish, "exit_code": code, "log_artifact_id": log_id,
-                               **({"transient": "memory"} if memory_killed(code, log) else {})})
+                               **({"transient": transient} if transient else {})})
             tests, scenarios = None, []
             try:
                 if check["kind"] == "browser":

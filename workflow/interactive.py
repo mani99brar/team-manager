@@ -990,7 +990,9 @@ def relaunch_main(argv=None):
     hold and 1 with the first refusal on its first line, and changes nothing. Otherwise, once the launch's own refusals (fresh
     inventory, prompt length, trust) have also passed, the receipt and launch log are archived, one event names the actor and
     the archives, the lane is launched once, and the last two lines are the reconcile and
-    automatic commands that continue the run. It never stops a session or advances the graph."""
+    automatic commands that continue the run. A launch that fails after the archives exits 1 naming them, the new receipt's
+    status (needs_reconciliation when `claude --bg` failed) and the reconcile command; a refusal before them says nothing was
+    relaunched. It never stops a session or advances the graph."""
     from .actor import BY_OPERATOR, add_actor_argument, require_actor
     parser = argparse.ArgumentParser(prog="python -m workflow relaunch", description="Relaunch a lane whose launch produced no live session (operator only)")
     parser.add_argument("directory", type=Path)
@@ -999,6 +1001,7 @@ def relaunch_main(argv=None):
     add_actor_argument(parser)
     args = parser.parse_args(argv)
     directory = args.directory.resolve()
+    archived_before_failure = []  # The archives' text once archive() renamed them and wrote its event.
     try:
         actor = require_actor(args, "relaunch")
         from .pipeline import Pipeline, action_event, persisted_state
@@ -1026,9 +1029,20 @@ def relaunch_main(argv=None):
                 for source, target in moves:
                     os.rename(source, target)
                 action_event(runtime.event, actor, "relaunch", f"{args.lane}: archived {archived}; launching it once")
+                archived_before_failure.append(archived if moves else "nothing")
             receipt = runtime.sessions.run(args.lane, allowed_ids=frozenset({allowed}) if allowed else frozenset(), before_launch=archive)
     except (ValueError, RuntimeError, OSError, subprocess.SubprocessError) as error:
-        parser.exit(1, f"Blocked: {error}\nNothing was relaunched.\n")
+        if not archived_before_failure:
+            parser.exit(1, f"Blocked: {error}\nNothing was relaunched.\n")
+        # The archives are done and the launch failed after them: say so, and what the receipt now is.
+        receipt_path = directory / f"{args.lane}.interactive.json"
+        try:
+            state = read_json(receipt_path).get("status") if receipt_path.exists() else "absent"
+        except (OSError, ValueError):
+            state = "unreadable"
+        parser.exit(1, f"Blocked: {error}\nArchived {archived_before_failure[0]}; the launch did not complete and "
+                       f"{receipt_path.name} is {state}. Continue with: {sys.executable} -m workflow reconcile "
+                       f"{shlex.quote(str(directory))} {BY_OPERATOR}\n")
     run = shlex.quote(str(directory))
     print(f"Relaunched {args.lane} once: session {receipt.get('session_id')}; archived {archived}.")
     print("Continue the run with:")

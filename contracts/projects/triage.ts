@@ -282,20 +282,22 @@ const BARE_STOPS = [/^Verification retry limit exhausted\b/, /^Handoff changed a
  */
 const CONTROLLER_DRIFT = /^Controller commit [0-9a-f]+ runs this step\b/
 /** pipeline.py action_event: who ran a gate action (C17), a log line. */
-const ACTION_ROW = /^(?:Start|Automatic|Retry|Reconcile|Approve|Resume) by the (?:operator|maintainer)\b/
+const ACTION_ROW = /^(?:Start|Automatic|Retry|Reconcile|Approve|Resume|Relaunch) by the (?:operator|maintainer)\b/
 /** abandon.py (C30): the `cancelled` row of a run the operator abandoned. */
 const ABANDONED_ROW = /^Abandoned by the (?:operator|maintainer)\b/
 /** pipeline.py prepare: the launch's notes (C23, C27), recorded before any lane launches. */
 const LAUNCH_NOTES = /^Launch notes: /
 /** tryout.py (C7): the operator's tryout verdict, a `controller` `note` (served with no status), a log line. */
 const TRYOUT_ROW = /^Tryout recorded by the (?:operator|maintainer)\b/
+/** pipeline.py launch: a `controller` `note` when the lanes' panes could not be attached; the workers run, so it is a log line. */
+const PANES_NOT_ATTACHED = /^Panes not attached \(/
 /**
  * Node-less rows that are no block: the controller's running rows, and C17's action rows (raw status note, served with no status).
  * Any other node-less row without a status was `blocked` (before B1).
  */
-const RUNNING_ROWS = [PID_ROW, /^Rerunning /, /^Resuming /, REPAIR_APPLIED, /^Design challenge disabled/, /^Failure drill skipped/, ACTION_ROW, CONTROLLER_DRIFT, LAUNCH_NOTES, TRYOUT_ROW]
+const RUNNING_ROWS = [PID_ROW, /^Rerunning /, /^Resuming /, REPAIR_APPLIED, /^Design challenge disabled/, /^Failure drill skipped/, ACTION_ROW, CONTROLLER_DRIFT, LAUNCH_NOTES, TRYOUT_ROW, PANES_NOT_ATTACHED]
 /** B1's controller-process patterns: on a lane named `controller` these rows belong to the controller, not the lane. */
-const CONTROLLER_LANE_ROWS = [PID_ROW, INTERRUPTED_ROW, IDENTICAL, REPAIR_APPLIED, ERRNO_ROW, BRANCH_CHANGED, START_INCOMPLETE, CONTROLLER_BLOCKED, ACTION_ROW, CONTROLLER_DRIFT, ABANDONED_ROW, ...BARE_STOPS, LAUNCH_NOTES, TRYOUT_ROW]
+const CONTROLLER_LANE_ROWS = [PID_ROW, INTERRUPTED_ROW, IDENTICAL, REPAIR_APPLIED, ERRNO_ROW, BRANCH_CHANGED, START_INCOMPLETE, CONTROLLER_BLOCKED, ACTION_ROW, CONTROLLER_DRIFT, ABANDONED_ROW, ...BARE_STOPS, LAUNCH_NOTES, TRYOUT_ROW, PANES_NOT_ATTACHED]
 /** notes.py send_note: a note's delivery, recorded on the lane. It says nothing of the lane's state, so it neither clears a pane nor closes a span's outcome. */
 const NOTE_ROW = /^Note N-\d+ from the (?:operator|maintainer)\b/
 /** automatic.py:281 (workers) and :556 (reviewers). */

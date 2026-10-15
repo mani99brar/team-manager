@@ -1172,6 +1172,10 @@ async function perWorkflowAssembly(get: Inject, since: string) {
       do {
         const page = await get(`/api/projects/${project.project_id}/workflows/${workflow.workflow_id}/runs${next ? `?cursor=${next}` : ''}`)
         if (page.statusCode !== 200) return { workflow_id: workflow.workflow_id, runs: [], next_cursor: null, error: { status: page.statusCode, ...page.json().error } }
+        // The per-workflow route now lists the readable runs and names an unreadable one in `errors` (first page only); the
+        // home route keeps failing such a workflow with the first unreadable run's error, which is what the list used to answer.
+        const unread = page.json().errors as { code: string; message: string }[] | undefined
+        if (unread) return { workflow_id: workflow.workflow_id, runs: [], next_cursor: null, error: { status: 500, code: unread[0].code, message: unread[0].message } }
         read.push(...page.json().runs)
         next = page.json().next_cursor
       } while (next !== null && readsNextPage(read as { updated_at: string }[], next, Date.parse(since)))
@@ -1211,6 +1215,10 @@ test('home route: equals the per-workflow routes\' assembly for three cutoffs, t
   assert.equal(edge.projects[0].runs.find(entry => entry.workflow_id === 'big')!.runs.length, 100, 'a last run exactly at the cutoff reads the next page')
   const bad = old.projects[0].runs.find(entry => entry.workflow_id === 'bad')!
   assert.deepEqual([bad.runs, bad.next_cursor, bad.error?.code, bad.error?.status], [[], null, 'RUN_STORAGE_INVALID', 500], 'an invalid run fails its workflow only')
+  // The per-workflow route alone lists that workflow's readable run and names the invalid one in `errors`.
+  const perWorkflow = (await get('/api/projects/alpha/workflows/bad/runs')).json()
+  assert.deepEqual([perWorkflow.runs.map((run: { run_id: string }) => run.run_id), perWorkflow.errors.map((entry: { run_id: string; code: string }) => [entry.run_id, entry.code])],
+    [['bad-001'], [['bad-002', 'RUN_STORAGE_INVALID']]])
   assert.equal(old.projects[0].runs.find(entry => entry.workflow_id === 'gone')!.error?.code, 'RUNS_ROOT_UNAVAILABLE')
   assert.equal(old.projects[1].runs[0].runs.length, 3)
 })

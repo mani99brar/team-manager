@@ -6,7 +6,8 @@ import { ID_PATTERN, type ProjectConfig } from './projectsConfig.ts'
 
 /**
  * The per-run step digests for the dispatch step chart (PRD_PROJECTS_DISPATCH Appendix A `ProjectSteps`, decisions.md
- * [L2], design-challenge notes 2 and 3). `RunStore.listRuns` throws for the whole workflow when one run is invalid and
+ * [L2], design-challenge notes 2 and 3). `RunStore.listRuns` throws for the whole workflow when one run is invalid (only
+ * the per-workflow route's `listRunEntries(scope, { collectErrors: true })` names such runs instead, without digests) and
  * does not export `runFingerprint`/`openDirectory`, so this module lists each `runs_root` itself (with `ID_PATTERN`),
  * calls `RunStore.loadRun` per directory, and caches each digest by a short directory fingerprint reimplemented from
  * `projects.ts:672`. Legacy (`plan.json` only) and just-launched (neither file) directories are skipped as `listRuns`

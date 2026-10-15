@@ -460,6 +460,36 @@ describe('buildTimeline', () => {
     }
   })
 
+  it('reads a relaunch by the operator as a log row: no controller block, no blocked-before-freeze, no new-run launch', () => {
+    const relaunch = 'Relaunch by the operator: game: archived game.interactive.json as game.launch-1.receipt.json; launching it once'
+    const run = synthetic({ status: 'running', nodes: WORKING, events: [...LAUNCHED, [60, null, null, relaunch], [61, 'launch_game', 'running', 'Launching or reconciling the exact native session']] })
+    const markers = buildTimeline(run).markers
+    assert.deepEqual(markers.filter(marker => marker.raw === relaunch).map(marker => [marker.kind, marker.blocked]), [['log', false]])
+    assert.ok(!markers.some(marker => marker.kind === 'controller_blocked'))
+    const now = checked(run)
+    assert.notEqual(now.situation, 'blocked_before_freeze')
+    assert.ok(!commands(now).some(command => /workflow launch </.test(command)), commands(now).join('\n'))
+  })
+
+  it('reads panes not attached as a launch note; a later lane launch failure is quoted, not the note', () => {
+    const panes = 'Panes not attached (herdr: no such session); the workers run. Attach each lane with: /usr/bin/python3 -m workflow.interactive attach-one /runs/r --node <lane>'
+    const running = synthetic({ status: 'running', nodes: WORKING, events: [...LAUNCHED, [6, null, null, panes]] })
+    const markers = buildTimeline(running).markers
+    assert.deepEqual(markers.filter(marker => marker.raw === panes).map(marker => [marker.kind, marker.blocked]), [['log', false]])
+    assert.ok(!markers.some(marker => marker.kind === 'controller_blocked'))
+    assert.match(textToString(checked(running).headline, T0), /^● Running/)
+    const failure = 'Native launch failed: claude --bg exited 1'
+    const failed = checked(synthetic({
+      status: 'failed', nodes: { challenge: 'succeeded', launch_game: 'failed' },
+      events: [[0, 'launch_game', 'running', 'Launching or reconciling the exact native session'], [5, null, null, panes], [9, 'launch_game', 'failed', failure]],
+    }))
+    assert.match(textToString(failed.headline, T0), /Native launch failed/)
+    // No controller row is left to quote, so the reason is the lane's own failed row (source 4), never the note.
+    assert.notEqual(failed.situation, 'blocked_before_freeze')
+    assert.equal(failed.reasonSource, 4)
+    assert.doesNotMatch(`${textToString(failed.headline, T0)} ${failed.reason === null ? '' : textToString(failed.reason, T0)}`, /Panes not attached/)
+  })
+
   it('reads the controller drift warning as a log row, never a controller block', () => {
     const markers = buildTimeline(synthetic({
       status: 'running', nodes: WORKING, events: [LAUNCHED[0], LAUNCHED[1], [4, null, null, DRIFT], LAUNCHED[2]],

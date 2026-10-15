@@ -12,8 +12,9 @@ An independent senior-engineering reviewer beside the workers of a run, never a 
   question, already got one this pass or reached `max_messages_per_lane`, and after freeze; typed (`[Review sidecar
   S-n] <text>`, then Enter) only while the lane's row is `working` or `idle`, its pane shows `claude attach <id>` and
   the Claude Code input line is empty. The merged ledger with the messages `pending` is written before anything is typed.
-  After Enter the pane is read back: a text Enter did not submit gets one more Enter, then is `undeliverable`/`pane_busy`
-  with a `pane` attention record (RUNBOOK "Review sidecar").
+  After Enter the pane is read back: a text Enter did not submit gets one more Enter, then is
+  `undeliverable`/`enter_not_submitted` with a `pane` attention record (RUNBOOK "Review sidecar"); `pane_busy` is a busy
+  input line found before anything was typed.
 - In automatic mode `automatic.wait_handoffs` schedules the passes (Scheduler): on a cadence, at once when a lane
   writes a `completed` completion, and a final pass once every lane's completion is accepted, each a polled child.
   Manual runs use `python -m workflow sidecar-pass <run> [--final]`.
@@ -732,7 +733,8 @@ def deliver_text(runtime, lane: str, text: str, herdr: Herdr | None = None, on_u
 
     The refusals are checked again just before the text is typed, so a lane that went on meanwhile gets nothing. After Enter
     the pane is read back (submitted); a text still in the input line gets one more Enter, and a text still there after it is
-    `undeliverable`/`pane_busy` with a `pane` attention record on the lane, and `on_unsubmitted(text)` when given."""
+    `undeliverable`/`enter_not_submitted` (it stays in the input line) with a `pane` attention record on the lane, and
+    `on_unsubmitted(text)` when given. `pane_busy` is only an input line that was not empty before typing."""
     directory, plan = runtime.directory, runtime.plan
     herdr = herdr or Herdr(directory)
     reason = refusal(directory, plan, lane)
@@ -767,7 +769,7 @@ def deliver_text(runtime, lane: str, text: str, herdr: Herdr | None = None, on_u
     attention(directory, "pane", unsubmitted, node=lane)
     if on_unsubmitted is not None:
         on_unsubmitted(unsubmitted)
-    return "undeliverable", "pane_busy"  # The closed reason enum's nearest value: a draft is in the input line.
+    return "undeliverable", "enter_not_submitted"
 
 
 def failure_reason(error: BaseException) -> str:

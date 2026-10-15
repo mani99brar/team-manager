@@ -385,7 +385,8 @@
                   "pane_not_attached",
                   "herdr_unavailable",
                   "herdr_timeout",
-                  "interrupted"
+                  "interrupted",
+                  "enter_not_submitted"
                 ]
               },
               {

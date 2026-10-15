@@ -127,7 +127,8 @@
         "text": {"$ref": "#/$defs/longText"},
         "status": {"enum": ["pending", "delivered", "undeliverable", "refused"]},
         "reason": {"enum": [null, "question_waiting", "lane_finished", "lane_not_launched", "rate_limited", "after_freeze", "lane_blocked", "pane_busy",
-                            "pane_unknown", "pane_not_attached", "herdr_unavailable", "herdr_timeout", "interrupted"]},
+                            "pane_unknown", "pane_not_attached", "herdr_unavailable", "herdr_timeout", "interrupted",
+                            "enter_not_submitted"]},
         "at": {"$ref": "#/$defs/id"}
       }
     },

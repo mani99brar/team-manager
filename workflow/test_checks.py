@@ -517,6 +517,23 @@ class MemoryKilledCheckTests(unittest.TestCase):
             log.write_text(f"running\n{line}\n")
             self.assertTrue(checks.memory_killed(1, log), line)
 
+    def test_a_log_that_ends_with_a_full_disk_records_disk(self):
+        packet = self.run_check("import sys; print('Ran 3 tests'); print('OSError: [Errno 28] No space left on device'); sys.exit(1)")
+        self.assertEqual(packet["gate"]["status"], "blocked")
+        self.assertEqual(packet["result"]["checks"][0]["transient"], "disk")
+        self.assertEqual(packet["result"]["transient_checks"], ["unit"])
+        validate_schema("workerResult", packet["result"])
+        # Memory wins when the log says both; a full disk above the last lines is not read.
+        packet = self.run_check("import sys; print('No space left on device'); print('Killed'); sys.exit(1)")
+        self.assertEqual(packet["result"]["checks"][0]["transient"], "memory")
+        packet = self.run_check("import sys; print('No space left on device'); print('\\n'.join(['noise'] * 25)); sys.exit(1)")
+        self.assertNotIn("transient", packet["result"]["checks"][0])
+        log = self.root / "disk.log"
+        log.write_text("writing\nnpm ERR! nospc ENOSPC: no space left on device, write\n")
+        self.assertTrue(checks.disk_killed(1, log))
+        self.assertFalse(checks.disk_killed(0, log))
+        self.assertFalse(checks.disk_killed(1, self.root / "missing.log"))
+
     def test_a_real_failure_and_a_pass_are_not_transient(self):
         packet = self.run_check("import sys; print('AssertionError: 1 != 2'); sys.exit(1)")
         self.assertEqual(packet["gate"]["status"], "blocked")

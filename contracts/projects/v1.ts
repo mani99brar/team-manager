@@ -16,6 +16,8 @@ const version = z.literal('1.0.0')
  * summary's version stays 1.0.0 | 1.5.0), the review result's `round`, `delta_from` and `delta_diff`, the run inputs'
  * `automatic.fix_rounds` and each worker's `roles` and `skills`. Every key added at 1.10.0 is `.nullable().optional()` inside
  * its strict object, so values built before it validate unchanged; the server always sends them. Export 1.12.0 adds the run summary and detail's `accepted` (the operator override).
+ * Stage D (ux-critique-fixes-d) adds the run list's optional `errors` (the runs of the workflow that cannot be read; sent
+ * only on the first page and only when there is one) and the sidecar message reason `enter_not_submitted`.
  */
 const version140 = z.literal('1.4.0')
 const revision = z.string().regex(/^[a-f0-9]{64}$/)
@@ -503,7 +505,7 @@ export const SIDECAR_OPEN_DISPOSITIONS = ['open', 'acknowledged', 'fix_reported'
 export const SIDECAR_MESSAGE_STATUSES = ['pending', 'delivered', 'undeliverable', 'refused'] as const
 export const SIDECAR_MESSAGE_REASONS = [
   'question_waiting', 'lane_finished', 'lane_not_launched', 'rate_limited', 'after_freeze', 'lane_blocked', 'pane_busy', 'pane_unknown',
-  'pane_not_attached', 'herdr_unavailable', 'herdr_timeout', 'interrupted',
+  'pane_not_attached', 'herdr_unavailable', 'herdr_timeout', 'interrupted', 'enter_not_submitted',
 ] as const
 export const SIDECAR_ESCALATION_KINDS = ['security', 'data_loss', 'architecture'] as const
 /** The handoff the final pass writes: five lists of strings. */
@@ -938,7 +940,15 @@ export const fixLoopSchema = z.union([
 export const schemas = {
   projectList: z.strictObject({ projects: z.array(projectSchema) }),
   workflowList: z.strictObject({ workflows: z.array(definitionSchema) }),
-  runList: z.strictObject({ runs: z.array(runSummarySchema), next_cursor: z.string().min(1).nullable() }),
+  /**
+   * Stage D: `errors` names each run of the workflow that cannot be read (its directory name, a code and a redacted message),
+   * present only on the first page and only when at least one run cannot be read; absent otherwise, unlike 1.10.0's keys.
+   */
+  runList: z.strictObject({
+    runs: z.array(runSummarySchema),
+    next_cursor: z.string().min(1).nullable(),
+    errors: z.array(z.strictObject({ run_id: z.string().min(1), code: z.string().min(1), message: z.string() })).min(1).optional(),
+  }),
   runDetail: runDetailSchema,
   reviewResult: reviewResultSchema,
   runInputs: runInputsSchema,

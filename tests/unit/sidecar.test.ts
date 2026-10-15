@@ -106,6 +106,9 @@ describe('a finding, its messages and its passes', () => {
     assert.equal(messageStatusWording(live.messages.find(item => item.status === 'undeliverable')!), 'undeliverable: the pane was busy (a dialog, a menu or a draft)')
     assert.equal(messageStatusWording({ ...example.messages[0], status: 'pending', reason: null }), 'pending')
     assert.equal(messageStatusWording({ ...example.messages[0], status: 'undeliverable', reason: 'interrupted' }), 'undeliverable: interrupted before delivery')
+    // Typed, but two Enters left it in the input line.
+    assert.equal(messageStatusWording({ ...example.messages[0], status: 'undeliverable', reason: 'enter_not_submitted' }),
+      'undeliverable: Enter did not submit it; the text is still in the input line')
   })
 
   test('a pass: its duration and the lanes it read, naming a pane not captured', () => {

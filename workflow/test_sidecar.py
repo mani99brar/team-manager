@@ -656,7 +656,7 @@ class Messages(SidecarRun):
     def test_a_text_two_enters_left_in_the_input_is_undeliverable_with_a_pane_record(self):
         self.readback()
         self.herdr.screens["pane-ui"] = self.typed_screen()
-        recorded = self.assert_outcome("undeliverable", "pane_busy", typed=True)
+        recorded = self.assert_outcome("undeliverable", "enter_not_submitted", typed=True)
         self.assertEqual(self.herdr.verbs().count("send-keys"), 2)
         self.assertEqual(len(self.herdr.typed()), 1)
         text = "Enter did not submit the message; the text is still in ui's input; clear it in the pane."
@@ -1865,7 +1865,43 @@ class Notes(SidecarRun):
         self.herdr.screens["pane-ui"] = claude_screen("my own draft")
         code, output = run("Again.", "--by", "operator")
         self.assertEqual(code, 1, output)
-        self.assertIn("Blocked: note N-2 to ui is recorded undeliverable and was not typed (pane_busy)", output)
+        self.assertEqual(output, "Blocked: note N-2 to ui is recorded undeliverable and was not typed (pane_busy). "
+                                 "Look at the pane, then send it again as a new note.\n")
+        # Typed, but both Enters left it in the input line: it is still there, so it must not be sent again.
+        self.swallow_enters("[Note from the operator N-3] Once more.")
+        code, output = run("Once more.", "--by", "operator")
+        self.assertEqual(code, 1, output)
+        self.assertEqual(output, "Blocked: note N-3 to ui was typed but Enter did not submit it; the text is still in ui's input line. "
+                                 "Submit or clear it in the pane; do not send it again.\n")
+        self.assertIn("still in", output)
+        self.assertIn("Submit or clear it in the pane; do not send it again.", output)
+        self.assertNotIn("was not typed", output)
+        self.assertNotIn("Look at the pane, then send it again as a new note.", output)
+        # A refused note keeps its message.
+        save_json(self.directory / "ui.questions.json", {"node_id": "ui", "questions": [{"n": 1, "question": "A or B?", "asked_at": "x", "answer": None, "answered_at": None}]})
+        code, output = run("Refused.", "--by", "operator")
+        self.assertEqual((code, output), (1, "Blocked: A note to ui is refused (question_waiting); nothing was recorded or typed; "
+                                              "answer its question with `workflow answer` instead\n"))
+
+    def swallow_enters(self, typed: str):
+        """The gate reads an empty input line; every read after the paste still shows `typed` in it, so neither Enter submits."""
+        self.herdr.reads["pane-ui"] = [claude_screen()]
+        self.herdr.screens["pane-ui"] = claude_screen(typed)
+        sleep = patch("workflow.sidecar.readback_sleep")
+        sleep.start()
+        self.addCleanup(sleep.stop)
+
+    def test_a_note_two_enters_left_in_the_input_is_recorded_enter_not_submitted_with_a_pane_record(self):
+        self.swallow_enters("[Note from the operator N-1] Hold the tests: the host is short of memory.")
+        entry = self.note()
+        self.assertEqual((entry["delivery"], entry["reason"]), ("undeliverable", "enter_not_submitted"))
+        self.assertEqual(self.notes()[-1]["reason"], "enter_not_submitted")
+        self.assertEqual(self.herdr.verbs().count("send-keys"), 2)
+        self.assertEqual(len(self.herdr.typed()), 1)
+        states = read_json(self.directory / "attention.json")["states"]
+        self.assertTrue(any(state["kind"] == "pane" and state["node"] == "ui" for state in states), states)
+        [event] = [item for item in self.events if item[0] == "ui"]
+        self.assertTrue(event[2].startswith("Note N-1 from the operator to worker ui: undeliverable (enter_not_submitted): "), event)
 
     def test_the_worker_prompt_weighs_an_operator_note_above_a_maintainer_note_and_a_sidecar_message(self):
         from .interactive import NOTES_NOTE

@@ -310,7 +310,7 @@ function receiptFailed(receipt: { error?: string | null; accepted_decision?: { v
 // ---- File schemas (read permissively: only the mapped keys are typed) --------------------------------------------
 
 const costFileSchema = z.object({ session_id: z.string().nullish(), cost_usd: z.number().nullish(), duration_ms: z.number().nullish(), recorded_at: z.string().nullish(), models: z.array(z.string()).nullish() })
-const interactiveSchema = z.object({ session_id: z.string().nullish(), worktree: z.string().nullish(), launch_requested_at: z.string().nullish(), launch_token: z.string().nullish(), requested: z.object({ model: z.string().nullish() }).nullish() })
+const interactiveSchema = z.object({ session_id: z.string().nullish(), worktree: z.string().nullish(), launch_requested_at: z.string().nullish(), launch_token: z.string().nullish(), requested: z.object({ model: z.string().nullish() }).nullish(), status: z.string().nullish() })
 /** A worker's completion (`<lane>.completion.json`) and stop marker (`<lane>.stop.json`): the evidence a worker ended. */
 const completionSchema = z.object({ status: z.string(), launch_token: z.string().nullish() })
 const stopSchema = z.object({ stopped: z.boolean(), session_id: z.string().nullish() })
@@ -607,9 +607,33 @@ function workerStatus(
   return receipt !== null ? 'running' : 'unknown'
 }
 
+/**
+ * An archived launch's status (`workflow relaunch` renames `<lane>.interactive.json` to `<lane>.launch-<n>.receipt.json`): a
+ * launch that died before its session existed (`needs_reconciliation`, or still `launching`) failed; one that had bound a
+ * session has ended, stopped; any other word is unknown.
+ */
+function archivedLaunchStatus(status: string | null | undefined): SessionRow['status'] {
+  if (status === 'needs_reconciliation' || status === 'launching') return 'failed'
+  return status === 'attached_session_available' ? 'stopped' : 'unknown'
+}
+
 async function workerRows(input: SessionsInput): Promise<SessionRow[]> {
   const rows: SessionRow[] = []
+  const names = await listFiles(input.directory, [])
   for (const lane of input.lanes) {
+    const launchNode = input.definition.nodes.some(node => node.node_id === `launch_${lane}`) ? `launch_${lane}` : input.definition.nodes.some(node => node.node_id === lane) ? lane : null
+    // Each launch `relaunch` archived, ascending, before the lane's current one; an archive that does not parse is skipped.
+    for (const n of numbered(names, `${lane}.launch`, '.receipt.json')) {
+      const archived = interactiveSchema.safeParse(await readJson(input.directory, [`${lane}.launch-${n}.receipt.json`]))
+      if (!archived.success) continue
+      const sessionId = sessionIdOf(archived.data.session_id)
+      rows.push(row({
+        key: `worker:${lane}:launch-${n}`, role: 'worker', label: `Worker · ${lane} (launch ${n})`, node_id: launchNode, lane,
+        model: archived.data.requested?.model ?? null, status: archivedLaunchStatus(archived.data.status),
+        started_at: iso(archived.data.launch_requested_at), session_id: sessionId,
+        resume: await composeResume(sessionId, archived.data.worktree ?? null, input.resume),
+      }))
+    }
     const interactive = interactiveSchema.safeParse(await readJson(input.directory, [`${lane}.interactive.json`]))
     const cost = costFileSchema.safeParse(await readJson(input.directory, [`${lane}.cost.json`]))
     if (!interactive.success && !cost.success) continue
@@ -619,7 +643,6 @@ async function workerRows(input: SessionsInput): Promise<SessionRow[]> {
     const costUsd = nonNeg(costFile?.cost_usd)
     const completion = completionSchema.safeParse(await readJson(input.directory, [`${lane}.completion.json`]))
     const stop = stopSchema.safeParse(await readJson(input.directory, [`${lane}.stop.json`]))
-    const launchNode = input.definition.nodes.some(node => node.node_id === `launch_${lane}`) ? `launch_${lane}` : input.definition.nodes.some(node => node.node_id === lane) ? lane : null
     rows.push(row({
       key: `worker:${lane}`, role: 'worker', label: `Worker · ${lane}`, node_id: launchNode, lane,
       model: receipt?.requested?.model ?? costFile?.models?.[0] ?? null,

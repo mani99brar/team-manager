@@ -10,10 +10,12 @@ import { eventSchema, validateWorkerResult, type WorkflowEvent } from '../contra
 import { ATTACK_TWINS, RUN_ATTACK_WAITING } from '../tests/project-workflows/fixtures/ux-attack.ts'
 import { SIDECAR_TWINS } from '../tests/project-workflows/fixtures/ux-sidecar.ts'
 import { seedCandidate } from '../tests/project-workflows/seed.ts'
+import Fastify from 'fastify'
 import { createApp } from './app.ts'
 import { defaultFixtureRoot, fixtureLocations } from './config.ts'
 import { mapRepairs, mapReviewRounds, redactDeep } from './fixLoop.ts'
-import { ATTACK_BYTE_LIMIT, PANEL_BYTE_LIMIT, RunStore, SIDECAR_LEDGER_BYTE_LIMIT, laneMap, normalizeEvents, projectSnapshot, redactPaths, type RunStoreOptions } from './projects.ts'
+import { ATTACK_BYTE_LIMIT, PANEL_BYTE_LIMIT, ProjectApiError, RunStore, SIDECAR_LEDGER_BYTE_LIMIT, laneMap, normalizeEvents, projectSnapshot, redactPaths, type RunStoreOptions } from './projects.ts'
+import { PROJECTS_PREFIX, projectRoutes } from './projectRoutes.ts'
 import { PROJECTS_CONFIG_ENV, ProjectsConfigError, assertProjectsConfig, canonicalJson, definitionRevision, loadProjectsConfig, parseProjectsConfig, projectsConfigReloader } from './projectsConfig.ts'
 
 /**
@@ -822,6 +824,31 @@ test('a blocked verification is failed with a retrievable failed result; a sibli
   })
 })
 
+test('a worker packet whose check ran out of disk is served with transient disk and parses', async () => {
+  await harness(async ({ app, runsRoot }) => {
+    const events = [...launchEvents,
+      { sequence: 5, time: T1, node: 'freeze', status: 'succeeded', message: 'Immutable snapshots captured' },
+      { sequence: 6, time: T1, node: 'verify_adapter', status: 'running', message: `Attempt 1; revision ${OUTPUT}` },
+      { sequence: 7, time: T2, node: 'verify_adapter', status: 'blocked', message: 'adapter verification blocked: backend-unit: exit 1' }]
+    await writeRun(runsRoot('alpha', 'main'), { runId: 'full-disk', values: { ui: receipt('ui'), adapter: receipt('adapter'), snapshots }, next: ['verify_adapter'], events, updated: T1,
+      tasks: [{ node_id: 'verify_adapter', error: 'adapter verification blocked', interrupts: [], result: null }],
+      packets: [{ node: 'adapter', gate: { status: 'blocked', reasons: ['backend-unit: exit 1'] },
+        artifacts: [{ id: 'log-0-555555555555', kind: 'log', content: 'OSError: [Errno 28] No space left on device\n' }],
+        mutate: packet => {
+          const result = packet.result as { checks: Record<string, unknown>[]; transient_checks?: string[] }
+          result.checks[0] = { ...result.checks[0], exit_code: 1, transient: 'disk' }
+          result.transient_checks = ['backend-unit']
+        } }] })
+    const served = await get(app, url('alpha', 'main', 'full-disk', '/results/adapter/1'))
+    assert.equal(served.status, 200, served.body)
+    const result = validateWorkerResult(served.json())
+    assert.equal(result.checks[0].transient, 'disk')
+    assert.equal(result.status, 'failed')
+    assert.equal(validateWorkerResult({ ...result, checks: [{ ...result.checks[0], transient: 'memory' }] }).checks[0].transient, 'memory')
+    assert.throws(() => validateWorkerResult({ ...result, checks: [{ ...result.checks[0], transient: 'cpu' }] }))
+  })
+})
+
 test('a retried verification shows the latest attempt and keeps the earlier failed result reachable', async () => {
   await harness(async ({ app, runsRoot }) => {
     const events = [...launchEvents,
@@ -974,7 +1001,21 @@ test('runs paginate newest-first with opaque workflow-bound cursors, default 50 
 // ---------------------------------------------------------------------------------------------------------------
 // Malformed and missing storage
 
-test('malformed or contradictory run storage is a 5xx that names the run but never a path, for lists and detail alike', async () => {
+/**
+ * The per-workflow run list's answer when exactly one run, `runId`, cannot be read: 200 with no row for it and one `errors`
+ * entry naming it by its directory, with `code` and a message that carries no path.
+ */
+function assertListNames(response: { status: number; body: string; json: () => unknown }, runId: string, code: string, root: string) {
+  assert.equal(response.status, 200, response.body)
+  const list = projectSchemas.runList.parse(response.json())
+  assert.ok(!list.runs.some(run => run.run_id === runId), `${runId} is not listed`)
+  assert.deepEqual(list.errors?.map(entry => [entry.run_id, entry.code]), [[runId, code]], response.body)
+  assert.ok(list.errors![0].message.includes(runId), `${runId}: the run directory name is the only locator given`)
+  assert.ok(!response.body.includes(root), `absolute paths are never disclosed: ${response.body}`)
+  assert.ok(!/\/(?:home|tmp|var)\//.test(list.errors![0].message), `message leaks a path: ${list.errors![0].message}`)
+}
+
+test('malformed or contradictory run storage is a 5xx that names the run but never a path for the detail; the list names it in errors', async () => {
   const cases: [string, RunSpec][] = [
     ['not-json', { runId: 'not-json', stateText: '{ oops' }],
     ['wrong-version', { runId: 'wrong-version', stateText: json({ version: '0.9.0', run_id: 'wrong-version' }) }],
@@ -989,15 +1030,85 @@ test('malformed or contradictory run storage is a 5xx that names the run but nev
     ['packet-duplicate', { runId: 'packet-duplicate', packets: [{ node: 'ui' }], registrations: items => [...items, ...items] }],
     ['bad-timestamp', { runId: 'bad-timestamp', updated: 'yesterday' }],
   ]
-  for (const [label, spec] of cases) {
+  for (const [, spec] of cases) {
     await harness(async ({ app, runsRoot, root }) => {
       await writeRun(runsRoot('alpha', 'main'), spec)
       assertError(await get(app, url('alpha', 'main', spec.runId)), 500, 'RUN_STORAGE_INVALID', root)
-      const list = await get(app, url('alpha', 'main'))
-      assertError(list, 500, 'RUN_STORAGE_INVALID', root)
-      assert.ok(list.body.includes(spec.runId), `${label}: the run directory name is the only locator given`)
+      assertListNames(await get(app, url('alpha', 'main')), spec.runId, 'RUN_STORAGE_INVALID', root)
     })
   }
+})
+
+test('one unreadable run no longer fails its workflow\'s list: the readable runs are served and the first page names it in errors', async () => {
+  await harness(async ({ app, runsRoot, root }) => {
+    const main = runsRoot('alpha', 'main')
+    for (const [runId, minute] of [['run-a', '01'], ['run-b', '02'], ['run-c', '03']]) {
+      await writeRun(main, { runId, values: { ui: receipt('ui') }, next: ['launch_adapter'], updated: `2026-03-02T11:${minute}:00Z` })
+    }
+    // A run directory copied under another name: its run-state.json names a different run_id.
+    await writeRun(main, { runId: 'copied-run', exportRunId: 'run-a', planRunId: 'run-a' })
+    const response = await get(app, url('alpha', 'main'))
+    assert.equal(response.status, 200, response.body)
+    const list = projectSchemas.runList.parse(response.json())
+    assert.deepEqual(list.runs.map(run => run.run_id), ['run-c', 'run-b', 'run-a'])
+    assert.equal(list.next_cursor, null)
+    assert.deepEqual(list.errors?.map(entry => [entry.run_id, entry.code]), [['copied-run', 'RUN_STORAGE_INVALID']], 'named by its directory, not its recorded id')
+    assert.ok(!response.body.includes(root) && !response.body.includes(homedir()), response.body)
+    // Only the first page carries errors; a cursor page never does.
+    const first = projectSchemas.runList.parse((await get(app, url('alpha', 'main', undefined, '?limit=2'))).json())
+    assert.deepEqual([first.runs.length, first.errors?.length], [2, 1])
+    const next = await get(app, url('alpha', 'main', undefined, `?limit=2&cursor=${encodeURIComponent(first.next_cursor!)}`))
+    assert.deepEqual(projectSchemas.runList.parse(next.json()).runs.map(run => run.run_id), ['run-a'])
+    assert.ok(!('errors' in next.json()), next.body)
+    // A workflow with no bad run serves no errors key at all.
+    const clean = await get(app, url('alpha', 'clean'))
+    assert.equal(clean.status, 200)
+    assert.deepEqual(Object.keys(clean.json()).sort(), ['next_cursor', 'runs'])
+    // A workflow whose every run is unreadable lists none and names each.
+    await writeRun(runsRoot('alpha', 'clean'), { runId: 'broken', stateText: '{ oops' })
+    const broken = projectSchemas.runList.parse((await get(app, url('alpha', 'clean'))).json())
+    assert.deepEqual([broken.runs, broken.errors?.map(entry => entry.run_id)], [[], ['broken']])
+    // The runs root itself stays a failure of the whole list.
+    await rm(runsRoot('alpha', 'main'), { recursive: true })
+    assertError(await get(app, url('alpha', 'main')), 503, 'RUNS_ROOT_UNAVAILABLE', root)
+  }, [{ id: 'alpha', workflows: [{ id: 'main' }, { id: 'clean' }] }])
+})
+
+test('a duplicate run id is served once and named once in errors; a projection error is redacted; the other readers still fail the workflow', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'md-manager-projects-'))
+  try {
+    const runsRoot = join(root, 'runs', 'alpha', 'main')
+    await mkdir(runsRoot, { recursive: true })
+    for (const runId of ['dup-a', 'dup-b', 'leaky', 'solo']) await writeRun(runsRoot, { runId, values: { ui: receipt('ui') }, next: ['launch_adapter'] })
+    const store = new RunStore(await parseProjectsConfig(JSON.stringify(registry(root, [{ id: 'alpha', workflows: [{ id: 'main' }] }])), 'test registry'))
+    // Run directories alone cannot repeat a run id (a run_id that differs from its directory is refused), so the projection
+    // is overridden: dup-b projects as dup-a, and leaky raises an error whose message carries a path.
+    const patched = store as unknown as { projectRun: (scope: unknown, runId: string, ...rest: unknown[]) => Promise<{ detail: { summary: { run_id: string } } }> }
+    const original = patched.projectRun.bind(store)
+    patched.projectRun = async (scope, runId, ...rest) => {
+      if (runId === 'leaky') throw new ProjectApiError(500, 'RUN_STORAGE_INVALID', `Run "leaky" cannot be read: ${join(homedir(), 'runs', 'leaky', 'run-state.json')}`)
+      const run = await original(scope, runId, ...rest)
+      return runId === 'dup-b' ? { ...run, detail: { ...run.detail, summary: { ...run.detail.summary, run_id: 'dup-a' } } } : run
+    }
+    const app = Fastify()
+    await app.register(projectRoutes, { prefix: PROJECTS_PREFIX, store })
+    try {
+      for (const read of ['cold', 'warm']) {
+        const response = await get(app as unknown as Harness['app'], url('alpha', 'main'))
+        assert.equal(response.status, 200, response.body)
+        const list = projectSchemas.runList.parse(response.json())
+        assert.deepEqual(list.runs.map(run => run.run_id).sort(), ['dup-a', 'solo'], read)
+        assert.deepEqual(list.errors?.map(entry => [entry.run_id, entry.code]), [['dup-b', 'RUN_STORAGE_INVALID'], ['leaky', 'RUN_STORAGE_INVALID']], read)
+        assert.match(list.errors![0].message, /duplicate run ID within the workflow/)
+        assert.match(list.errors![1].message, /<path>/)
+        assert.ok(!response.body.includes(homedir()) && !response.body.includes(root), response.body)
+      }
+      // The home route, All time and the spend figure read listRuns/listRunEntries without the option: still one failure.
+      const scope = store.scope('alpha', 'main')
+      await assert.rejects(store.listRuns(scope), (error: unknown) => error instanceof ProjectApiError && error.code === 'RUN_STORAGE_INVALID')
+      await assert.rejects(store.listRunEntries(scope), (error: unknown) => error instanceof ProjectApiError && error.code === 'RUN_STORAGE_INVALID')
+    } finally { await app.close() }
+  } finally { await rm(root, { recursive: true, force: true }) }
 })
 
 test('unavailable or symlinked run roots are 503; oversized exports are refused rather than truncated', async () => {
@@ -1572,7 +1683,7 @@ test('[scenario:served-inputs] a 1.5.0 export serves decisions, the challenge, c
   })
 })
 
-test('malformed or contradictory review and inputs sections are RUN_STORAGE_INVALID for detail and lists, naming only the run', async () => {
+test('malformed or contradictory review and inputs sections are RUN_STORAGE_INVALID for the detail and an errors entry of the list, naming only the run', async () => {
   const base = { values: reviewedValues({ review: { verdict: 'approved' } }), next: ['approval'], events: reviewedEvents, diffFile: DIFF }
   const withReview = (mutate: (section: ReviewSection) => void, runId: string): RunSpec => {
     const section = reviewSection()
@@ -1631,8 +1742,7 @@ test('malformed or contradictory review and inputs sections are RUN_STORAGE_INVA
       assertError(await get(app, url('alpha', 'main', spec.runId, '/reviews/1')), 500, 'RUN_STORAGE_INVALID', root)
       assertError(await get(app, url('alpha', 'main', spec.runId, '/inputs')), 500, 'RUN_STORAGE_INVALID', root)
       const list = await get(app, url('alpha', 'main'))
-      assertError(list, 500, 'RUN_STORAGE_INVALID', root)
-      assert.ok(list.body.includes(spec.runId), `${spec.runId}: the run directory name is the only locator given`)
+      assertListNames(list, spec.runId, 'RUN_STORAGE_INVALID', root)
       assert.ok(!list.body.includes('/home/someone') && !list.body.includes('/etc/passwd'), `${spec.runId}: ${list.body}`)
     })
   }

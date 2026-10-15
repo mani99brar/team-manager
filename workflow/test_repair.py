@@ -1161,13 +1161,15 @@ class DiskFullAttempts(unittest.TestCase):
             self.addCleanup(context.stop)
 
     def packet(self, attempt: int, kind: str = "check", line: str = "npm ERR! nospc ENOSPC: no space left on device, write",
-               reasons=None, killed: bool = False) -> Path:
-        """A blocked packet whose setup or check log ends with `line`; `killed` makes it a memory kill instead."""
+               reasons=None, killed: bool = False, recorded: str | None = None) -> Path:
+        """A blocked packet whose setup or check log ends with `line`; `killed` makes it a memory kill instead, and `recorded`
+        records the check's `transient` kind as checks.py writes it."""
         folder = self.root / "verification/worker/ui" / str(attempt)
         folder.mkdir(parents=True)
         (folder / ("setup-0.log" if kind == "setup" else "check-0.log")).write_text("installing\n" * 30 + line + "\n")
-        result = {"checks": [{"command": "npm test", "exit_code": 1, **({"transient": "memory"} if killed else {})}]}
-        if killed:
+        recorded = "memory" if killed else recorded
+        result = {"checks": [{"command": "npm test", "exit_code": 1, **({"transient": recorded} if recorded else {})}]}
+        if recorded:
             result["transient_checks"] = ["unit"]
         if reasons is None:
             reasons = ["Setup 0 failed with exit 1"] if kind == "setup" else ["unit: exit 1"]
@@ -1227,6 +1229,52 @@ class DiskFullAttempts(unittest.TestCase):
         self.assertEqual(repair.attempt_limit(self.root, self.runtime.policy, "worker", "ui", 3), 1 + 3 + 3)
         # No repair round: blocked_lanes leaves a transient attempt to the retry path.
         self.assertIsNone(automatic.blocked_lanes(self.runtime, "worker", ["ui"]))
+
+    def test_a_check_recorded_disk_is_a_full_disk_read_from_its_packet(self):
+        # Recorded by checks.py, the kind is read from the packet: the log need not be read again (here it no longer says so).
+        for attempt in (1, 2, 3):
+            path = self.packet(attempt, line="ok", recorded="disk")
+            self.assertTrue(repair.disk_packet(path))
+            self.assertTrue(repair.transient_attempt(path))
+            self.assertFalse(repair.transient_packet(path), "a disk kill is no memory kill: the controller waits on the disk")
+            self.assertTrue(advance_failed_checks(self.runtime, self.state))
+        self.assertEqual(read_json(self.root / "attempts.json")["worker:ui"], 4)
+        self.assertEqual(self.waits, ["disk"] * 3)
+        self.assertFalse(any("memory" in message for _, _, message in self.events))
+        self.assertIsNone(automatic.blocked_lanes(self.runtime, "worker", ["ui"]))
+        # A real failure beside it is a real failure.
+        self.assertFalse(repair.transient_attempt(self.packet(4, line="ok", recorded="disk", reasons=["unit: exit 1", "lint: exit 1"])))
+        # A packet written before the kind was recorded still reads its log.
+        older = self.packet(5)
+        self.assertNotIn("transient", read_json(older)["result"]["checks"][0])
+        self.assertTrue(repair.disk_packet(older))
+        self.assertTrue(repair.transient_attempt(older))
+
+    def test_a_packet_killed_for_memory_and_out_of_disk_waits_on_both(self):
+        # One check killed for memory and another out of disk: transient, and the rerun waits for both floors.
+        folder = self.root / "verification/worker/ui/1"
+        folder.mkdir(parents=True)
+        result = {"transient_checks": ["unit", "lint"], "checks": [{"command": "npm test", "exit_code": -9, "transient": "memory"},
+                                                                   {"command": "npm run lint", "exit_code": 1, "transient": "disk"}]}
+        save_json(folder / "packet.json", {"expected": {"output_commit": "a" * 40}, "result": result,
+                                           "evidence": {"checks": [{"id": "unit", "worker_check_index": 0}, {"id": "lint", "worker_check_index": 1}]},
+                                           "gate": {"status": "blocked", "reasons": ["unit: exit -9", "lint: exit 1"]}})
+        save_json(self.root / "attempts.json", {"worker:ui": 1})
+        path = folder / "packet.json"
+        self.assertTrue(repair.transient_attempt(path))
+        self.assertFalse(repair.transient_packet(path))
+        self.assertTrue(advance_failed_checks(self.runtime, self.state))
+        self.assertEqual(self.waits, ["memory", "disk"])
+        self.assertEqual(read_json(self.root / "attempts.json")["worker:ui"], 2)
+
+    def test_identical_disk_recorded_failures_are_never_identical(self):
+        self.packet(1, line="AssertionError", reasons=["unit: exit 1"])
+        self.assertTrue(advance_failed_checks(self.runtime, self.state))
+        self.packet(2, line="ok", recorded="disk", reasons=["unit: exit 1"])
+        self.assertTrue(advance_failed_checks(self.runtime, self.state))
+        self.packet(3, line="AssertionError", reasons=["unit: exit 1"])
+        with self.assertRaisesRegex(RuntimeError, "worker/ui failed identically on attempts 1 and 3; not transient"):
+            advance_failed_checks(self.runtime, self.state)
 
     def test_memory_kills_and_full_disks_share_the_cap_of_three(self):
         self.packet(1, killed=True, reasons=["unit: exit -9"])
@@ -1355,10 +1403,12 @@ class AllFailedAfterAFullDisk(RepairFixture):
 
     def test_the_refusals(self):
         code, _, err = self.retry_cli("--phase", "worker", "--all-failed")  # Nothing failed yet.
-        self.start()
-        code, _, err = self.retry_cli("--phase", "worker", "--all-failed")
         self.assertEqual(code, 1, err)
         self.assertIn("No verify step failed or was left without a verdict", err)
+        self.start()  # The run now waits on the worker handoff: a pending interrupt, refused as single-lane retry refuses it.
+        code, _, err = self.retry_cli("--phase", "worker", "--all-failed")
+        self.assertEqual(code, 2, err)
+        self.assertIn("Retry requires a failed graph step, not an interrupt/completed run", err)
         for flags, message in ((["--phase", "worker", "--node", "ui", "--all-failed"], "--all-failed retries every failed lane; it takes no --node"),
                                (["--phase", "candidate", "--all-failed"], "--all-failed applies to --phase worker only")):
             code, _, err = self.retry_cli(*flags)
@@ -1368,6 +1418,27 @@ class AllFailedAfterAFullDisk(RepairFixture):
         self.assertEqual(code, 1, err)
         self.assertIn("retry is refused for --by panel", err)
         self.assertFalse((self.directory / "retry-requests.json").exists())
+
+
+    def test_a_pending_interrupt_refuses_all_failed_as_single_lane_retry_and_writes_nothing(self):
+        self.start()
+        with self.graph() as (graph, config):
+            state = graph.get_state(config)
+        self.assertEqual([item.value["kind"] for task in state.tasks for item in task.interrupts], ["worker_handoff"])
+        events = len(self.events())
+        # Every file but the lock files any command takes, with its content.
+        state = lambda: {str(path.relative_to(self.directory)): path.read_bytes() for path in self.directory.rglob("*")
+                         if path.is_file() and path.suffix != ".lock"}
+        files = state()
+        single = self.retry_cli("--phase", "worker", "--node", "ui")
+        every = self.retry_cli("--phase", "worker", "--all-failed")
+        self.assertEqual(single[0], 2, single[2])
+        self.assertEqual((every[0], every[2].splitlines()[-1]), (single[0], single[2].splitlines()[-1]))
+        self.assertTrue(every[2].endswith("error: Retry requires a failed graph step, not an interrupt/completed run\n"), every[2])
+        self.assertEqual(every[1], "")
+        self.assertEqual(len(self.events()), events, "no timeline row")
+        self.assertFalse((self.directory / "retry-requests.json").exists() or (self.directory / "attempts.json").exists())
+        self.assertEqual(state(), files)
 
 
 class CandidateGenerations(RepairFixture):

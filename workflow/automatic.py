@@ -1996,19 +1996,23 @@ def advance_failed_checks(runtime, state) -> bool:
     """Retry only recorded failing verification packets, and attempts `retry` raised, never launches or review. A check killed
     for memory is rerun once the machine has memory again (wait_for_memory), without spending the attempt budget. An attempt
     that failed on a full disk (repair.disk_packet), and a raised attempt whose step failed with errno 28, are rerun once the
-    disk floors hold again (wait_for_disk); a full-disk packet spends no attempt either."""
+    disk floors hold again (wait_for_disk); a full-disk packet spends no attempt either. A packet whose checks were killed
+    both for memory and out of disk waits on both."""
+    from .checks import TRANSIENT_KINDS
     from .repair import disk_full_error, disk_packet, transient_packet
     retries = check_retries(runtime, state)
     if retries is None:
         return False
     targets, requested = retries
     packet = lambda phase, node: runtime.directory / "verification" / phase / node / str(runtime.attempt(phase, node)) / "packet.json"
-    killed = [f"{phase}/{node}" for phase, node in targets if transient_packet(packet(phase, node))]
+    mixed = [f"{phase}/{node}" for phase, node in targets if transient_packet(packet(phase, node), TRANSIENT_KINDS)
+             and not transient_packet(packet(phase, node)) and not transient_packet(packet(phase, node), ("disk",))]
+    killed = [f"{phase}/{node}" for phase, node in targets if transient_packet(packet(phase, node))] + mixed
     if killed:
         runtime.event("controller", "running", f"{', '.join(killed)} killed under memory pressure: transient, rerun without spending an attempt")
         wait_for_memory(runtime)
     errors = {task.name: task.error for task in state.tasks if task.error and task.name in state.next}
-    full = [f"{phase}/{node}" for phase, node in targets if f"{phase}/{node}" not in killed and disk_packet(packet(phase, node))]
+    full = mixed + [f"{phase}/{node}" for phase, node in targets if f"{phase}/{node}" not in killed and disk_packet(packet(phase, node))]
     full += [key.replace(":", "/") for key in requested
              if disk_full_error(errors.get("candidate" if key.startswith("candidate:") else f"verify_{key.split(':', 1)[1]}"))]
     if full:

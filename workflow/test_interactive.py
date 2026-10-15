@@ -84,6 +84,17 @@ class InteractiveTests(unittest.TestCase):
         self.assertEqual(launch.call_count, 1)
         self.assertEqual(read_json(self.directory / "ui.interactive.json")["status"], "needs_reconciliation")
 
+    def test_a_relaunch_whose_bg_exits_non_zero_after_the_archive_leaves_a_receipt_needing_reconciliation(self):
+        archived = []
+        with patch.object(self.sessions, "inventory", return_value=[]), patch("workflow.interactive.git", side_effect=[self.plan["base_commit"], ""]), \
+                patch("workflow.interactive.subprocess.run", return_value=subprocess.CompletedProcess([], 1)) as launch, \
+                patch("workflow.sessions.time.sleep"):
+            with self.assertRaisesRegex(RuntimeError, "launch exited 1"):
+                self.sessions.run("ui", before_launch=lambda: archived.append(launch.call_count))
+        self.assertEqual(archived, [0])  # Archived before the helper ran.
+        self.assertEqual(launch.call_count, 1)
+        self.assertEqual(read_json(self.directory / "ui.interactive.json")["status"], "needs_reconciliation")
+
     def test_launch_identity_mismatch_fails_immediately(self):
         def started(*args, **kwargs):
             kwargs["stdout"].write(f"claude attach {self.row()['id']}    open in this terminal\n")
@@ -1674,7 +1685,7 @@ class Relaunch(RepairFixture):
         before = self.hashes()
         code, output = self.relaunch()
         self.assertEqual(code, 1, output)
-        self.assertIn("Blocked: Prompt for ui is too long for argv", output)
+        self.assertEqual(output, "Blocked: Prompt for ui is too long for argv\nNothing was relaunched.\n")
         self.assertEqual((self.hashes(), self.sessions.bg), (before, self.launched))
         self.assertFalse(list(self.directory.glob("*.launch-*")))
         self.assertFalse(any(event["message"].startswith("Relaunch by") for event in self.events()))
@@ -1684,6 +1695,29 @@ class Relaunch(RepairFixture):
         self.assertEqual(code, 0, output)
         self.assertEqual(self.sessions.bg, [*self.launched, "ui"])
         self.assertTrue((self.directory / "ui.launch-1.receipt.json").exists() and (self.directory / "ui.launch-1.log").exists())
+
+    def test_a_launch_that_fails_after_the_archive_names_the_archives_and_the_reconcile_command(self):
+        # The conditions hold and the archive is done; then `claude --bg` fails again, leaving a receipt to reconcile.
+        self.sessions.listed, self.sessions.dies = [self.dead_row], {"ui"}
+        receipt, log = (self.directory / "ui.interactive.json").read_bytes(), (self.directory / "ui.launch.log").read_bytes()
+        code, output = self.relaunch()
+        self.assertEqual(code, 1, output)
+        self.assertNotIn("Nothing was relaunched", output)
+        self.assertEqual(output, "Blocked: No exact matching background session after launch\n"
+                                 "Archived ui.interactive.json as ui.launch-1.receipt.json, ui.launch.log as ui.launch-1.log; the launch did not "
+                                 "complete and ui.interactive.json is needs_reconciliation. Continue with: "
+                                 f"{sys.executable} -m workflow reconcile {shlex.quote(str(self.directory))} --by operator\n")
+        self.assertEqual(((self.directory / "ui.launch-1.receipt.json").read_bytes(), (self.directory / "ui.launch-1.log").read_bytes()), (receipt, log))
+        self.assertEqual(read_json(self.directory / "ui.interactive.json")["status"], "needs_reconciliation")
+        self.assertEqual(self.sessions.bg, [*self.launched, "ui"])
+        self.assertTrue(any(event["message"].startswith("Relaunch by the operator: ui: archived") for event in self.events()))
+
+    def test_a_dirty_worktree_refusal_says_nothing_was_relaunched(self):
+        (Path(self.runtime.plan["nodes"]["ui"]["worktree"]) / "ui.txt").write_text("edited")
+        code, output = self.relaunch()
+        self.assertEqual(code, 1, output)
+        self.assertTrue(output.startswith("Blocked: ") and output.endswith("has uncommitted changes\nNothing was relaunched.\n"), output)
+        self.assertNotIn("Archived", output)
 
 
 class LaunchNameGuard(unittest.TestCase):

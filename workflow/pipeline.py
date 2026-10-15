@@ -2074,6 +2074,8 @@ def main():
                     from .repair import refuse_recorded
                     refuse_recorded(directory)  # Its counters and refs may exist already: only rerunning the repair continues.
                     if args.all_failed:
+                        if pending:  # A pending interrupt refuses before anything is written, as single-lane retry does.
+                            parser.error("Retry requires a failed graph step, not an interrupt/completed run")
                         retry_all_failed(runtime, state, actor)
                         return
                     if not state.values or pending or not state.next:

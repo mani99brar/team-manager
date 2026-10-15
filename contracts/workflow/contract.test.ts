@@ -46,6 +46,22 @@ test('requires join evidence fields, durable output and referenced logs', () => 
   assert.throws(() => validateWorkerResult({ ...examples.workerResult, status: 'failed', error: null }))
 })
 
+test('a check records why it was transient: memory or disk, nothing else', () => {
+  const check = examples.workerResult.checks[0]
+  for (const transient of ['memory', 'disk'] as const) {
+    const result = validateWorkerResult({ ...examples.workerResult, status: 'failed', error: { code: 'VERIFICATION_BLOCKED', message: 'unit: exit 1', retryable: true },
+      checks: [{ ...check, exit_code: 1, transient }], transient_checks: ['unit'] })
+    assert.equal(result.checks[0].transient, transient)
+  }
+  assert.throws(() => validateWorkerResult({ ...examples.workerResult, checks: [{ ...check, transient: 'cpu' }] }))
+})
+
+test('the panel budget documents the default the controller applies, not a single default', () => {
+  const budget = readJson('./feature.schema.json').properties.panels.items.properties.budget_usd
+  assert.equal(budget.default, undefined, 'workflow/panel.py applies 25 with a claude provider, else 5')
+  assert.match(budget.description, /25 if any provider of the panel uses the claude transport, else 5/)
+})
+
 test('rejects unknown versions, fields, invalid attempts and unsafe file paths', () => {
   for (const change of [
     { contract_version: '2.0.0' }, { unknown: true }, { attempt: 0 },

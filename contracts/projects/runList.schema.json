@@ -351,6 +351,32 @@
           "type": "null"
         }
       ]
+    },
+    "errors": {
+      "minItems": 1,
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "run_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "code": {
+            "type": "string",
+            "minLength": 1
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "run_id",
+          "code",
+          "message"
+        ],
+        "additionalProperties": false
+      }
     }
   },
   "required": [

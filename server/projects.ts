@@ -1016,6 +1016,8 @@ export type RunStoreOptions = {
 type CachedSummary = { key: string; summary: RunSummary; controller: ControllerPin | null; claudeUsd: number | null }
 /** A listed run: its summary and the Claude total its export records (`costs.total_usd`), null when none is recorded. */
 export type ListedRun = { summary: RunSummary; claudeUsd: number | null }
+/** A run the per-workflow list could not read: its directory name, the error's code and its redacted message. */
+export type RunListError = { run_id: string; code: string; message: string }
 
 /** The export's `costs.total_usd` (workflow/costs.py): a finite non-negative number, else null (absent, null or malformed). */
 function recordedClaudeUsd(parsed: unknown): number | null {
@@ -1120,8 +1122,22 @@ export class RunStore {
     return (await this.listRunEntries(scope)).map(entry => entry.summary)
   }
 
-  /** `listRuns` with each run's recorded Claude total, from the same read and the same cache. */
-  async listRunEntries(scope: Scope): Promise<ListedRun[]> {
+  /**
+   * `listRuns` with each run's recorded Claude total, from the same read and the same cache. One invalid run (or a duplicate
+   * run ID) fails the whole list, which the home route, All time and the spend figure rely on. With `collectErrors` (the
+   * per-workflow run list alone) a run whose projection fails, or that repeats a run ID, is left out and named in `errors`
+   * instead, by its directory name, with its code and redacted message; any other failure (the runs root, an oversized
+   * run-state.json) still fails the list. An invalid run is never cached.
+   */
+  listRunEntries(scope: Scope): Promise<ListedRun[]>
+  listRunEntries(scope: Scope, options: { collectErrors: true }): Promise<{ entries: ListedRun[]; errors: RunListError[] }>
+  async listRunEntries(scope: Scope, options?: { collectErrors: true }): Promise<ListedRun[] | { entries: ListedRun[]; errors: RunListError[] }> {
+    const errors: RunListError[] | null = options?.collectErrors ? [] : null
+    const entries = await this.readRunEntries(scope, errors)
+    return errors === null ? entries : { entries, errors }
+  }
+
+  private async readRunEntries(scope: Scope, errors: RunListError[] | null): Promise<ListedRun[]> {
     return this.withRunsRoot(scope, async root => {
       const names = (await fs.readdir(at(root), { withFileTypes: true }))
         .filter(dirent => dirent.isDirectory() && ID_PATTERN.test(dirent.name)).map(dirent => dirent.name).sort()
@@ -1146,12 +1162,24 @@ export class RunStore {
               }
               continue
             }
-            const run = await this.projectRun(scope, name, directory, state)
+            let run: LoadedRun
+            try {
+              run = await this.projectRun(scope, name, directory, state)
+            } catch (error) {
+              if (errors === null || !(error instanceof ProjectApiError)) throw error
+              errors.push({ run_id: name, code: error.code, message: redactPaths(error.message) })
+              continue
+            }
             summary = run.detail.summary
             claudeUsd = run.claudeUsd
             if (fingerprint !== null) this.summaries.set(cacheKey, { key: fingerprint, summary, controller: run.controller, claudeUsd })
           }
-          if (seen.has(summary.run_id)) throw invalidRun(name, 'duplicate run ID within the workflow')
+          if (seen.has(summary.run_id)) {
+            const duplicate = invalidRun(name, 'duplicate run ID within the workflow')
+            if (errors === null) throw duplicate
+            errors.push({ run_id: name, code: duplicate.code, message: duplicate.message })
+            continue
+          }
           seen.add(summary.run_id)
           summaries.push({ summary, claudeUsd })
         } finally {

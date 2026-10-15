@@ -4,7 +4,8 @@ The note is kept in `<lane>.notes.json` (author, text, sent_at, delivery) and sa
 `[Note from the operator N-k] <text>` (or `the maintainer`) through the review sidecar's gate (sidecar.deliver_text), so
 it keeps the sidecar's refusals: nothing is recorded or typed after freeze, for a lane not launched, a lane that went on
 or a lane waiting on a question (answer it instead); the note is recorded `undeliverable` when the pane is not attached to
-the lane's session or its input line is not empty. The worker prompt says an operator note may amend the task, while a
+the lane's session or its input line is not empty, and `undeliverable`/`enter_not_submitted` when it was typed but two
+Enters left it in the input line, where it still is (the command says so and never asks for it to be sent again). The worker prompt says an operator note may amend the task, while a
 maintainer note, like a sidecar message, is advice; review_prompt lists the notes that reached a worker (notes_note).
 
 RUNBOOK "Who acted: --by and notes" and "Review sidecar" (the delivery readback).
@@ -133,6 +134,9 @@ def note_main(argv=None):
         entry = send_note(Pipeline(directory), args.node, actor, args.text)
     except (ValueError, RuntimeError, OSError, subprocess.SubprocessError) as error:
         parser.exit(1, f"Blocked: {error}\n")
+    if entry["reason"] == "enter_not_submitted":
+        parser.exit(1, f"Blocked: note {entry['id']} to {args.node} was typed but Enter did not submit it; the text is still in "
+                       f"{args.node}'s input line. Submit or clear it in the pane; do not send it again.\n")
     if entry["delivery"] != "delivered":
         parser.exit(1, f"Blocked: note {entry['id']} to {args.node} is recorded {entry['delivery']} and was not typed ({entry['reason']}). "
                        "Look at the pane, then send it again as a new note.\n")
