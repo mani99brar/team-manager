@@ -88,7 +88,10 @@
           },
           "transient": {
             "type": "string",
-            "const": "memory"
+            "enum": [
+              "memory",
+              "load"
+            ]
           }
         },
         "required": [

@@ -9,6 +9,7 @@ import hashlib
 import io
 import json
 import os
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -1064,10 +1065,10 @@ class MemoryKilledAttempts(unittest.TestCase):
         self.runtime.event = lambda node, status, message: self.events.append((node, status, message))
         self.state = type("State", (), {"next": ("verify_ui",), "tasks": [type("Task", (), {"name": "verify_ui", "error": "blocked"})()]})()
 
-    def packet(self, attempt: int, transient: bool, reasons=("unit: no passing test evidence or failed tests",)) -> None:
+    def packet(self, attempt: int, transient: bool, reasons=("unit: no passing test evidence or failed tests",), kind="memory") -> None:
         folder = self.root / "verification/worker/ui" / str(attempt)
         folder.mkdir(parents=True)
-        result = {"transient_checks": ["unit"], "checks": [{"command": "npx vitest run", "transient": "memory"}]} if transient else {}
+        result = {"transient_checks": ["unit"], "checks": [{"command": "npx vitest run", "transient": kind}]} if transient else {}
         save_json(folder / "packet.json", {"expected": {"output_commit": "a" * 40}, "result": result,
                                            "gate": {"status": "blocked", "reasons": list(reasons)}})
         save_json(self.root / "attempts.json", {"worker:ui": attempt})
@@ -1118,6 +1119,43 @@ class MemoryKilledAttempts(unittest.TestCase):
         self.packet(3, transient=True, reasons=["unit: exit -9", "lint: exit 1"])  # Spent like any failure: the third is the limit.
         with self.assertRaisesRegex(RuntimeError, "failed identically|retry limit exhausted"):
             advance_failed_checks(self.runtime, self.state)
+
+    def test_a_timeout_under_load_is_free_and_waits_for_a_quieter_host(self):
+        reasons = ("Executed check failed: npx vitest run", "unit: execution exceeded approved timeout", "unit: exit 124")
+        with patch("workflow.automatic.os.getloadavg", return_value=(1.0, 1.0, 1.0)), \
+                patch("workflow.automatic.os.cpu_count", return_value=4), patch("workflow.automatic.time.sleep") as slept:
+            for attempt in (1, 2, 3):  # Three load timeouts in a row with identical reasons: each is rerun, none is identical.
+                self.packet(attempt, transient=True, reasons=reasons, kind="load")
+                self.assertTrue(advance_failed_checks(self.runtime, self.state))
+        self.assertEqual(read_json(self.root / "attempts.json")["worker:ui"], 4)
+        self.assertFalse(slept.called)  # The host is quiet: no wait.
+        self.assertEqual(repair.transient_kinds(self.root / "verification/worker/ui/1/packet.json"), {"load"})
+        self.assertIn(("controller", "running", "worker/ui timed out under host load: transient, rerun without spending an attempt"), self.events)
+        self.assertFalse(any("memory" in message for _, _, message in self.events))
+        # A real failure beside the timeout makes the attempt a real failure, as for a memory kill.
+        self.packet(4, transient=True, reasons=("unit: exit 124", "lint: exit 1"), kind="load")
+        self.assertEqual(repair.transient_kinds(self.root / "verification/worker/ui/4/packet.json"), set())
+
+    def test_the_load_wait_polls_until_below_the_cpu_count_or_thirty_minutes(self):
+        clock, slept = [0.0], []
+
+        def sleep(seconds):
+            slept.append(seconds)
+            clock[0] += seconds
+        readings = iter([(9.0, 12.0, 10.0)] * 11 + [(2.0, 3.5, 8.0)])
+        automatic.wait_for_quiet(self.runtime, read=lambda: next(readings), cores=lambda: 4, clock=lambda: clock[0], sleep=sleep)
+        self.assertEqual(slept, [30] * 11)
+        # One event every five minutes at most: at 0 s and 300 s of the 330 s wait.
+        self.assertEqual([message for _, _, message in self.events], ["waiting for a quieter host: load average 12.0 on 4 CPUs"] * 2)
+        clock[0], slept[:], self.events[:] = 0.0, [], []
+        automatic.wait_for_quiet(self.runtime, read=lambda: (20.0, 20.0, 20.0), cores=lambda: 4, clock=lambda: clock[0], sleep=sleep)
+        self.assertEqual((sum(slept), len(self.events)), (1800, 6))
+
+        def unreadable():
+            raise OSError("no /proc/loadavg")
+        slept[:] = []
+        automatic.wait_for_quiet(self.runtime, read=unreadable, cores=lambda: 4, clock=lambda: clock[0], sleep=sleep)
+        self.assertEqual(slept, [])
 
     def test_the_memory_wait_polls_until_the_floor_or_ten_minutes(self):
         clock = [0.0]
@@ -1368,6 +1406,66 @@ class AllFailedAfterAFullDisk(RepairFixture):
         self.assertEqual(code, 1, err)
         self.assertIn("retry is refused for --by panel", err)
         self.assertFalse((self.directory / "retry-requests.json").exists())
+
+
+class DeferredFailuresInTheBrief(unittest.TestCase):
+    """A lane-review repair brief names the snapshot's failing deferred checks (cook IMPROVEMENTS item 3), environmental ones
+    (a memory kill, a timeout under host load) as such, and adds nothing when they passed."""
+
+    CHECKS = [{"id": "ui-unit", "kind": "unit", "argv": ["npm", "run", "test:unit"]},
+              {"id": "ui-build", "kind": "build", "argv": ["npm", "run", "build"]},
+              {"id": "ui-lint", "kind": "build", "argv": ["npm", "run", "lint"]},
+              {"id": "ui-browser", "kind": "browser", "argv": ["npx", "playwright", "test"]}]
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        self.runtime = type("Runtime", (), {})()
+        self.runtime.directory = self.root
+        self.runtime.worker_policy = lambda lane: {"owned_paths": ["src/ui", "tests/ui.spec.ts"], "checks": self.CHECKS}
+
+    def packet(self, executions: list[dict], node: str = "ui") -> dict:
+        folder = self.root / "verification/worker" / node / "1"
+        folder.mkdir(parents=True, exist_ok=True)
+        for index, execution in enumerate(executions):
+            (folder / f"check-{index}.log").write_text(execution.pop("log", "done\n"))
+        save_json(folder / "packet.json", {
+            "result": {"checks": [{"command": shlex.join(check["argv"]), **execution} for check, execution in zip(self.CHECKS, executions)]},
+            "evidence": {"checks": [{"id": check["id"], "worker_check_index": index} for index, check in enumerate(self.CHECKS)]},
+            "gate": {"status": "blocked", "reasons": ["lane-review: P1 src/ui/a.ts unchecked input"], "deferred_checks": ["ui-build", "ui-lint", "ui-browser"]}})
+        return {"phase": "worker", "node_id": node, "attempt": 1, "path": f"verification/worker/{node}/1/packet.json",
+                "reasons": ["lane-review: P1 src/ui/a.ts unchecked input"]}
+
+    def test_a_break_of_the_snapshot_names_its_files_by_owner(self):
+        log = ("> tsc -b && vite build\nsrc/ui/a.ts(3,1): error TS2339: no such property\n"
+               "tests/ui.spec.ts:191:7 - error TS2339\nsrc/other/b.ts:4:2 - error TS2304\n")
+        packet = self.packet([{"exit_code": 0}, {"exit_code": 2, "log": log}, {"exit_code": 0}, {"exit_code": 1, "log": "1 failed\n"}])
+        text = "\n".join(repair.deferred_failures(self.runtime, "ui", packet))
+        self.assertIn("## Checks recorded for the candidate gate that failed on this snapshot", text)
+        self.assertIn("### ui-build (build), exit 2: npm run build", text)
+        self.assertIn("Not environmental. This snapshot is the run's base plus your changes only", text)
+        self.assertIn("Files the log's tail names: yours: src/ui/a.ts, tests/ui.spec.ts; not yours: src/other/b.ts.", text)
+        self.assertIn("src/ui/a.ts(3,1): error TS2339: no such property", text)
+        self.assertNotIn("ui-lint", text)  # It passed.
+        self.assertNotIn("ui-browser", text)  # A deferred browser failure is left out: it may only want another lane's work.
+        self.assertNotIn("ui-unit", text)  # A gating check is never listed here: it gated the packet already.
+
+    def test_environmental_failures_are_named_as_such(self):
+        packet = self.packet([{"exit_code": 0}, {"exit_code": 137, "transient": "memory", "log": "Killed\n"},
+                              {"exit_code": 124, "transient": "load"}, {"exit_code": 0}])
+        text = "\n".join(repair.deferred_failures(self.runtime, "ui", packet))
+        self.assertIn("### ui-build (build), exit 137", text)
+        self.assertIn("Environmental: its process was killed for memory. It says nothing about your code: change nothing for it.", text)
+        self.assertIn("### ui-lint (build), exit 124", text)
+        self.assertIn("Environmental: it hit its timeout while the host was overloaded.", text)
+        self.assertNotIn("Not environmental", text)
+
+    def test_nothing_is_added_for_passing_checks_or_another_lane(self):
+        self.assertEqual(repair.deferred_failures(self.runtime, "ui", self.packet([{"exit_code": 0}] * 4)), [])
+        other = self.packet([{"exit_code": 0}, {"exit_code": 2}, {"exit_code": 0}, {"exit_code": 0}], node="api")
+        self.assertEqual(repair.deferred_failures(self.runtime, "ui", other), [])
+        self.assertEqual(repair.deferred_failures(self.runtime, "ui", {**other, "phase": "candidate", "node_id": "ui"}), [])
 
 
 class CandidateGenerations(RepairFixture):
@@ -1731,6 +1829,32 @@ class FixLoop(RepairFixture):
         self.assertEqual(self.sessions.starts.count("repair-1"), 1)
         self.assertEqual((self.entries()[0]["status"], git(self.repo, "show", f"{commit}:ui.txt")), ("applied", "after"))
 
+    def test_a_candidate_failure_attributed_to_two_lanes_repairs_each_in_turn(self):
+        directory = self.directory
+        self.start()
+        attributed = {"adapter": [{"check": "ui-build", "file": "backend.py", "line": 1, "title": "the note"}], "ui": [{"check": "ui-build"}]}
+        self.sessions.repair_edits.update(adapter={"backend.py": "VALUE = 2\n# note\n"}, ui={"ui.txt": "after"})
+        with patch("workflow.automatic.candidate_attribution", return_value=attributed):
+            commit = self.drive()
+        first, second = self.entries()
+        self.assertEqual([(next(iter(entry["lanes"])), entry["status"], entry["trigger"], entry["chain"]) for entry in (first, second)],
+                         [("adapter", "applied", "candidate", ["adapter", "ui"]), ("ui", "applied", "candidate", ["adapter", "ui"])])
+        # The second lane's session works on the first lane's captured fix: one candidate is built after both.
+        self.assertEqual((first["base_commit"], second["base_commit"], second["after_repair"]), (self.candidate_commit(), first["source_commit"], 1))
+        self.assertEqual((first["attributed"], second["attributed"]), (attributed["adapter"], attributed["ui"]))
+        # adapter had no blocked packet of its own: what was attributed to it is its brief.
+        prompt = self.sessions.repair_prompts["repair-1"]
+        for expected in ("## Gate reasons: candidate/ui attempt 1", "## Failures attributed to lane adapter", "- ui-build: backend.py:1 the note",
+                         "### ui-build (build), exit 1", "adapter owns: backend.py"):
+            self.assertIn(expected, prompt)
+        self.assertIn("- ui-build: failed on the combined candidate", self.sessions.repair_prompts["repair-2"])
+        self.assertFalse((directory / "candidate-1.json").exists())
+        self.assertEqual(self.tree(commit), self.tree(self.candidate_commit(2)))
+        self.assertEqual((git(self.repo, "show", f"{commit}:ui.txt"), git(self.repo, "show", f"{commit}:backend.py")), ("after", "VALUE = 2\n# note"))
+        events = [(event["node"], event["status"], event["message"]) for event in self.events()]
+        for lane, n in (("adapter", 1), ("ui", 2)):
+            self.assertIn((f"repair_{lane}", "passed", f"round 1: repair {n} applied; {lane} is verified again"), events)
+
     def test_a_memory_kill_never_starts_a_round(self):
         runtime = type("Runtime", (), {})()
         runtime.directory, runtime.plan, runtime.workers = self.directory, self.runtime.plan, ["adapter", "ui"]
@@ -1755,13 +1879,25 @@ class ReviewFixLoop(FixLoop):
         super().setUp()
         self.sessions.edits["ui"] = ("ui.txt", "after")
         self.blocking_rounds = 1
+        self.falling = False  # One P1 a round; True: one fewer each round, so the loop keeps making progress.
 
     def reviewer(self, completion: dict) -> dict:
         rounds = self.directory / "review-rounds.json"
         done = len(read_json(rounds)["rounds"]) if rounds.exists() else 0
         if done < self.blocking_rounds:
-            return {**completion, "verdict": "blocked", "findings": [{**self.P1, "message": f"{self.P1['message']} (round {done + 1})"}]}
+            count = self.blocking_rounds - done if self.falling else 1
+            return {**completion, "verdict": "blocked", "findings": [{**self.P1, "message": f"{self.P1['message']} (round {done + 1})" + (f" #{i}" if i else "")}
+                                                                     for i in range(count)]}
         return completion
+
+    ADAPTER_P1 = {"severity": "P1", "message": "backend.py lacks its note.", "disposition": "open", "worker": "adapter", "requirement": None}
+
+    def two_lanes(self, completion: dict) -> dict:
+        """Round 1 blocks with one P1 on each lane; the review after it approves."""
+        rounds = self.directory / "review-rounds.json"
+        if rounds.exists() and read_json(rounds)["rounds"]:
+            return completion
+        return {**completion, "verdict": "blocked", "findings": [self.ADAPTER_P1, self.P1]}
 
     def test_a_review_block_on_one_lane_is_repaired_and_re_reviewed_in_the_run(self):
         directory = self.directory
@@ -1804,7 +1940,7 @@ class ReviewFixLoop(FixLoop):
         self.assertNotIn("review_blocked", [kind for kind, _ in self.attention()])  # The round's record was resolved.
 
     def test_two_blocked_review_rounds_raise_attention(self):
-        self.blocking_rounds = 3
+        self.blocking_rounds, self.falling = 3, True  # 3, 2, then 1 P1: progress each round, so the rounds run out.
         self.sessions.reviewer_mutate = self.reviewer
         self.sessions.repair_edits["ui"] = {"web/notes.txt": lambda node: f"notes of {node}\n"}
         self.start()
@@ -1853,10 +1989,10 @@ class ReviewFixLoop(FixLoop):
         self.assertNotIn("repair-1", self.sessions.starts)
         self.assertTrue(any(text.startswith("fix loop exhausted for lane ui") for kind, text in self.attention() if kind == "controller_blocked"))
 
-    def test_findings_on_two_lanes_end_the_run_as_before(self):
-        def two_lanes(completion):
-            return {**completion, "verdict": "blocked", "findings": [self.P1, {**self.P1, "worker": "adapter", "message": "adapter too."}]}
-        self.sessions.reviewer_mutate = two_lanes
+    def test_a_finding_on_no_lane_ends_the_run_as_before(self):
+        def no_lane(completion):
+            return {**completion, "verdict": "blocked", "findings": [self.P1, {**self.P1, "worker": "multiple", "message": "both lanes."}]}
+        self.sessions.reviewer_mutate = no_lane
         self.start()
         with self.assertRaisesRegex(RuntimeError, "Non-retryable graph failure"):
             self.drive()
@@ -1864,10 +2000,127 @@ class ReviewFixLoop(FixLoop):
         self.assertFalse((self.directory / "review-rounds.json").exists())
         self.assertIn("review_blocked", [kind for kind, _ in self.attention()])
 
+    def test_findings_on_two_lanes_repair_each_lane_in_turn_before_one_review(self):
+        directory = self.directory
+        self.sessions.reviewer_mutate = self.two_lanes
+        self.sessions.repair_edits.update(adapter={"backend.py": "VALUE = 2\n# note\n"}, ui={"web/notes.txt": "notes\n"})
+        self.start()
+        commit = self.drive()
+        first, second = self.entries()
+        self.assertEqual([(next(iter(entry["lanes"])), entry["status"], entry["trigger"], entry["review_round"], entry["chain"]) for entry in (first, second)],
+                         [("adapter", "applied", "review", 1, ["adapter", "ui"]), ("ui", "applied", "review", 1, ["adapter", "ui"])])
+        # The second lane's session works on the first lane's captured fix, not on the reviewed candidate alone.
+        self.assertEqual((first["base_commit"], second["base_commit"], second["after_repair"]), (self.candidate_commit(), first["source_commit"], 1))
+        self.assertEqual(git(directory / "repair-workspace-2", "rev-parse", "HEAD"), first["source_commit"])
+        # Each session got its own lane's findings only.
+        self.assertEqual([[finding["message"] for finding in entry["brief"]["findings"]] for entry in (first, second)],
+                         [[self.ADAPTER_P1["message"]], [self.P1["message"]]])
+        self.assertIn("backend.py lacks its note.", self.sessions.repair_prompts["repair-1"])
+        self.assertNotIn("web/notes.txt is missing", self.sessions.repair_prompts["repair-1"])
+        self.assertIn("web/notes.txt is missing", self.sessions.repair_prompts["repair-2"])
+        self.assertNotIn("backend.py lacks its note.", self.sessions.repair_prompts["repair-2"])
+        # One round on both lanes, then one review of one new candidate holding both fixes.
+        [record] = read_json(directory / "review-rounds.json")["rounds"]
+        self.assertEqual((record["lane"], record["lanes"], len(record["findings"]), record["archived"]), ("adapter", ["adapter", "ui"], 2, True))
+        self.assertEqual(self.sessions.starts.count("review"), 2)
+        self.assertFalse((directory / "candidate-1.json").exists())
+        self.assertEqual(read_json(directory / "review-bundle.json")["candidate_commit"], self.candidate_commit(2))
+        self.assertEqual(read_json(directory / "review.json")["verdict"], "approved")
+        self.assertEqual(self.tree(commit), self.tree(second["source_commit"]))
+        self.assertEqual((git(self.repo, "show", f"{commit}:web/notes.txt"), git(self.repo, "show", f"{commit}:backend.py")), ("notes", "VALUE = 2\n# note"))
+        # The timeline shows each lane's round; the next reviewers' delta covers both lanes' paths.
+        events = [(event["node"], event["status"], event["message"]) for event in self.events()]
+        for lane, n in (("adapter", 1), ("ui", 2)):
+            self.assertIn((f"repair_{lane}", "passed", f"round 1: repair {n} applied; {lane} is verified again"), events)
+        self.assertTrue(any(message.startswith("Review round 1 blocked on lanes adapter and ui:") and "repairs adapter, then ui, each with its own findings, then" in message
+                            for _, _, message in events), events)
+        delta = (directory / "review.delta.diff").read_text()
+        self.assertIn("web/notes.txt", delta)
+        self.assertIn("backend.py", delta)
+        self.assertIn("limited to lanes adapter and ui's owned paths", (directory / "review.prompt.txt").read_text())
+
+    def test_a_controller_stopped_between_two_lanes_repairs_the_next_one_before_the_run_goes_on(self):
+        self.sessions.reviewer_mutate = self.two_lanes
+        self.sessions.repair_edits.update(adapter={"backend.py": "VALUE = 2\n# note\n"}, ui={"web/notes.txt": "notes\n"})
+        self.start()
+        with patch("workflow.automatic.link_keys", side_effect=KeyboardInterrupt), self.assertRaises(KeyboardInterrupt):
+            self.drive()  # Stopped after adapter's repair applied, before ui's session was journaled.
+        self.assertEqual([(next(iter(entry["lanes"])), entry["status"]) for entry in self.entries()], [("adapter", "applied")])
+        with self.graph() as (graph, config):
+            state = graph.get_state(config)
+            self.assertEqual((automatic.final_stop(self.runtime, state), automatic.fix_decision(self.runtime, state)), (None, ("ui", "review")))
+        commit = self.drive()  # The next controller repairs ui first: never a review of the half-repaired candidate.
+        self.assertEqual([(next(iter(entry["lanes"])), entry["status"], entry.get("after_repair")) for entry in self.entries()],
+                         [("adapter", "applied", None), ("ui", "applied", 1)])
+        self.assertEqual(self.sessions.starts.count("review"), 2)
+        self.assertEqual(git(self.repo, "show", f"{commit}:web/notes.txt"), "notes")
+
+    def test_a_later_lane_that_ends_blocked_stops_the_run_with_the_round_archived(self):
+        self.sessions.reviewer_mutate = self.two_lanes
+        self.sessions.repair_edits["adapter"] = {"backend.py": "VALUE = 2\n# note\n"}  # ui's session changes nothing.
+        self.start()
+        for _ in range(2):  # A second controller stops the same way and launches nothing.
+            with self.assertRaisesRegex(RuntimeError, r"^fix loop exhausted for lane ui after 1 round: P1 \(review\): ui.txt says after but web/notes.txt is "
+                                                      r"missing\.; round 1 ended blocked: the repair session changed nothing\. A hand fix: python -m workflow brief "):
+                self.drive()
+        self.assertEqual([(next(iter(entry["lanes"])), entry["status"]) for entry in self.entries()], [("adapter", "applied"), ("ui", "blocked")])
+        self.assertEqual((self.sessions.starts.count("review"), self.sessions.starts.count("repair-3")), (1, 0))
+        # adapter's repair is applied: the round stays archived, and the half-repaired candidate is never reviewed.
+        self.assertFalse((self.directory / "review.json").exists())
+        self.assertTrue(read_json(self.directory / "review-rounds.json")["rounds"][0]["archived"])
+        self.assertIn("controller_blocked", [kind for kind, _ in self.attention()])
+        with self.graph() as (graph, config):
+            reason, bare = automatic.final_stop(self.runtime, graph.get_state(config))
+        self.assertTrue(reason.startswith("fix loop exhausted for lane ui after 1 round"), reason)
+
+    def test_a_round_on_two_lanes_starts_only_with_a_repair_for_each(self):
+        self.sessions.reviewer_mutate = self.two_lanes
+        self.start()
+        with patch("workflow.repair.MAX_REPAIRS", 1), \
+                self.assertRaisesRegex(RuntimeError, r"^fix loop exhausted for lane adapter after 0 rounds: .*the round could not start: 0 repairs are "
+                                                     r"already applied to this run \(at most 1\) and this round repairs 2 lanes"):
+            self.drive()
+        self.assertEqual(read_json(self.directory / "review.json")["verdict"], "blocked")
+        self.assertFalse((self.directory / "review-rounds.json").exists())
+        self.assertFalse((self.directory / "repairs.json").exists())
+
+    def test_a_review_round_that_leaves_as_many_findings_stops_the_loop(self):
+        self.blocking_rounds = 3  # One new P1 every round: the count never falls.
+        self.sessions.reviewer_mutate = self.reviewer
+        self.sessions.repair_edits["ui"] = {"web/notes.txt": lambda node: f"notes of {node}\n"}
+        self.start()
+        for _ in range(2):  # Its stop is final: a new controller says it again and launches nothing.
+            with self.assertRaises(RuntimeError) as raised:
+                self.drive()
+            self.assertEqual(str(raised.exception), f"fix loop stopped, no progress: 1 open P0/P1 after review round 1 had 1: P1 (review): "
+                                                    f"{self.P1['message']} (round 2). A hand fix: python -m workflow brief {self.directory} and a --follows run")
+        self.assertEqual([(entry["status"], entry["review_round"]) for entry in self.entries()], [("applied", 1)])
+        # Raised before the round is archived: round 2's block stays the run's record.
+        self.assertEqual(read_json(self.directory / "review.json")["verdict"], "blocked")
+        self.assertFalse((self.directory / "review.round-2.json").exists())
+        self.assertEqual((self.sessions.starts.count("review"), self.sessions.starts.count("repair-2")), (2, 0))
+        self.assertTrue(any(text.startswith("fix loop stopped, no progress: 1 open P0/P1") for kind, text in self.attention() if kind == "controller_blocked"))
+
+    def test_a_finding_that_comes_back_after_its_round_stops_the_loop(self):
+        def reviewer(completion):
+            rounds = self.directory / "review-rounds.json"
+            if rounds.exists() and read_json(rounds)["rounds"]:  # Fewer findings, but one names the same place again.
+                return {**completion, "verdict": "blocked", "findings": [{**self.P1, "message": "web/notes.txt:3 is still empty, as before."}]}
+            return {**completion, "verdict": "blocked", "findings": [{**self.P1, "message": "web/notes.txt:3 is empty."}, {**self.P1, "message": "Another gap."}]}
+        self.sessions.reviewer_mutate = reviewer
+        self.sessions.repair_edits["ui"] = {"web/notes.txt": "notes\n"}
+        self.start()
+        with self.assertRaises(RuntimeError) as raised:
+            self.drive()
+        self.assertEqual(str(raised.exception), "fix loop stopped, no progress: 1 came back after review round 1 repaired it: P1 (review): "
+                                                f"web/notes.txt:3 is still empty, as before. A hand fix: python -m workflow brief {self.directory} and a --follows run")
+        self.assertEqual(len(self.entries()), 1)
+
     test_a_candidate_block_is_repaired_in_the_run_and_the_run_reaches_its_feature_branch = None
     test_a_verify_block_is_repaired_on_the_lane_snapshot = test_two_failed_rounds_raise_attention = None
     test_a_blocked_round_ends_the_loop = test_a_memory_kill_never_starts_a_round = None
     test_claude_code_unavailable_mid_round_is_resumable_not_blocked = None
+    test_a_candidate_failure_attributed_to_two_lanes_repairs_each_in_turn = None
 
 
 class DeclaredReviewerFixLoop(ReviewFixLoop):
@@ -1895,7 +2148,98 @@ class DeclaredReviewerFixLoop(ReviewFixLoop):
         self.assertEqual(read_json(directory / "review.json")["verdict"], "approved")
 
     test_two_blocked_review_rounds_raise_attention = test_a_blocked_review_round_never_reviews_that_candidate_again = None
-    test_findings_on_two_lanes_end_the_run_as_before = None
+    test_a_finding_on_no_lane_ends_the_run_as_before = test_findings_on_two_lanes_repair_each_lane_in_turn_before_one_review = None
+    test_a_controller_stopped_between_two_lanes_repairs_the_next_one_before_the_run_goes_on = None
+    test_a_later_lane_that_ends_blocked_stops_the_run_with_the_round_archived = None
+    test_a_round_on_two_lanes_starts_only_with_a_repair_for_each = None
+    test_a_review_round_that_leaves_as_many_findings_stops_the_loop = test_a_finding_that_comes_back_after_its_round_stops_the_loop = None
+
+
+class CandidateAttribution(unittest.TestCase):
+    """A blocked candidate packet's failures, attributed: a failed test to the lane that owns its spec file, any other failing
+    check to the packet's own lane. Attribution that is unclear keeps the round the blocked lane's, or the stop, as before."""
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.directory = Path(temp.name)
+        policy = {"workers": [
+            {"node_id": "server", "owned_paths": ["server", "tests/e2e/projects.spec.ts"], "checks": [{"id": "unit", "kind": "unit", "argv": ["true"]}]},
+            {"node_id": "polish", "owned_paths": ["src", "tests/e2e/landing.spec.ts"], "checks": [
+                {"id": "build", "kind": "build", "argv": ["true"]}, {"id": "browser", "kind": "browser", "argv": ["true"]}]},
+            {"node_id": "docs", "owned_paths": ["docs", "tests/e2e/docs.spec.ts"], "checks": []}]}  # Declared, not selected.
+        runtime = type("Runtime", (), {})()
+        runtime.directory, runtime.policy, runtime.workers, runtime.plan = self.directory, policy, ["server", "polish"], {"automatic": {"fix_rounds": 3}}
+        runtime.worker_policy = lambda node: next(worker for worker in policy["workers"] if worker["node_id"] == node)
+        runtime.attempt = lambda phase, node: 1
+        self.runtime = runtime
+        self.state = type("State", (), {"next": ("candidate",), "tasks": [type("Task", (), {"name": "candidate", "error": "blocked"})()]})()
+
+    def packet(self, node: str, exits: list[int], specs: list[tuple[str, str]] | None = None) -> Path:
+        """A blocked candidate packet of `node` whose checks exited `exits`; `specs`, (file, Playwright status) pairs, the last
+        check's browser report."""
+        folder = self.directory / "verification/candidate" / node / "1"
+        folder.mkdir(parents=True)
+        worktree = str(folder / "worktree")
+        reasons = [f"{check['id']}: exit {code}" for check, code in zip(self.runtime.worker_policy(node)["checks"], exits) if code]
+        save_json(folder / "packet.json", {"expected": {"output_commit": "a" * 40}, "gate": {"status": "blocked", "reasons": reasons},
+                                           "result": {"checks": [{"command": "check", "cwd": worktree, "exit_code": code} for code in exits]}})
+        if specs is not None:
+            save_json(folder / f"browser-report-{len(exits) - 1}.json", {"config": {"rootDir": f"{worktree}/tests/e2e"}, "suites": [
+                {"title": name, "file": name, "specs": [{"title": f"{name} works", "file": name, "line": 7, "tests": [{"status": status}]}]}
+                for name, status in specs]})
+        return folder / "packet.json"
+
+    def test_failed_tests_go_to_their_specs_owners_and_other_checks_to_the_packets_lane(self):
+        path = self.packet("polish", [1, 1], [("projects.spec.ts", "unexpected"), ("landing.spec.ts", "unexpected"), ("docs.spec.ts", "expected")])
+        chain = automatic.candidate_chain(self.runtime, [("polish", path)])
+        self.assertEqual(list(chain), ["server", "polish"])  # The run's lane order.
+        self.assertEqual(chain, {"server": [{"check": "browser", "file": "tests/e2e/projects.spec.ts", "line": 7, "title": "projects.spec.ts works"}],
+                                 "polish": [{"check": "build"}, {"check": "browser", "file": "tests/e2e/landing.spec.ts", "line": 7, "title": "landing.spec.ts works"}]})
+        self.assertEqual(repair.attributed_lines(chain["polish"]), ["build: failed on the combined candidate",
+                                                                    "browser: tests/e2e/landing.spec.ts:7 landing.spec.ts works"])
+        # The round starts with server, which has no blocked packet of its own.
+        self.assertEqual(automatic.fix_decision(self.runtime, self.state), ("server", "candidate"))
+
+    def test_unclear_attribution_keeps_the_blocked_lanes_round(self):
+        import shutil
+        cases = {"a spec owned by a lane the run did not select": (["docs.spec.ts"], [1, 1]),
+                 "a spec no lane owns": (["other.spec.ts"], [0, 1]),
+                 "a failed browser check whose report names no failed test": ([], [0, 1]),
+                 "no browser report": (None, [0, 1]),
+                 "failures that are all the packet's own lane's": (["landing.spec.ts"], [1, 1])}
+        for why, (failing, exits) in cases.items():
+            with self.subTest(why):
+                shutil.rmtree(self.directory / "verification", ignore_errors=True)
+                specs = None if failing is None else [(name, "unexpected") for name in failing] + [("projects.spec.ts", "expected")]
+                path = self.packet("polish", exits, specs)
+                self.assertEqual(automatic.candidate_chain(self.runtime, [("polish", path)]), {"polish": None})
+                self.assertEqual(automatic.fix_decision(self.runtime, self.state), ("polish", "candidate"))
+
+    def test_several_blocked_packets_with_one_unclear_stop_as_before(self):
+        server = self.packet("server", [1])
+        polish = self.packet("polish", [0, 1], [("other.spec.ts", "unexpected")])
+        self.assertIsNone(automatic.candidate_chain(self.runtime, [("server", server), ("polish", polish)]))
+        self.assertIsNone(automatic.fix_decision(self.runtime, self.state))
+
+    def test_a_spent_attributed_lane_stops_the_round_before_any_lane_is_repaired(self):
+        path = self.packet("polish", [0, 1], [("projects.spec.ts", "unexpected"), ("landing.spec.ts", "unexpected")])
+        save_json(self.directory / "repairs.json", {"version": "1.0.0", "repairs": [
+            {"n": 1, "mode": "session", "status": "blocked", "lanes": {"server": {}}, "round": 1, "reason": "it changed nothing"}]})
+        with self.assertRaisesRegex(RuntimeError, r"^fix loop exhausted for lane server after 1 round: browser: tests/e2e/projects.spec.ts:7 "
+                                                  r"projects.spec.ts works; round 1 ended blocked: it changed nothing"):
+            automatic.fix_decision(self.runtime, self.state)
+
+
+class NoProgressMarks(unittest.TestCase):
+    """What makes two findings of different review rounds the same one."""
+
+    def test_message_title_and_place(self):
+        marks = automatic.finding_marks({"message": "Reuse  attribution never validates (server/projects.ts:1927-1947).", "title": "Reuse attribution"})
+        self.assertEqual(marks, {"says:reuse attribution never validates (server/projects.ts:1927-1947).", "says:reuse attribution",
+                                 "at:server/projects.ts:1927"})
+        self.assertIn("at:src/StepChart.tsx:305", automatic.finding_marks({"message": "x", "file": "src/StepChart.tsx", "line": 305}))
+        self.assertEqual(automatic.finding_marks({"message": "Version 1.2: no place here."}), {"says:version 1.2: no place here."})
 
 
 class NoFixLoop(FixLoop):
@@ -1906,6 +2250,7 @@ class NoFixLoop(FixLoop):
     test_a_verify_block_is_repaired_on_the_lane_snapshot = test_two_failed_rounds_raise_attention = None
     test_a_blocked_round_ends_the_loop = test_a_memory_kill_never_starts_a_round = None
     test_claude_code_unavailable_mid_round_is_resumable_not_blocked = None
+    test_a_candidate_failure_attributed_to_two_lanes_repairs_each_in_turn = None
 
     def test_without_rounds_the_run_stops_as_before(self):
         self.start()

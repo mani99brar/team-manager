@@ -80,6 +80,42 @@ def memory_killed(code: int, log: Path) -> bool:
     return any(line == MEMORY_LINE or any(marker in line for marker in MEMORY_MARKERS) for line in tail)
 
 
+# A check that hit its timeout while the host was overloaded is no verdict on the code either (workflow-collected-fixes-001: the
+# workflow suite took 2400 s of 2400 s at load average 12-21 on 4 cores beside another run's browser suites, and 556-576 s on a
+# quiet host). It is a timeout (exit 124, execute's own kill) and, when it ended, the 5- or 15-minute load average was at least
+# LOAD_FACTOR times the CPU count (WORKFLOW_LOAD_FACTOR overrides it). A check's own parallel work keeps the load near the CPU
+# count, so it alone never qualifies; a timeout on a quiet host is a failure like any other. automatic.check_retries reruns it
+# free, as a memory kill.
+LOAD_FACTOR = 2.0
+TRANSIENT_KINDS = ("memory", "load")
+
+
+def load_factor() -> float:
+    try:
+        return float(os.environ.get("WORKFLOW_LOAD_FACTOR", LOAD_FACTOR))
+    except ValueError:
+        return LOAD_FACTOR
+
+
+def overloaded_timeout(code: int, read=None, cores=None) -> bool:
+    """Whether a failed check timed out (exit 124) while the 5- or 15-minute load average was at least load_factor() times the
+    CPU count. Any other exit, and a load that cannot be read, never is."""
+    if code != 124:
+        return False
+    try:
+        _, five, fifteen = (read or os.getloadavg)()
+    except OSError:
+        return False
+    return max(five, fifteen) >= load_factor() * ((cores or os.cpu_count)() or 1)
+
+
+def transient_kind(code: int, log: Path) -> str | None:
+    """The `transient` an execution records: "memory" (memory_killed), "load" (overloaded_timeout), else None."""
+    if memory_killed(code, log):
+        return "memory"
+    return "load" if overloaded_timeout(code) else None
+
+
 def text_test_counts(log: str) -> dict | None:
     text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", log)
     unit = re.search(r"^Ran (\d+) tests? in .+$", text, re.MULTILINE)
@@ -486,12 +522,12 @@ def verify_revision(run: Path, plan: dict, policy: dict, node: str, commit: str,
 
 
 def transient_checks(worker: dict, receipts: list, executions: list, phase: str) -> list[str]:
-    """The ids of the checks that gate in this phase and were killed for memory (`transient` on their execution). A deferred
-    worker-phase check's outcome never gates, so its kill makes no attempt transient."""
+    """The ids of the checks that gate in this phase and were killed for memory or timed out under host load (`transient` on
+    their execution). A deferred worker-phase check's outcome never gates, so its kill makes no attempt transient."""
     from .verification import DEFERRED_WORKER_KINDS
     kinds = {check["id"]: check["kind"] for check in worker["checks"]}
     return [receipt["id"] for receipt in receipts
-            if executions[receipt["worker_check_index"]].get("transient") == "memory"
+            if executions[receipt["worker_check_index"]].get("transient") in TRANSIENT_KINDS
             and not (phase == "worker" and kinds[receipt["id"]] in DEFERRED_WORKER_KINDS)]
 
 
@@ -586,7 +622,7 @@ def run_lane_commands(policy: dict, worker: dict, worktree: Path, directory: Pat
             log_id = capture.add(log, "log")
             executions.append({"command": shlex.join(check["argv"]), "cwd": str(worktree),
                                "started_at": start, "finished_at": finish, "exit_code": code, "log_artifact_id": log_id,
-                               **({"transient": "memory"} if memory_killed(code, log) else {})})
+                               **({"transient": kind} if (kind := transient_kind(code, log)) else {})})
             tests, scenarios = None, []
             try:
                 if check["kind"] == "browser":
