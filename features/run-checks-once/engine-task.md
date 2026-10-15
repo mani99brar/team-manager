@@ -8,7 +8,7 @@ Spec: `features/run-checks-once/prd.md`. Binding decisions: `features/run-checks
 
 ## Context
 
-- **Follow-up run 003 ([L10]).** Your prompt starts with the restore of your owned paths from run 002's lane snapshot `8eb67b6`, which already meets items 1-15. Make only the [L10] change, then run your checks and hand off.
+- **Follow-up run 003 ([L10]).** Your prompt starts with the restore of your owned paths from run 002's lane snapshot `8eb67b6`, which already meets items 1-15. Make only the [L10] change as widened by [L11], then run your checks and hand off.
 - **Follow-up run 002 ([L4]-[L9], done at 8eb67b6).** Your prompt starts with the restore of your owned paths from 001's reviewed candidate `f62e844`, which already meets items 1-14 below as 001 delivered them. Then apply `features/run-checks-once/carry/repair-2.diff` ([L4]), and fix [L5]-[L7] and [L8]'s docs. Run 001's review blockers and their triage are summarised in decisions.md [L4]-[L8].
 - **Candidate gate** (`workflow/pipeline.py`):
   - `candidate()` :711-785 combines the snapshots, then loops over the lanes. Each lane gets its own `verify_revision(phase="candidate")`, worktree and `npm ci`, and the first blocked lane raises (:763-765). It then writes `review-bundle.json` (:769-784).
@@ -103,7 +103,7 @@ Each item of PRD §11 is proved by a named test:
     - [L8]: the known limit stated in the handoff doc and RUNBOOK;
     - [L9]: `npm ci` before the full suite.
 
-16. **Run 003 follow-up ([L10]):** `isolate_registry()` isolates `MD_MANAGER_BROWSER_QUEUE`, a test proves it, and the full suite passes with the live queue untouched.
+16. **Run 003 follow-up ([L10], widened by [L11]):** every test module that takes a browser slot runs under an isolated queue: `isolate_registry()` per test, and `setUpModule` in `test_browser_rules` and `test_critique`, through one helper. [L11] (a)-(d) are proved, and the handoff merge note lists every touched file.
 
 The worker's Proof table names a test for each item.
 
@@ -117,4 +117,4 @@ Stop and report `blocked`, with what you found, when:
 
 ## Changes after launch
 
-Changes after launch are `[L<n>]` bullets in `decisions.md`, and they win over this task: [L1]-[L3] (challenge attempt 1) [L4]-[L9] (follow-up run 002) and [L10] (follow-up run 003).
+Changes after launch are `[L<n>]` bullets in `decisions.md`, and they win over this task: [L1]-[L3] (challenge attempt 1) [L4]-[L9] (follow-up run 002) and [L10]-[L11] (follow-up run 003).
