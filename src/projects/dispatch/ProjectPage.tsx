@@ -6,7 +6,11 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { Project, RunSummary, WorkflowDefinition, WorkflowRuns } from '../api.ts'
-import { waitingKind } from '../lists.ts'
+import { spendFigure } from './spend.ts'
+import { classifyRuns, classOf, lastActivityAt, liveRank } from '../lists.ts'
+import { featureOpen, orderFeatureRuns, orderFeatures } from './projectModel.ts'
+import { FilterBar, type ListControl } from '../FilterBar.tsx'
+import { matchesFilter, projectScopeLine, statusCounts, type FilterItem } from '../runFilter.ts'
 import { runPathname } from '../routes.ts'
 import { AppLink } from '../panels.tsx'
 import { formatSpan } from '../time.ts'
@@ -16,9 +20,10 @@ import { stateTone } from '../tone.ts'
 import { resolveRunWorkflow, sameRepoText, syncAsOf, syncPhrase, UPDATE_TIME_NOT_RECORDED } from './derive.ts'
 import { StateGlyph, VisibilityChip } from './common.tsx'
 import { GithubColumn } from './GithubColumn.tsx'
-import { ReadingPane } from './ReadingPane.tsx'
+import { ReadingPane, type StepsRead } from './ReadingPane.tsx'
 import { AheadPane } from './AheadPane.tsx'
 import { StepChart, type ChartRun, type FeatureGroup } from './StepChart.tsx'
+import { runStepsRead } from './stops.ts'
 import type { DispatchOverview, Landing, ProjectDispatch, ProjectSteps } from './types.ts'
 
 /** What the reading pane docks for: a selected run, or the commits-ahead and landings list from the Local and GitHub card. */
@@ -33,7 +38,6 @@ type Selection = { kind: 'run'; runId: string } | { kind: 'ahead' } | null
 export type RunsState = { kind: 'loading' } | { kind: 'failed'; reason: string } | { kind: 'ready' }
 
 const ms = (iso: string) => Date.parse(iso)
-const movedOf = (entry: ChartRun) => ms(entry.run.activity?.last_activity_at ?? entry.run.updated_at)
 
 function median(values: number[]): number | null {
   if (values.length === 0) return null
@@ -48,20 +52,35 @@ type Props = {
   projectRuns: readonly WorkflowRuns[]
   runsState: RunsState
   steps: ProjectSteps | null
+  stepsRead: StepsRead
   dispatch: ProjectDispatch | null
   overview: DispatchOverview | null
   allProjects: readonly Project[]
   now: number
   zone: Zone
   onNavigate: (pathname: string) => void
+  /** The list's state from the URL (the filter bar) and its writers. */
+  list: ListControl
+  /** The operator's own feature toggles (`feature:<workflow id>`), kept in the history entry; they hold until the filter changes. */
+  folds: Readonly<Record<string, boolean>>
+  onFold: (key: string, open: boolean | null) => void
+  onClearFolds: (prefix: string) => void
 }
 
-export function ProjectPage({ project, workflows, projectRuns, runsState, steps, dispatch, overview, allProjects, now, onNavigate }: Props) {
+const FEATURE_FOLD = 'feature:'
+
+/** The project page's order in words, for its sub-header. */
+const PROJECT_ORDER = {
+  live: 'needs you and running first, then latest activity',
+  newest: 'latest activity first · runs newest created first',
+  oldest: 'earliest activity first · runs oldest created first',
+} as const
+
+export function ProjectPage({ project, workflows, projectRuns, runsState, steps, stepsRead, dispatch, overview, allProjects, now, zone, onNavigate, list, folds, onFold, onClearFolds }: Props) {
   const git = dispatch?.git ?? null
   const github = dispatch?.github ?? null
   const [selected, setSelected] = useState<Selection>(null)
-  const [query, setQuery] = useState('')
-  const filterRef = useRef<HTMLInputElement>(null)
+  const filterRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<HTMLDivElement>(null)
   const selectedRunId = selected?.kind === 'run' ? selected.runId : null
   const selectRun = useCallback((runId: string) => setSelected({ kind: 'run', runId }), [])
@@ -70,7 +89,11 @@ export function ProjectPage({ project, workflows, projectRuns, runsState, steps,
   const primaryName = git?.clone_primary && git.clone_primary !== project.project_id
     ? allProjects.find(p => p.project_id === git.clone_primary)?.name ?? git.clone_primary : null
 
-  // Join the dispatch steps with the registry run summaries per workflow, newest first.
+  // The project's one classification of its listed runs (page 1 of each workflow): every row, tone and count below reads it.
+  const classes = useMemo(() => classifyRuns(projectRuns.flatMap(w => w.runs)), [projectRuns])
+
+  // The registry run summaries per workflow, newest first, each joined with its recorded steps once the dispatch steps are
+  // read: a feature's rows and run count come from the summaries, so a pending steps read never makes it read "0 runs".
   const groups: FeatureGroup[] = useMemo(() => {
     const stepsByWorkflow = new Map((steps?.workflows ?? []).map(w => [w.workflow_id, w]))
     const runsByWorkflow = new Map(projectRuns.map(w => [w.workflow.workflow_id, w]))
@@ -78,34 +101,54 @@ export function ProjectPage({ project, workflows, projectRuns, runsState, steps,
     return workflows.map(workflow => {
       const stepsWorkflow = stepsByWorkflow.get(workflow.workflow_id) ?? null
       const registryRuns = runsByWorkflow.get(workflow.workflow_id)?.runs ?? []
-      const summaries = new Map(registryRuns.map(run => [run.run_id, run]))
-      const runs: ChartRun[] = (stepsWorkflow?.runs ?? [])
-        .map(stepsRun => { const run = summaries.get(stepsRun.run_id); return run ? { run, steps: stepsRun } : null })
-        .filter((entry): entry is ChartRun => entry !== null)
-        .sort((a, b) => movedOf(b) - movedOf(a) || a.run.run_id.localeCompare(b.run.run_id))
+      const recorded = new Map((stepsWorkflow?.runs ?? []).map(stepsRun => [stepsRun.run_id, stepsRun]))
+      // A run whose own steps entry failed (or whose workflow's steps failed) carries that error, so it never reads as absent.
+      const failed = new Map((stepsWorkflow?.errors ?? []).map(err => [err.run_id, { code: err.code, message: err.message }]))
+      const runs: ChartRun[] = orderFeatureRuns(registryRuns
+        .map(run => ({ run, cls: classOf(classes, run), steps: recorded.get(run.run_id) ?? null, stepsError: failed.get(run.run_id) ?? stepsWorkflow?.error ?? null })), list.filter.sort, classes)
       // The header tone reads the latest registry run, so it is right even where the step data is absent ([L1]).
       const latest = registryRuns.reduce<RunSummary | null>((best, run) => (best === null || ms(run.activity?.last_activity_at ?? run.updated_at) > ms(best.activity?.last_activity_at ?? best.updated_at) ? run : best), null)
-      const headTone = latest ? stateTone({ status: latest.status, attention: latest.activity?.attention?.kind ?? null, accepted: latest.accepted }) : 'idle'
-      return { workflow, steps: stepsWorkflow, runs, total: runs.length, headTone, landings }
+      const headTone = latest ? (classOf(classes, latest).needs !== null ? 'warn' : stateTone({ status: latest.status, accepted: latest.accepted })) : 'idle'
+      const listed = runsByWorkflow.get(workflow.workflow_id)
+      const runsRead = runsState.kind === 'loading' ? 'loading' as const : runsState.kind === 'failed' || (listed && listed.error !== null) ? 'failed' as const : 'read' as const
+      const rank = registryRuns.reduce((best, run) => Math.min(best, liveRank(run, classOf(classes, run))), 3)
+      const lastActivity = registryRuns.length === 0 ? null : registryRuns.reduce((max, run) => Math.max(max, lastActivityAt(run)), 0)
+      return { workflow, steps: stepsWorkflow, runs, total: runs.length, headTone, landings, runsRead, rank, lastActivity, more: listed?.more ?? false }
     })
-  }, [workflows, projectRuns, steps, git])
+  }, [workflows, projectRuns, steps, git, classes, runsState, list.filter.sort])
 
-  // A filter is active when the box holds any non-blank word; the step chart then says "0 of N runs match" for a group whose
-  // runs all filter out, never "0 runs" as if the feature never ran (V30).
-  const filtering = query.trim().length > 0
+  // The bar filters every feature's rows; a group whose runs all filter out says "0 of N runs match", never "0 runs" as if
+  // the feature never ran (V30). The phase of a run's focus step reads its recorded step's kind, else the definition's.
+  const filtering = list.active
+  const context = { now, zone }
+  const itemOf = useCallback((group: FeatureGroup, entry: ChartRun): FilterItem => ({
+    run: entry.run, cls: entry.cls,
+    kindOf: nodeId => entry.steps?.steps.find(step => step.node_id === nodeId)?.kind ?? group.workflow.nodes.find(node => node.node_id === nodeId)?.kind,
+  }), [])
+  const allItems = groups.flatMap(group => group.runs.map(entry => itemOf(group, entry)))
   const filtered: FeatureGroup[] = useMemo(() => {
-    const words = query.toLowerCase().split(/\s+/).filter(Boolean)
-    if (words.length === 0) return groups
-    return groups.map(group => ({
-      ...group,
-      runs: group.runs.filter(entry => {
-        const hay = `${entry.run.run_id} ${entry.run.activity?.feature ?? ''} ${entry.run.activity?.headline ?? ''}`.toLowerCase()
-        return words.every(word => hay.includes(word))
-      }),
-    }))
-  }, [groups, query])
+    const kept = filtering ? groups.map(group => ({ ...group, runs: group.runs.filter(entry => matchesFilter(itemOf(group, entry), list.filter, { now, zone })) })) : groups
+    return orderFeatures(kept, list.filter.sort)
+  }, [groups, filtering, list.filter, itemOf, now, zone])
+  const matched = filtered.reduce((sum, group) => sum + group.runs.length, 0)
+  // A feature whose list failed is named in the scope line, so a partly read project never reads "all loaded". Once the read
+  // is ready a group's `runsRead` is 'failed' exactly when its list carries an error, so this is the count of those groups.
+  const unreadFeatures = projectRuns.filter(w => w.error !== null).length
+  const unreadText = unreadFeatures > 0 ? `${unreadFeatures} feature${unreadFeatures === 1 ? '' : 's'} cannot be read` : null
+  const scope = projectScopeLine(runsState.kind === 'ready' ? { kind: 'ready', unread: unreadText } : runsState, matched, allItems.length, groups.some(group => group.more))
+  // The operator's own feature toggles hold until the filter changes.
+  const filterKey = JSON.stringify([list.filter.q, list.filter.status, list.filter.phase, list.filter.date])
+  const shownFilter = useRef(filterKey)
+  useEffect(() => {
+    if (shownFilter.current === filterKey) return
+    shownFilter.current = filterKey
+    onClearFolds(FEATURE_FOLD)
+  }, [filterKey, onClearFolds])
+  const isOpen = (group: FeatureGroup) => featureOpen({ rank: group.rank, unreadable: group.runsRead === 'failed' || Boolean(group.steps?.error) || (group.steps?.errors ?? []).length > 0, matches: group.runs.length }, filtering, folds[FEATURE_FOLD + group.workflow.workflow_id])
+  const toggle = (group: FeatureGroup) => onFold(FEATURE_FOLD + group.workflow.workflow_id, !isOpen(group))
 
-  const order = useMemo(() => filtered.flatMap(group => group.runs.map(entry => entry.run.run_id)), [filtered])
+  const openIds = filtered.filter(isOpen).map(group => group.workflow.workflow_id).join('\u0000')
+  const order = useMemo(() => filtered.filter(group => openIds.split('\u0000').includes(group.workflow.workflow_id)).flatMap(group => group.runs.map(entry => entry.run.run_id)), [filtered, openIds])
   const selectedEntry = useMemo(() => filtered.flatMap(g => g.runs).find(e => e.run.run_id === selectedRunId) ?? null, [filtered, selectedRunId])
   const selectedWorkflowId = useMemo(() => filtered.find(g => g.runs.some(e => e.run.run_id === selectedRunId))?.workflow.workflow_id ?? null, [filtered, selectedRunId])
 
@@ -133,22 +176,22 @@ export function ProjectPage({ project, workflows, projectRuns, runsState, steps,
       const target = event.target as HTMLElement
       const typing = target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable
       if (event.key === 'Escape') {
-        if (typing && target === filterRef.current) { setQuery(''); return }
+        if (typing && filterRef.current?.contains(target) && target.tagName === 'INPUT') { list.change({ q: '' }); return }
         if (selected) { close(); return }
       }
-      if (typing) return
-      if (event.key === '/') { event.preventDefault(); filterRef.current?.focus(); return }
+      if (typing || target.tagName === 'SELECT') return
+      if (event.key === '/') { event.preventDefault(); filterRef.current?.querySelector<HTMLInputElement>('input[type=search]')?.focus(); return }
       if (event.key === 'j') { event.preventDefault(); move(1) }
       if (event.key === 'k') { event.preventDefault(); move(-1) }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [move, close, selected])
+  }, [move, close, selected, list])
 
   const finished = projectRuns.flatMap(w => w.runs).filter(run => run.activity?.finished_at)
   const dur = (run: typeof finished[number]) => ms(run.activity!.finished_at!) - ms(run.created_at)
   const counts = {
-    waits: projectRuns.flatMap(w => w.runs).filter(run => run.activity?.attention && ['question', 'pane', 'approval'].includes(run.activity.attention.kind)).length,
+    waits: projectRuns.flatMap(w => w.runs).filter(run => classOf(classes, run).needs !== null).length,
     succeeded: finished.filter(run => !run.accepted && run.status === 'succeeded').length,
     failed: finished.filter(run => run.status === 'failed').length,
     cancelled: finished.filter(run => run.status === 'cancelled').length,
@@ -200,10 +243,10 @@ export function ProjectPage({ project, workflows, projectRuns, runsState, steps,
   // before the chart. A workflow whose run list failed contributes no runs (its `runs` is empty) but is counted as unread, so
   // the section says "N feature(s) cannot be read" and never claims a plain all-clear the data does not hold ([L10], [L12]).
   const allRuns = useMemo(() => projectRuns.flatMap(w => w.runs.map(run => ({ run, workflowId: w.workflow.workflow_id }))), [projectRuns])
-  const waitingRuns = allRuns.filter(({ run }) => waitingKind(run) !== null)
-  const runningRuns = allRuns.filter(({ run }) => run.status === 'running' && waitingKind(run) === null)
-  const unreadFeatures = projectRuns.filter(w => w.error !== null).length
-  const unreadText = unreadFeatures > 0 ? `${unreadFeatures} feature${unreadFeatures === 1 ? '' : 's'} cannot be read` : null
+  // The recorded Claude spend, once the overview is read; nothing before, or when this server sends none.
+  const spendText = spendFigure(overview === null ? null : overviewMap.get(project.project_id)?.spend)
+  const waitingRuns = allRuns.filter(({ run }) => classOf(classes, run).needs !== null)
+  const runningRuns = allRuns.filter(({ run }) => run.status === 'running' && classOf(classes, run).needs === null)
 
   return (
     <div className={`dispatch-project ${selected ? 'has-pane' : ''}`} data-testid="dispatch-project">
@@ -221,15 +264,17 @@ export function ProjectPage({ project, workflows, projectRuns, runsState, steps,
             : <> · {UPDATE_TIME_NOT_RECORDED}</>)}</span>}
           {sameRepo && <span data-testid="dispatch-same-repo"> · {sameRepo}</span>}
         </p>
-        {(finished.length > 0 || counts.waits > 0) && (
+        {(finished.length > 0 || counts.waits > 0 || spendText !== null) && (
           <p className="dispatch-figs" data-testid="dispatch-figures">
-            {counts.waits > 0 && <span className="dispatch-fig tone-warn"><StateGlyph tone="warn" /><b>{counts.waits}</b> {counts.waits === 1 ? 'waits' : 'wait'} on you</span>}
-            <span className="dispatch-fig tone-ok"><StateGlyph tone="ok" /><b>{counts.succeeded}</b> succeeded</span>
-            <span className="dispatch-fig tone-fail"><StateGlyph tone="fail" /><b>{counts.failed}</b> failed</span>
-            <span className="dispatch-fig tone-idle"><StateGlyph tone="idle" /><b>{counts.cancelled}</b> cancelled</span>
-            <span className="dispatch-fig q">{medOk !== null ? <>median <b>{formatSpan(medOk)}</b> to land</> : 'nothing landed'}</span>
-            {medStop !== null && <span className="dispatch-fig q">median <b>{formatSpan(medStop)}</b> before a stop</span>}
-            <span className="dispatch-fig q">spend not recorded</span>
+            {(finished.length > 0 || counts.waits > 0) && <>
+              {counts.waits > 0 && <span className="dispatch-fig tone-warn"><StateGlyph tone="warn" /><b>{counts.waits}</b> {counts.waits === 1 ? 'waits' : 'wait'} on you</span>}
+              <span className="dispatch-fig tone-ok"><StateGlyph tone="ok" /><b>{counts.succeeded}</b> succeeded</span>
+              <span className="dispatch-fig tone-fail"><StateGlyph tone="fail" /><b>{counts.failed}</b> failed</span>
+              <span className="dispatch-fig tone-idle"><StateGlyph tone="idle" /><b>{counts.cancelled}</b> cancelled</span>
+              <span className="dispatch-fig q">{medOk !== null ? <>median <b>{formatSpan(medOk)}</b> to land</> : 'nothing landed'}</span>
+              {medStop !== null && <span className="dispatch-fig q">median <b>{formatSpan(medStop)}</b> before a stop</span>}
+            </>}
+            {spendText !== null && <span className="dispatch-fig q" data-testid="dispatch-spend">{spendText}</span>}
           </p>
         )}
         <nav className="dispatch-jump" aria-label="On this page">
@@ -238,15 +283,20 @@ export function ProjectPage({ project, workflows, projectRuns, runsState, steps,
           {openPrs !== null && <button type="button" onClick={jump('g-prs')}>Pull requests · {openPrs} open</button>}
           {openIssues !== null && <button type="button" onClick={jump('g-iss')}>Issues · {openIssues} open</button>}
         </nav>
-        <div className="dispatch-filter">
-          <label htmlFor="dispatch-filter" className="visually-hidden">Filter this project's runs</label>
-          <input id="dispatch-filter" ref={filterRef} type="search" autoComplete="off" placeholder="Filter this project's runs" value={query} onChange={e => setQuery(e.target.value)} />
+        <div className="dispatch-filter" ref={filterRef}>
+          <FilterBar kind="project" state={list.filter} counts={statusCounts(allItems, list.filter, context)} scope={scope} active={filtering}
+            onChange={(next, options) => list.change(next, options)} onCommit={list.flush} onClear={list.clear} />
         </div>
       </header>
+      {github?.status === 'not_github' && (
+        <GithubColumn compact project={project} git={git} github={github} runBranches={runBranches} others={others} primaryName={primaryName}
+          viewerLogin={overview?.viewer_login ?? null} readAt={overview ? ms(overview.read_at) : now}
+          onShowAhead={() => setSelected({ kind: 'ahead' })} aheadOpen={selected?.kind === 'ahead'} onNavigate={onNavigate} />
+      )}
       {/* The body is wrapped so its own width drives the chart/GitHub column count via a container query (V23): a container
           query cannot style the container itself, so the inner `.dispatch-project-body` grid is queried against this wrapper. */}
       <div className="dispatch-body-container">
-      <div className="dispatch-project-body">
+      <div className={`dispatch-project-body${github?.status === 'not_github' ? ' dispatch-project-body-wide' : ''}`}>
         <div className="dispatch-project-main">
           <section className="dispatch-needs" aria-label="Needs you and running" data-testid="dispatch-needs">
             <h2 className="dispatch-needs-h">Needs you and running</h2>
@@ -266,7 +316,7 @@ export function ProjectPage({ project, workflows, projectRuns, runsState, steps,
                               <li key={run.run_id} className="tone-warn">
                                 <StateGlyph tone="warn" />
                                 <AppLink href={runPathname(project.project_id, workflowId, run.run_id)} onNavigate={onNavigate}><code>{run.run_id}</code></AppLink>
-                                <span className="dispatch-muted">waits on you{run.activity?.feature ? ` · ${run.activity.feature}` : ''}</span>
+                                <span className="dispatch-muted">{classOf(classes, run).needs === 'decision' ? 'decision waits on you' : classOf(classes, run).needs === 'interrupted' ? 'interrupted; waits on you' : 'waits on you'}{run.activity?.feature ? ` · ${run.activity.feature}` : ''}</span>
                               </li>
                             ))}
                             {runningRuns.map(({ run, workflowId }) => (
@@ -283,16 +333,20 @@ export function ProjectPage({ project, workflows, projectRuns, runsState, steps,
                   )}
           </section>
           <section id="dispatch-runs-section" aria-label="Runs by feature" tabIndex={-1} ref={chartRef}>
-            <StepChart projectId={project.project_id} defaultBranch={git?.default_branch ?? null} groups={filtered} filtering={filtering} selectedRunId={selectedRunId} onSelect={selectRun} onNavigate={onNavigate} />
+            <StepChart projectId={project.project_id} defaultBranch={git?.default_branch ?? null} groups={filtered} filtering={filtering} stepsRead={stepsRead} selectedRunId={selectedRunId} onSelect={selectRun} onNavigate={onNavigate}
+              isOpen={isOpen} onToggle={toggle} now={now} zone={zone}
+              order={`${filtered.length} ${filtered.length === 1 ? 'feature' : 'features'} · ${PROJECT_ORDER[list.filter.sort]}`} />
           </section>
         </div>
-        <GithubColumn project={project} git={git} github={github} runBranches={runBranches} others={others} primaryName={primaryName}
-          viewerLogin={overview?.viewer_login ?? null} readAt={overview ? ms(overview.read_at) : now}
-          onShowAhead={() => setSelected({ kind: 'ahead' })} aheadOpen={selected?.kind === 'ahead'} onNavigate={onNavigate} />
+        {github?.status !== 'not_github' && (
+          <GithubColumn project={project} git={git} github={github} runBranches={runBranches} others={others} primaryName={primaryName}
+            viewerLogin={overview?.viewer_login ?? null} readAt={overview ? ms(overview.read_at) : now}
+            onShowAhead={() => setSelected({ kind: 'ahead' })} aheadOpen={selected?.kind === 'ahead'} onNavigate={onNavigate} />
+        )}
       </div>
       </div>
       {selected?.kind === 'run' && selectedEntry && selectedWorkflowId && (
-        <ReadingPane key={selectedEntry.run.run_id} run={selectedEntry.run} steps={selectedEntry.steps} projectId={project.project_id} workflowId={selectedWorkflowId}
+        <ReadingPane key={selectedEntry.run.run_id} run={selectedEntry.run} cls={selectedEntry.cls} steps={selectedEntry.steps} stepsRead={runStepsRead(selectedEntry, stepsRead)} stepsError={selectedEntry.stepsError ?? null} projectId={project.project_id} workflowId={selectedWorkflowId}
           onClose={close} onNavigate={onNavigate} phone={typeof window !== 'undefined' && window.innerWidth <= 480}
           onNext={() => move(1)} />
       )}

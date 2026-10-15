@@ -1,7 +1,7 @@
 import { useCallback, useMemo, type ReactNode } from 'react'
 import { attemptResultUris, type Now, type Timeline } from '../../contracts/projects/triage.ts'
-import { fetchReviewResult, paths, scopedResultPath, scopedReviewPath, type AttackResult, type PanelResults, type RunDetail, type RunInputs, type RunScope, type Sessions, type SidecarLedger, type WorkerResult, type WorkflowEvent } from './api.ts'
-import { decisionsForNode, isProjectedSessionNode, laneReviewerRowsOf, laneReviewOf, sessionsForNode } from './sessions/model.ts'
+import { fetchReviewResult, isBlockingFinding, paths, scopedResultPath, scopedReviewPath, type AttackResult, type PanelResults, type RunDetail, type RunInputs, type RunScope, type Sessions, type SidecarLedger, type WorkerResult, type WorkflowEvent } from './api.ts'
+import { decisionsForNode, isProjectedSessionNode, laneReviewerRowsOf, laneReviewOf, reviewerRowOf, sessionsForNode } from './sessions/model.ts'
 import { LaneReviewBody, NightShiftBlock, PanelSessions, ReviewerNodeBody, SessionBlock } from './sessions/Sessions.tsx'
 import { ReviewerFindings } from './ReviewDetail.tsx'
 import { ChallengeHeadline } from './Challenge.tsx'
@@ -10,7 +10,7 @@ import { AttackPassBody } from './node/AttackSections.tsx'
 import { ChallengeSections } from './node/ChallengeSections.tsx'
 import { AwaitingNotice, ControllerSections } from './node/ControllerSections.tsx'
 import { launchSectionEntries } from './node/launch.ts'
-import { attemptStrip, causeOf, nodeTiming, resultRole, revisionAttempt, verifiedSections, type SectionEntry } from './node/model.ts'
+import { attemptStrip, causeOf, nodeTiming, resultRole, reviewerLead, revisionAttempt, verifiedSections, type SectionEntry, type VerdictLead } from './node/model.ts'
 import { challengeSectionEntries, reviewSectionEntries } from './node/panels.ts'
 import { panelsAtStage } from './node/providerPanel.ts'
 import { ReviewSections } from './node/ReviewSections.tsx'
@@ -74,8 +74,8 @@ type Props = {
 }
 
 /**
- * A launch node's figures (docs/PRD_VIEWER_REVAMP.md 5.4): the files its freeze lists, its completion file's state and its
- * questions to the operator, a waiting one in the needs-you tone. Nothing is claimed that the run's records do not hold.
+ * A launch node's figures (docs/PRD_VIEWER_REVAMP.md 5.4): the files its freeze lists and its questions to the operator, a
+ * waiting one in the needs-you tone. Figures are numbers; the completion's state is a chip on the worker's report heading. Nothing is claimed that the run's records do not hold.
  */
 function WorkerFigures({ worker, files }: { worker: RunInputs['workers'][number] | null; files: number | null }) {
   const waiting = worker?.questions.filter(question => question.answer === null).length ?? 0
@@ -86,7 +86,6 @@ function WorkerFigures({ worker, files }: { worker: RunInputs['workers'][number]
       data-testid="worker-figures"
       items={[
         { testId: 'figure-files', value: files ?? '—', label: files === null ? 'Files (not frozen yet)' : 'Files changed' },
-        { testId: 'figure-completion', value: worker === null ? '—' : worker.completion?.status ?? 'none yet', label: 'Completion', tone: worker?.completion?.status === 'completed' ? 'ok' : worker?.completion?.status === 'blocked' ? 'fail' : undefined },
         { testId: 'figure-questions', value: waiting > 0 ? `${waiting} waiting` : asked, label: waiting > 0 ? `Questions (${asked} asked)` : 'Questions', tone: waiting > 0 ? 'warn' : undefined },
       ]}
     />
@@ -203,6 +202,26 @@ export function NodeDetail({ scope, detail, definition, node, attempt, events, o
   const repairLabel = repairs.length ? `repair ${repairs.map(marker => marker.repair?.n ?? '').filter(n => n !== '').join(', ')}`.trim() : ''
   const repairNote = repairLabel ? `after operator ${repairLabel}` : ''
 
+  // A reviewer (the review step, a projected reviewer node) leads with its verdict; the session's outcome is metadata beside it.
+  const verdict: { lead: VerdictLead; outcome: string | null } | null = (() => {
+    if (!isLatest) return null
+    if (projectedReviewer !== null) {
+      if (sessions.status === 'loading' || sessions.status === 'idle') return { lead: { text: 'Reading the verdict…', tone: 'idle', verdict: null }, outcome: null }
+      const row = sessionsData === null ? null : reviewerRowOf(sessionsData, node.node_id)
+      return { lead: reviewerLead(row && { verdict: row.verdict, round: row.round, open: row.findings, status: row.status }), outcome: row ? `session ${row.status}` : null }
+    }
+    if (!isReview) return null
+    const outcome = node.status === 'failed' ? 'This step failed' : `step ${node.status.replace(/_/g, ' ')}`
+    if (reviewData !== null) {
+      const blockers = reviewData.findings.filter(isBlockingFinding)
+      return { lead: reviewerLead({ verdict: reviewData.verdict, round: reviewData.round ?? null, open: { p0: blockers.filter(item => item.severity === 'P0').length, p1: blockers.filter(item => item.severity === 'P1').length }, status: null }), outcome }
+    }
+    if (node.status === 'running') return { lead: reviewerLead({ verdict: null, round: null, open: null, status: 'running' }), outcome }
+    if (node.status === 'pending' || node.status === 'awaiting_approval' || node.status === 'paused') return null
+    if (review.status === 'loading' || review.status === 'idle') return { lead: { text: 'Reading the verdict…', tone: 'idle', verdict: null }, outcome: null }
+    return { lead: reviewerLead(null), outcome }
+  })()
+
   const timing = timeline && recorded ? nodeTiming(timeline, node.node_id, isLatest ? null : attempt, isVerify ? resultData : null) : null
   const headerStatus = isLatest ? node.status : viewedChip?.status ?? resultData?.status ?? 'pending'
   const cause = causeOf({
@@ -276,6 +295,7 @@ export function NodeDetail({ scope, detail, definition, node, attempt, events, o
         strip={strip}
         loaded={loaded}
         attemptHref={attemptHref}
+        verdict={verdict}
         next={next}
         onNavigate={onNavigate}
       />

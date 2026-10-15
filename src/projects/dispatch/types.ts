@@ -21,6 +21,15 @@ export interface ProjectDispatch {
   project_id: string
   git: GitState
   github: GithubState
+  /** The Claude spend its runs' exports record; null only when the project's workflow list cannot be read, absent from older servers. */
+  spend?: ProjectSpend | null
+}
+
+/** A project's recorded Claude spend over every run of its readable workflows (`contracts/projects/dispatch.ts`). */
+export interface ProjectSpend {
+  claude_usd: number | null
+  priced_runs: number
+  runs: number
 }
 
 export interface GitOrigin {

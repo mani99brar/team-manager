@@ -13,7 +13,8 @@ import { buildTimeline, deriveAttention, deriveNow, type RunData } from '../../c
 import { stepRows } from '../../src/projects/steps.ts'
 import { formatSpan } from '../../src/projects/time.ts'
 import { REFINE_EXAMPLES } from '../project-workflows/fixtures/ux-refine.ts'
-import { elbow, GAP_ALONG, layoutStage, NODE_HEIGHT, NODE_WIDTH, orderColumns, stepFrom, type StageInput } from '../../src/projects/signal/layout.ts'
+import { dockReserve, DOCK_COLUMN_FRAME, DOCK_RESERVE, elbow, fitView, GAP_ALONG, layoutStage, NODE_HEIGHT, NODE_WIDTH, orderColumns, stepFrom, type StageInput, type View } from '../../src/projects/signal/layout.ts'
+import { dockWords, type DockWordsInput } from '../../src/projects/signal/dockWords.ts'
 import { factsOf, laneOf, latestEvents, nowNodeId, stageNodes, wordOf, type StageNode } from '../../src/projects/signal/model.ts'
 
 function loadRun(name: string): RunData {
@@ -242,5 +243,161 @@ describe('words and facts', () => {
     assert.equal(factsOf({ ...base, tone: 'fail', word: 'failed', attempt: 2 }, formatSpan), 'failed · #2')
     assert.equal(factsOf({ ...base, attention: { kind: 'question', node_id: 'launch_ui', lane: 'ui', since: null, detail: '' } }, formatSpan), 'question waiting')
     assert.equal(factsOf({ ...base, lane: null, ms: null }, formatSpan), 'succeeded')
+  })
+})
+
+
+// ---- The first view of the stage (fitView) ------------------------------------------------------------------------------
+
+const GUARDED = ['challenge', 'launch_ui', 'handoff', 'verify_ui', 'candidate', 'review', 'approval', 'integrate']
+const chain = (ids: readonly string[]): StageInput[] => ids.map((id, index) => ({ id, dep: index === 0 ? [] : [ids[index - 1]!] }))
+const guarded = layoutStage(chain(GUARDED), { dir: 'LR' })
+const small = layoutStage(chain(['a', 'b']), { dir: 'LR' })
+
+type Box = { left: number; right: number; top: number; bottom: number }
+const cardOf = (view: View, layout: typeof guarded, id: string): Box => {
+  const position = layout.positions.get(id)!
+  return { left: position.x * view.k + view.x, top: position.y * view.k + view.y, right: (position.x + NODE_WIDTH) * view.k + view.x, bottom: (position.y + NODE_HEIGHT) * view.k + view.y }
+}
+const inside = (box: Box, width: number, height: number, reserved: number) => box.left >= reserved && box.right <= width && box.top >= 0 && box.bottom <= height
+const fitOf = (layout: typeof guarded, width: number, height: number, reserved: number, first: boolean, anchorId: string | null) => {
+  const anchor = anchorId === null ? null : layout.positions.get(anchorId)!
+  return fitView({ width, height, graph: layout, dir: 'LR', reserved, first, anchor: anchor && { x: anchor.x, y: anchor.y } })
+}
+
+describe('fitView: the first view of the stage', () => {
+  test('the first view of the eight-column graph is never below 60 % and the whole graph\'s fit is, so the step the run is at is placed', () => {
+    for (const [width, height] of [[900, 780], [1060, 780]] as const) {
+      const whole = fitOf(guarded, width, height, 0, false, 'review')
+      assert.ok(whole.k < 0.6, `the overview is under 60 % at ${width}`)
+      const first = fitOf(guarded, width, height, 0, true, 'review')
+      assert.equal(first.k, 0.6)
+      assert.ok(inside(cardOf(first, guarded, 'review'), width, height, 0), 'the card of the step the run is at lies wholly inside the stage')
+    }
+  })
+
+  test('the step the run is at stays right of an overlaying dock\'s reserve, wherever it sits', () => {
+    for (const id of GUARDED) {
+      const view = fitOf(guarded, 620 + DOCK_RESERVE, 700, DOCK_RESERVE, true, id)
+      assert.equal(view.k, 0.6)
+      assert.ok(inside(cardOf(view, guarded, id), 620 + DOCK_RESERVE, 700, DOCK_RESERVE), `${id} is clear of the dock`)
+    }
+  })
+
+  test('the first column stays in view when it and the step the run is at both fit', () => {
+    const view = fitOf(guarded, 900, 780, 0, true, 'launch_ui')
+    assert.ok(cardOf(view, guarded, 'challenge').left >= 0)
+    assert.ok(inside(cardOf(view, guarded, 'launch_ui'), 900, 780, 0))
+    const far = fitOf(guarded, 900, 780, 0, true, 'integrate')
+    assert.ok(inside(cardOf(far, guarded, 'integrate'), 900, 780, 0), 'the last step wins over the first column when both cannot fit')
+  })
+
+  test('without a step the run is at the first step is the anchor, and a finished run anchors there too', () => {
+    const view = fitOf(guarded, 900, 780, 0, true, 'challenge')
+    assert.ok(inside(cardOf(view, guarded, 'challenge'), 900, 780, 0))
+    assert.ok(cardOf(view, guarded, 'challenge').left >= 0)
+    const none = fitView({ width: 900, height: 780, graph: guarded, dir: 'LR', reserved: 0, first: true, anchor: null })
+    assert.equal(none.k, 0.6)
+  })
+
+  test('a small graph opens at its whole fit, capped at 140 %, and centred', () => {
+    const view = fitOf(small, 1400, 900, 0, true, 'a')
+    assert.equal(view.k, 1.4)
+    assert.deepEqual(view, fitOf(small, 1400, 900, 0, false, 'a'))
+    const mid = fitOf(small, 700, 600, 0, true, 'a')
+    assert.ok(mid.k > 0.6 && mid.k < 1.4)
+    assert.ok(Math.abs(mid.x * 2 + small.width * mid.k - 700) < 1e-6, 'centred across')
+  })
+
+  test('"Fit the graph" shows the whole graph at any scale down to 15 %, in the stage beside the reserve', () => {
+    const tight = fitOf(guarded, 620 + DOCK_RESERVE, 700, DOCK_RESERVE, false, 'review')
+    assert.ok(tight.k < 0.6 && tight.k >= 0.15)
+    for (const id of GUARDED) assert.ok(inside(cardOf(tight, guarded, id), 620 + DOCK_RESERVE, 700, DOCK_RESERVE), `${id} is in the viewport`)
+    const huge = layoutStage(chain(Array.from({ length: 30 }, (_, index) => `s${index}`)), { dir: 'LR' })
+    assert.equal(fitOf(huge, 800, 600, 0, false, 's0').k, 0.15)
+  })
+
+  test('a phone\'s top-to-bottom flow keeps its own fit', () => {
+    const column = layoutStage(chain(GUARDED), { dir: 'TB' })
+    const view = fitView({ width: 390, height: 700, graph: column, dir: 'TB', reserved: 336, first: true, anchor: { x: 0, y: 0 } })
+    assert.equal(view.y, 40)
+    assert.ok(view.k <= 1)
+    assert.ok(Math.abs(view.x * 2 + column.width * view.k - 390) < 1e-6)
+  })
+
+  test('the dock reserves nothing from a 1200 px frame and 336 px below it while open; the frame width is the input', () => {
+    assert.equal(DOCK_COLUMN_FRAME, 1200)
+    assert.equal(dockReserve(1200, true), 0)
+    assert.equal(dockReserve(1212, true), 0)
+    assert.equal(dockReserve(1199, true), DOCK_RESERVE)
+    assert.equal(dockReserve(956, true), 336)
+    assert.equal(dockReserve(956, false), 0)
+    assert.equal(dockReserve(1440, false), 0)
+  })
+
+  test('a changed stage width, a changed graph shape or a mount each place the view again from the same inputs', () => {
+    const wide = fitOf(guarded, 1060, 780, 0, true, 'review')
+    const narrow = fitOf(guarded, 900, 780, 0, true, 'review')
+    assert.notDeepEqual(wide, narrow)
+    assert.deepEqual(fitOf(guarded, 900, 780, 0, true, 'review'), narrow)
+    const reshaped = layoutStage(chain([...GUARDED, 'extra']), { dir: 'LR' })
+    assert.notDeepEqual(fitOf(reshaped, 900, 780, 0, true, 'extra'), fitOf(guarded, 900, 780, 0, true, 'integrate'))
+  })
+})
+
+// ---- The dock bar's words (dockWords) -----------------------------------------------------------------------------------
+
+describe('dockWords: when a run stopped or ended', () => {
+  const CLOCK = Date.parse('2026-10-14T12:00:00Z')
+  const base: DockWordsInput = {
+    status: 'running', accepted: false, interrupted: false, stoppedSince: null, runningSince: '2026-10-14T11:18:45Z',
+    end: null, created: '2026-10-14T10:00:00Z', clock: CLOCK, zone: 'utc',
+  }
+  const words = (patch: Partial<DockWordsInput>) => dockWords({ ...base, ...patch })
+
+  test('a running run says how long the step has run', () => {
+    assert.deepEqual(words({}), { word: null, since: 'for 41m15s' })
+    assert.deepEqual(words({ runningSince: null }), { word: null, since: null })
+  })
+
+  test('a paused run says days since it stopped, and "today" under a day', () => {
+    assert.deepEqual(words({ status: 'paused', stoppedSince: '2026-10-02T09:00:00Z' }), { word: 'paused', since: '12 d (since Oct 2)' })
+    assert.deepEqual(words({ status: 'paused', stoppedSince: '2026-10-14T08:00:00Z' }), { word: 'paused', since: 'today (since Oct 14)' })
+    assert.deepEqual(words({ status: 'paused', stoppedSince: null }), { word: 'paused', since: null })
+  })
+
+  test('an interrupted run, paused or running, says it in the same words', () => {
+    for (const status of ['paused', 'running'] as const) {
+      assert.deepEqual(words({ status, interrupted: true, stoppedSince: '2026-10-09T09:00:00Z' }), { word: 'interrupted', since: '5 d (since Oct 9)' })
+    }
+  })
+
+  test('a finished run says how long ago it ended and how long it ran', () => {
+    const end = '2026-10-10T11:05:00Z'
+    const created = '2026-10-10T10:00:00Z'
+    assert.deepEqual(words({ status: 'failed', end, created }), { word: 'failed', since: '4 d ago · ran 1h05m' })
+    assert.deepEqual(words({ status: 'cancelled', end, created }), { word: 'cancelled', since: '4 d ago · ran 1h05m' })
+    assert.deepEqual(words({ status: 'succeeded', end: '2026-10-14T11:05:00Z', created: '2026-10-14T10:00:00Z' }), { word: 'integrated', since: '55 min ago · ran 1h05m' })
+  })
+
+  test('a failed run served with interrupted attention reads the finished words', () => {
+    assert.deepEqual(words({ status: 'failed', interrupted: true, stoppedSince: '2026-10-09T09:00:00Z', end: '2026-10-10T11:05:00Z', created: '2026-10-10T10:00:00Z' }), { word: 'failed', since: '4 d ago · ran 1h05m' })
+  })
+
+  test('an accepted run keeps its override word and adds only the age and the span', () => {
+    const accepted = words({ status: 'succeeded', accepted: true, end: '2026-10-13T11:05:00Z', created: '2026-10-13T10:00:00Z' })
+    assert.deepEqual(accepted, { word: null, since: '1 d ago · ran 1h05m' })
+    assert.ok(!JSON.stringify(accepted).includes('succeeded'))
+    assert.ok(!JSON.stringify(accepted).includes('integrated'))
+  })
+
+  test('a finished run with no recorded end says no age and no span', () => {
+    assert.deepEqual(words({ status: 'failed', end: null }), { word: 'failed', since: null })
+    assert.deepEqual(words({ status: 'succeeded', accepted: true, end: null }), { word: null, since: null })
+  })
+
+  test('a span of two days or more reads in days and hours, never as hours and minutes of three digits', () => {
+    const since = words({ status: 'failed', end: '2026-10-13T11:05:00Z', created: '2026-10-09T10:00:00Z' }).since!
+    assert.doesNotMatch(since, /\d{3,}h\d{2}m/)
   })
 })

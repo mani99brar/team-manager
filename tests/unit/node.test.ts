@@ -11,7 +11,8 @@ import { readFileSync } from 'node:fs'
 import { validateReviewResult, validateRunDetail, validateRunInputs } from '../../contracts/projects/v1.ts'
 import { eventSchema, validateWorkerResult } from '../../contracts/workflow/v1.ts'
 import { buildTimeline, type RunData } from '../../contracts/projects/triage.ts'
-import { attemptStrip, attemptWord, causeOf, nodeTiming, resultRole, revisionAttempt, type StripItem } from '../../src/projects/node/model.ts'
+import { attemptStrip, attemptWord, causeOf, nodeTiming, resultRole, reviewerLead, revisionAttempt, type StripItem } from '../../src/projects/node/model.ts'
+import { splitFirstSentence } from '../../src/projects/findings.ts'
 import { formatSpan } from '../../src/projects/time.ts'
 
 function loadRun(name: string): RunData {
@@ -152,5 +153,40 @@ describe('resultRole: dedup by result_uri', () => {
     const detail = structuredClone(skeleton.detail)
     detail.snapshot.nodes.find(node => node.node_id === 'launch_game')!.result_uri = null
     assert.deepEqual(resultRole(detail, 'verify_game'), { facts: true, narrative: true, partner: null })
+  })
+})
+
+describe('reviewerLead: a reviewer\'s node page leads with its verdict, by value', () => {
+  test('blocked with open P1s, with P0s, late blocked, approved', () => {
+    assert.deepEqual(reviewerLead({ verdict: 'blocked', round: 2, open: { p0: 0, p1: 4 }, status: 'succeeded' }), { text: 'Blocked · round 2 · 4 open P1', tone: 'fail', verdict: 'blocked' })
+    assert.equal(reviewerLead({ verdict: 'blocked', round: 3, open: { p0: 1, p1: 2 }, status: 'succeeded' }).text, 'Blocked · round 3 · 1 open P0, 2 open P1')
+    assert.equal(reviewerLead({ verdict: 'blocked', round: null, open: { p0: 0, p1: 0 }, status: 'succeeded' }).text, 'Blocked')
+    assert.deepEqual(reviewerLead({ verdict: 'late blocked', round: 1, open: { p0: 0, p1: 1 }, status: 'succeeded' }), { text: 'Late, blocked · round 1 · 1 open P1', tone: 'fail', verdict: 'blocked' })
+    assert.deepEqual(reviewerLead({ verdict: 'approved', round: 1, open: { p0: 0, p1: 0 }, status: 'succeeded' }), { text: 'Approved · round 1', tone: 'ok', verdict: 'approved' })
+  })
+  test('still running, failed session, stopped session and no record at all', () => {
+    assert.deepEqual(reviewerLead({ verdict: null, round: 2, open: null, status: 'running' }), { text: 'No verdict yet', tone: 'run', verdict: null })
+    assert.deepEqual(reviewerLead({ verdict: null, round: 2, open: null, status: 'failed' }), { text: 'No verdict · the session failed', tone: 'fail', verdict: null })
+    assert.equal(reviewerLead({ verdict: null, round: 2, open: null, status: 'stopped' }).text, 'No verdict · the session was stopped')
+    assert.deepEqual(reviewerLead(null), { text: 'No verdict recorded', tone: 'idle', verdict: null })
+  })
+  test('no lead ever reads like a step that merely completed', () => {
+    for (const verdict of ['blocked', 'late blocked', 'approved', null]) for (const status of ['running', 'succeeded', 'failed', 'stopped', 'unknown'] as const) {
+      assert.doesNotMatch(reviewerLead({ verdict, round: 1, open: { p0: 0, p1: 1 }, status }).text, /completed/)
+    }
+  })
+})
+
+describe('splitFirstSentence: the card head is the first sentence, the rest folds', () => {
+  test('splits at the first sentence end and keeps the whole message', () => {
+    const message = 'The route answers 500 for a malformed file. The totals line also sums covered dollars.'
+    assert.deepEqual(splitFirstSentence(message), { lead: 'The route answers 500 for a malformed file.', rest: ' The totals line also sums covered dollars.' })
+    assert.equal(splitFirstSentence(message).lead + splitFirstSentence(message).rest, message)
+  })
+  test('one sentence has no rest; an abbreviation does not end the sentence', () => {
+    assert.deepEqual(splitFirstSentence('No test proves the rule.'), { lead: 'No test proves the rule.', rest: '' })
+    assert.deepEqual(splitFirstSentence('No test proves it'), { lead: 'No test proves it', rest: '' })
+    assert.equal(splitFirstSentence('Use a tag, e.g. the id. Then it works.').lead, 'Use a tag, e.g. the id.')
+    assert.equal(splitFirstSentence('Is it set? Yes it is.').lead, 'Is it set?')
   })
 })

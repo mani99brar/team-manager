@@ -9,6 +9,7 @@ import { COMMAND_CAPTION } from '../../contracts/projects/triage.ts'
 import { TOKEN_KEY } from '../../src/projects/controls/types.ts'
 import {
   CONTROLS_TOKEN, CONTROLS_WORKFLOW_ID, RUN_APPROVAL, RUN_FINISHED, RUN_QUESTION, RUN_REFUSE, RUN_REPAIR, RUN_RUNNING, RUN_STOPPED, WAITING_QUESTION,
+  OLDER_CONTROLLER_REASONS, RELAUNCH_ALLOWED, RELAUNCH_REFUSED, RUN_RELAUNCH, RUN_RELAUNCH_REFUSE, RUN_RETRY_ALL,
 } from './fixtures/controls.ts'
 import { installControlMocks, installProjectMocks } from './mock.ts'
 import { attach, installHooks, phase, runUrl } from './support.ts'
@@ -169,9 +170,11 @@ test(`[scenario:controls-restart] Run beside Copy restarts a stopped supervisor 
 })
 
 test(`[scenario:controls-unavailable] The Controls list greys what is unavailable with the server's reason; Pause says the workers keep running (${phase})`, async ({ page }, testInfo) => {
+  // Sixteen fresh page loads (four widths x four runs) do not fit the default 30 s on a 4-core host.
+  test.slow()
   await open(page, RUN_RUNNING)
   await openControls(page)
-  await expect(page.locator('[data-testid="controls-list"] > li')).toHaveCount(12)
+  await expect(page.locator('[data-testid="controls-list"] > li')).toHaveCount(14)
   await expect(page.getByTestId('control-pause')).toHaveAttribute('data-available', 'true')
   await expect(page.getByTestId('control-pause')).toContainText('workers keep running')
   for (const id of ['restart', 'retry', 'reconcile', 'abandon', 'clean']) {
@@ -350,4 +353,87 @@ test(`[scenario:controls-phone] At 390 px the Controls list is a bottom sheet an
   expect(frame.y + frame.height).toBeLessThanOrEqual(845)
   expect(await page.getByTestId('dialog-command').evaluate(element => element.scrollWidth <= element.clientWidth + 1), 'the command wraps').toBe(true)
   expect(await noSideways(page)).toBe(true)
+})
+
+test(`[scenario:controls-recovery] Retry all failed checks reruns both failed lanes through the controller; Relaunch a lane shows the dry run's verdict before Confirm (${phase})`, async ({ page }, testInfo) => {
+  test.slow()
+  await page.setViewportSize({ width: 1440, height: 900 })
+  const requests = watch(page)
+  // Two worker lanes failed their checks: Retry all is offered, names the controller's command, and records its lines.
+  await open(page, RUN_RETRY_ALL)
+  await openControls(page)
+  await expect(page.locator('[data-testid="controls-list"] > li')).toHaveCount(14)
+  await expect(page.getByTestId('control-retry_all')).toHaveAttribute('data-available', 'true')
+  await expect(page.getByTestId('control-retry_all')).toContainText('Retry all failed checks')
+  await page.getByTestId('control-retry_all-button').click()
+  await expect(dialog(page)).toHaveAttribute('data-control', 'retry_all')
+  await expect(page.getByTestId('dialog-command')).toContainText('retry "$RUN" --phase worker --all-failed --by operator')
+  await expect(page.getByTestId('dialog-effect')).toContainText('Restart supervisor')
+  await confirmButton(page).click()
+  const row = page.getByTestId('controls-row')
+  await expect(row).toContainText('Retry all failed checks')
+  await expect(row).toHaveAttribute('data-status', 'succeeded', { timeout: 15_000 })
+  await expect(row.getByTestId('control-log')).toContainText('worker/ui will run attempt 2')
+  await expect(row.getByTestId('control-log')).toContainText('worker/adapter will run attempt 2')
+  expect(posts(requests, '/retry_all')).toHaveLength(1)
+  expect(posts(requests)).toHaveLength(1)
+
+  // One failed lane: unavailable, with the reason.
+  await open(page, RUN_REPAIR)
+  await openControls(page)
+  await expect(page.locator('[data-testid="controls-list"] > li')).toHaveCount(14)
+  await expect(page.getByTestId('control-retry_all')).toHaveAttribute('data-available', 'false')
+  await expect(page.getByTestId('control-retry_all').getByTestId('control-reason')).toHaveText('Fewer than two worker checks failed')
+  await page.keyboard.press('Escape')
+
+  // A lane launch that needs reconciliation and left no live session: Relaunch a lane, ui its only choice, the dry run first.
+  await open(page, RUN_RELAUNCH)
+  await chooseControl(page, 'relaunch')
+  await expect(page.getByTestId('param-lane').locator('option')).toHaveText(['ui'])
+  await expect(page.getByTestId('relaunch-preview-line')).toHaveText(RELAUNCH_ALLOWED, { timeout: 15_000 })
+  await expect(confirmButton(page)).toBeEnabled()
+  await expect(page.getByTestId('dialog-effect')).toContainText('Reconcile launches and then Restart supervisor')
+  await attach(page, testInfo, 'controls-recovery')
+  const previews = posts(requests, '/relaunch-preview').length
+  expect(previews).toBeGreaterThanOrEqual(1)
+  await confirmButton(page).click()
+  await expect(row).toContainText('Relaunch a lane')
+  await expect(row).toHaveAttribute('data-status', 'succeeded', { timeout: 15_000 })
+  const log = row.getByTestId('control-log')
+  await expect(log).toContainText('Relaunched ui once')
+  await expect(log).toContainText('Continue the run with:')
+  await expect(log).toContainText(/-m workflow reconcile \S+ --by operator/)
+  await expect(log).toContainText(/-m workflow automatic \S+ --live --by operator/)
+  expect(posts(requests, '/relaunch')).toHaveLength(1)
+  // Neither continuation ran: the viewer chains nothing, and Reconcile is offered next.
+  expect(posts(requests, '/reconcile')).toHaveLength(0)
+  expect(posts(requests, '/restart')).toHaveLength(0)
+  await openControls(page)
+  await expect(page.getByTestId('control-reconcile')).toHaveAttribute('data-available', 'true')
+  await page.keyboard.press('Escape')
+
+  // The controller's dry run refuses the lane: its line verbatim, Confirm stays off.
+  await open(page, RUN_RELAUNCH_REFUSE)
+  await chooseControl(page, 'relaunch')
+  await expect(page.getByTestId('relaunch-preview-line')).toHaveText(RELAUNCH_REFUSED, { timeout: 15_000 })
+  await expect(confirmButton(page)).toBeDisabled()
+  await page.getByTestId('dialog-cancel').click()
+  expect(posts(requests, '/relaunch')).toHaveLength(1)
+})
+
+test(`An older controller without retry --all-failed and relaunch: both controls are greyed with their reasons and open nothing (${phase})`, async ({ page }) => {
+  test.skip(phase !== 'worker', 'the candidate phase runs one fake controller, which has both commands; server/controls.test.ts proves the older one')
+  await installControlMocks(page, { older: true })
+  for (const runId of [RUN_RETRY_ALL, RUN_RELAUNCH]) {
+    await open(page, runId)
+    await openControls(page)
+    await expect(page.locator('[data-testid="controls-list"] > li')).toHaveCount(14)
+    for (const id of ['retry_all', 'relaunch'] as const) {
+      await expect(page.getByTestId(`control-${id}`)).toHaveAttribute('data-available', 'false')
+      await expect(page.getByTestId(`control-${id}`).getByTestId('control-reason')).toHaveText(OLDER_CONTROLLER_REASONS[id]!)
+    }
+    await page.getByTestId('control-relaunch-button').click({ force: true })
+    await expect(dialog(page)).toHaveCount(0)
+    await page.keyboard.press('Escape')
+  }
 })

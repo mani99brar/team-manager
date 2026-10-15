@@ -1,6 +1,9 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
-import { ControlError, postCleanPreview, postControl, readToken } from './client.ts'
-import { buildParams, describeFailure, dialogValid, initialValues, newRequestId, pinToken, paramProblem, reasonOf, typedConfirm, type DialogPreset, type DialogValues } from './model.ts'
+import { postCleanPreview, postControl, postRelaunchPreview, readToken } from './client.ts'
+import {
+  answerCheck, askCheck, buildParams, currentCheck, describeFailure, dialogValid, initialValues, newRequestId, pinToken, paramProblem, reasonOf, relaunchConfirmable, typedConfirm,
+  type DialogPreset, type DialogValues, type RelaunchCheck,
+} from './model.ts'
 import { adoptRecord, closeDialog, refreshControls, unpairBrowser, useRunControls } from './store.ts'
 import type { WaitingQuestion } from './questions.ts'
 import type { CleanPreview, Control, ControlId, ControlScope, ParamSpec } from './types.ts'
@@ -74,6 +77,28 @@ function Body({ scope, id, preset, questions, onClose }: { scope: ControlScope; 
   if (pinned === null && latest !== null) setPinned(latest)
   const previewFor = useRef<string | null>(null)
   const clean = id === 'clean'
+  const relaunch = id === 'relaunch'
+  const [check, setCheck] = useState<RelaunchCheck | null>(null)
+  // Relaunch's dry run for the lane and token chosen now: a new choice asks again, and only the answer to the current one counts.
+  if (relaunch && token !== null && values.lane !== '' && currentCheck(check, values.lane, token) === null) setCheck(askCheck(check, values.lane, token))
+  const askedFor = useRef<RelaunchCheck | null>(null)
+  useEffect(() => {
+    if (check === null || check.state !== 'asking' || askedFor.current === check) return
+    const secret = readToken()
+    if (secret === null) return
+    askedFor.current = check
+    const asked = { lane: check.lane, token: check.token, ask: check.ask }
+    postRelaunchPreview(scope, secret, asked.token, asked.lane).then(
+      answer => setCheck(previous => answerCheck(previous, { ...asked, state: 'answered', exitCode: answer.exitCode, line: answer.line })),
+      error => {
+        const outcome = describeFailure(error)
+        setCheck(previous => answerCheck(previous, { ...asked, state: 'failed', message: outcome.message }))
+        if (!outcome.refresh) return
+        // The run moved on since the dialog opened: the dry run is asked again under the refreshed token, as Confirm would post it.
+        void refreshControls(scope).then(() => { if (outcome.repin) setPinned(null) })
+      },
+    )
+  }, [scope, check])
 
   // Clean's dry run comes first (decisions [L4]): its own route, the run state token only, no request_id.
   useEffect(() => {
@@ -93,7 +118,8 @@ function Body({ scope, id, preset, questions, onClose }: { scope: ControlScope; 
   if (control === undefined) return null
   const unavailable = reasonOf(control)
   const valid = dialogValid(control, values, scope.runId)
-  const previewReady = !clean || (typeof preview === 'object' && preview.exitCode === 0)
+  const previewReady = (!clean || (typeof preview === 'object' && preview.exitCode === 0)) && (!relaunch || relaunchConfirmable(check, values.lane, token))
+  const shownCheck = relaunch ? currentCheck(check, values.lane, token) : null
   const canConfirm = valid && !sending && unavailable === null && previewReady && token !== null
 
   const confirm = async () => {
@@ -112,11 +138,10 @@ function Body({ scope, id, preset, questions, onClose }: { scope: ControlScope; 
       setAlert(outcome.message)
       if (outcome.unpair) { unpairBrowser(scope); onClose() }
       if (outcome.refresh) {
-        const changed = error instanceof ControlError && error.code === 'STATE_CHANGED'
         // The refreshed controls are on screen now: the next Confirm is made on them, so it carries the refreshed token
         // (Clean's dry run is fetched again under it).
         void refreshControls(scope).then(() => {
-          if (!changed) return
+          if (!outcome.repin) return
           if (clean) { previewFor.current = null; setPreview('loading') }
           setPinned(null)
         })
@@ -154,6 +179,18 @@ function Body({ scope, id, preset, questions, onClose }: { scope: ControlScope; 
           {preview === 'loading' ? <p className="ctl-note">Running the dry run…</p>
             : preview === 'failed' ? <p className="ctl-note">The dry run could not be read.</p>
               : <pre>{preview.output.trim() === '' ? '(nothing to remove)' : preview.output}{preview.exitCode !== 0 ? `\n(dry run exited ${preview.exitCode}: Confirm stays off)` : ''}</pre>}
+        </div>
+      )}
+      {relaunch && (
+        <div className="ctl-preview" data-testid="relaunch-preview" aria-live="polite">
+          <span className="ctl-cmd-h">Dry run: the controller&apos;s verdict for this lane</span>
+          {values.lane === '' ? <p className="ctl-note">Choose a lane to run its dry run.</p>
+            : shownCheck === null || shownCheck.state === 'asking' ? <p className="ctl-note">Running the dry run…</p>
+              : shownCheck.state === 'failed' ? <p className="ctl-note">The dry run could not be read: {shownCheck.message} Confirm stays off.</p>
+                : <>
+                  <pre data-testid="relaunch-preview-line">{shownCheck.line}</pre>
+                  {shownCheck.exitCode !== 0 && <p className="ctl-note">The dry run exited {shownCheck.exitCode ?? 'without a code'}: Confirm stays off.</p>}
+                </>}
         </div>
       )}
       {control.params.length > 0 && (

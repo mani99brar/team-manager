@@ -4,7 +4,7 @@ import { layoutDag } from './dag.ts'
 import { AppLink } from './panels.tsx'
 import { STATUS_LABEL } from './status.ts'
 import { formatShortSpan, shortStepLabel, STATUS_GLYPH, type StepRow } from './steps.ts'
-import { stateTone, toneClass } from './tone.ts'
+import { stateTone, toneClass, type Tone } from './tone.ts'
 
 type Props = {
   detail: RunDetail
@@ -12,15 +12,17 @@ type Props = {
   current: string
   runHref: string
   nodeHref: (nodeId: string) => string
+  /** A reviewer step's verdict by node id: its chip is toned by the verdict (as the graph's card is), not by the session's status. */
+  verdicts?: ReadonlyMap<string, { tone: Tone; verdict: 'approved' | 'blocked' | null }>
   onNavigate: (pathname: string) => void
 }
 
 /**
  * The sticky step strip of a node page (docs/PRD_VIEWER_UX.md 4.4, `run-node-list`): every step as a chip toned by its status
- * (docs/PRD_VIEWER_REVAMP.md 5.4) in the graph's column order, lanes stacked within a column, the current one marked; then the previous and next step. It replaces the
+ * (docs/PRD_VIEWER_REVAMP.md 5.4; a reviewer's by its verdict) in the graph's column order, lanes stacked within a column, the current one marked; then the previous and next step. It replaces the
  * graph on node pages, so the two never share a screen. On a phone it scrolls sideways inside itself, never the page.
  */
-export function StepStrip({ detail, rows, current, runHref, nodeHref, onNavigate }: Props) {
+export function StepStrip({ detail, rows, current, runHref, nodeHref, verdicts, onNavigate }: Props) {
   const list = useRef<HTMLOListElement>(null)
   const layout = useMemo(() => layoutDag(detail.definition.nodes), [detail.definition.nodes])
   const index = rows.findIndex(row => row.node_id === current)
@@ -43,7 +45,10 @@ export function StepStrip({ detail, rows, current, runHref, nodeHref, onNavigate
         {rows.map(row => {
           const position = layout.positions.get(row.node_id)
           const alone = position ? [...layout.positions.values()].filter(other => other.column === position.column).length === 1 : true
-          const glyph = row.attention ? '?' : STATUS_GLYPH[row.shown]
+          const verdict = verdicts?.get(row.node_id) ?? null
+          // A blocked reviewer reads as blocked in glyph and name too, never as its session's success.
+          const blocked = verdict?.verdict === 'blocked' && !row.attention
+          const glyph = row.attention ? '?' : blocked ? STATUS_GLYPH.failed : STATUS_GLYPH[row.shown]
           return (
             <li
               key={row.node_id}
@@ -56,11 +61,12 @@ export function StepStrip({ detail, rows, current, runHref, nodeHref, onNavigate
                 href={nodeHref(row.node_id)}
                 onNavigate={onNavigate}
                 current={row.node_id === current}
-                className={`step-chip status-row-${row.shown} ${toneClass(stateTone({ status: row.shown, attention: row.attention }))}`}
-                aria-label={`${row.label}, ${STATUS_LABEL[row.shown].toLowerCase()}${row.attention ? ', waits on you' : ''}`}
+                className={`step-chip status-row-${row.shown} ${toneClass(verdict && !row.attention ? verdict.tone : stateTone({ status: row.shown, attention: row.attention }))}`}
+                data-verdict={verdict?.verdict ?? undefined}
+                aria-label={`${row.label}, ${blocked ? 'blocked' : STATUS_LABEL[row.shown].toLowerCase()}${row.attention ? ', waits on you' : ''}`}
                 title={row.label}
               >
-                <span className={`step-glyph status-text-${row.shown}`} aria-hidden="true">{glyph}</span>
+                <span className={`step-glyph status-text-${blocked ? 'failed' : row.shown}`} aria-hidden="true">{glyph}</span>
                 <span aria-hidden="true">{shortStepLabel(row)}</span>
                 {row.ms !== null && <span className="step-chip-took" aria-hidden="true">{row.inferred ? '≈' : ''}{formatShortSpan(row.ms)}</span>}
               </AppLink>

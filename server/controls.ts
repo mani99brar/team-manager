@@ -6,7 +6,7 @@ import type { FastifyInstance, FastifyReply } from 'fastify'
 import { z } from 'zod'
 import {
   CONTROLS_VERSION, CONTROL_IDS, cleanPreviewRequestSchema, cleanPreviewResponseSchema, controlRequestSchema, controlResponseSchema, controlsStatusSchema,
-  runControlsSchema, type Control, type ControlId, type ControlRecord, type Params, type ParamSpec, type RunControls,
+  relaunchPreviewRequestSchema, relaunchPreviewResponseSchema, runControlsSchema, type Control, type ControlId, type ControlRecord, type Params, type ParamSpec, type RunControls,
 } from '../contracts/projects/controls.ts'
 import {
   CONTROLS_PREFIX, ControlsError, isPaired, requireBrowserGuards, requireToken, type ControlsConfig, type ControlsSetup,
@@ -20,7 +20,7 @@ import { ProjectApiError, type LoadedRun, type RunStore } from './projects.ts'
 import { ID_PATTERN } from './projectsConfig.ts'
 
 /**
- * The run-control API (docs/PRD_RUN_CONTROLS.md sections 3 to 5 and Appendix A, decisions.md [L1] to [L5]): twelve controls from a
+ * The run-control API (docs/PRD_RUN_CONTROLS.md sections 3 to 5 and Appendix A, decisions.md [L1] to [L5]): fourteen controls from a
  * closed table, the offer rules that hide what the controller would refuse, and a POST that runs exactly one existing
  * `python -m workflow ...` command as the operator. The controller stays the judge: nothing here edits a run file, writes a marker or
  * retries a refusal. Errors are `{ error: { code, message } }`, never a path or the token.
@@ -166,7 +166,46 @@ const SPECS: Spec[] = [
     display: () => '$PY -m workflow clean "$RUN" --by operator',
     argv: runDir => [...W, 'clean', runDir, ...BY],
   },
+  {
+    id: 'retry_all', label: 'Retry all failed checks', runs: 'short', confirm: 'plain',
+    effect: 'Raises the attempt of every lane whose worker check failed or was left without a verdict, in one command; Restart supervisor then reruns them.',
+    not_effect: 'It runs no check itself and never retries a combined (candidate) check.',
+    display: () => '$PY -m workflow retry "$RUN" --phase worker --all-failed --by operator',
+    argv: runDir => [...W, 'retry', runDir, '--phase', 'worker', '--all-failed', ...BY],
+  },
+  {
+    id: 'relaunch', label: 'Relaunch a lane', runs: 'short', confirm: 'plain',
+    effect: 'Relaunches the lane\'s worker session once, after its dry run shows the controller allows it; continue with Reconcile launches and then Restart supervisor.',
+    not_effect: 'It reconciles and restarts nothing itself, and relaunches a lane at most once.',
+    display: params => `$PY -m workflow relaunch "$RUN" ${params.lane ?? '<lane>'} --by operator`,
+    argv: (runDir, params) => [...W, 'relaunch', runDir, params.lane!, ...BY],
+  },
 ]
+
+/** The relaunch dry run's argv: the confirmed command with `--dry-run` before the actor. */
+const relaunchDryRun = (runDir: string, lane: string) => [...W, 'relaunch', runDir, lane, '--dry-run', ...BY]
+
+/** Whether the controller at MD_MANAGER_WORKFLOW_HOME has the two commands, read once when the routes start. */
+export type Capabilities = { retryAll: boolean; relaunch: boolean }
+export const RETRY_ALL_ABSENT = 'This controller has no `retry --all-failed` (workflow-collected-fixes is not merged)'
+export const RELAUNCH_ABSENT = 'This controller has no `relaunch` command (workflow-collected-fixes is not merged)'
+
+/**
+ * Reads `-m workflow retry --help` and `-m workflow relaunch --help` once, through the run-control runner (its home, env and
+ * timeout). A non-zero exit, a failed spawn, or a retry help that never names `--all-failed` reads as absent: fail closed.
+ */
+export async function readCapabilities(runner: Runner, python: string): Promise<Capabilities> {
+  const has = async (args: string[], needle: RegExp) => {
+    try {
+      const result = await runner.capture(python, args)
+      return result.exitCode === 0 && needle.test(result.output)
+    } catch {
+      return false
+    }
+  }
+  const [retryAll, relaunch] = await Promise.all([has([...W, 'retry', '--help'], /--all-failed\b/), has([...W, 'relaunch', '--help'], /relaunch/)])
+  return { retryAll, relaunch }
+}
 
 const SPEC_BY_ID = new Map(SPECS.map(spec => [spec.id, spec]))
 if (SPECS.map(spec => spec.id).join() !== CONTROL_IDS.join()) throw new Error('The control table must follow the order of PRD section 4')
@@ -244,6 +283,9 @@ type Facts = {
   since: string | null
   challenge: { status: string; held: boolean; concerns: number; rerunning: boolean } | null
   retryTargets: RetryTarget[]
+  /** The lanes a relaunch may be offered for: `launch_<lane>` in next, the receipt absent or needing reconciliation, no completion, handoff or stop file. */
+  relaunchLanes: string[]
+  capabilities: Capabilities
   reconcile: boolean
   repairRecorded: boolean
   repairLanes: string[]
@@ -295,7 +337,7 @@ async function receiptsNeedReconciling(directory: FileHandle): Promise<boolean> 
 }
 
 /** Everything the offer rules read, from the run's files (bounded, no-follow) and the lock probe. */
-async function readFacts(store: RunStore, key: RunKey, config: ControlsConfig, runner: Runner): Promise<Facts> {
+async function readFacts(store: RunStore, key: RunKey, config: ControlsConfig, runner: Runner, capabilities: Promise<Capabilities>): Promise<Facts> {
   let scope
   try {
     await store.sync()
@@ -359,6 +401,16 @@ async function readFacts(store: RunStore, key: RunKey, config: ControlsConfig, r
       const reconcileEvent = loaded.events.slice(-20).some(event => /\bworkflow reconcile\b/.test(event.message))
       const reconcile = next.some(name => typeof name === 'string' && name.startsWith('launch_')) || reconcileEvent || await receiptsNeedReconciling(directory)
 
+      // Cheap facts only, a superset of the controller's rule: its dry run decides for the lane chosen.
+      const relaunchLanes: string[] = []
+      for (const lane of lanes) {
+        if (!next.includes(`launch_${lane}`)) continue
+        const receipt = await readJson(directory, `${lane}.interactive.json`)
+        if (receipt !== undefined && !(isRecord(receipt) && receipt.status === 'needs_reconciliation')) continue
+        const finished = await Promise.all(['completion', 'handoff', 'stop'].map(kind => exists(directory, `${lane}.${kind}.json`)))
+        if (!finished.some(Boolean)) relaunchLanes.push(lane)
+      }
+
       const challenge = loaded.inputs?.challenge ?? null
       const held = challenge !== null && challenge.status === 'passed' && challenge.hold != null && challenge.hold.released_at === null
       const challengeFacts = challenge === null ? null : { status: challenge.status, held, concerns: challenge.concerns.length, rerunning: rerunning }
@@ -377,7 +429,7 @@ async function readFacts(store: RunStore, key: RunKey, config: ControlsConfig, r
       ])).digest('hex')
       return {
         runId: key.run, runDir, status, automatic, abandoned, finished, lanes, supervisor, controller, holder, holderMatches, since: holder?.since ?? null,
-        challenge: challengeFacts, retryTargets, reconcile, repairRecorded, repairLanes, waiting, panes, digest: approvalDigest(plan, state),
+        challenge: challengeFacts, retryTargets, relaunchLanes, capabilities: await capabilities, reconcile, repairRecorded, repairLanes, waiting, panes, digest: approvalDigest(plan, state),
         longReason: longAvailability.ok ? null : longAvailability.reason, token,
       }
     } finally {
@@ -492,6 +544,20 @@ function offerOf(spec: Spec, facts: Facts): Offer {
     }
     case 'clean':
       return needsQuiet(() => (facts.finished || facts.abandoned ? yes([typedSpec]) : no('The run is not finished or abandoned', [typedSpec])), [typedSpec])
+    case 'retry_all': {
+      if (!facts.capabilities.retryAll) return no(RETRY_ALL_ABSENT)
+      return needsQuiet(() => {
+        if (facts.abandoned) return no('The run was abandoned')
+        if (facts.finished) return no('The run is finished')
+        const workerLanes = uniq(facts.retryTargets.filter(target => target.phase === 'worker').map(target => target.lane))
+        return workerLanes.length >= 2 ? yes() : no('Fewer than two worker checks failed')
+      })
+    }
+    case 'relaunch': {
+      const params = [lanes(facts.relaunchLanes)]
+      if (!facts.capabilities.relaunch) return no(RELAUNCH_ABSENT, params)
+      return needsQuiet(() => (facts.relaunchLanes.length > 0 ? yes(params) : no('No lane launch is waiting to be relaunched', params)), params)
+    }
   }
 }
 
@@ -584,6 +650,8 @@ export async function controlRoutes(scope: FastifyInstance, options: ControlsRou
   const runner = new Runner(config, options.runner)
   const secrets = { home: userHome(config.childEnv), token: config.token.toString('utf8') }
   const records = new RecordStore(config.stateDir, now, secrets)
+  // The controller's two newer commands, read once as the routes start (never on a request) and kept for the process.
+  const capabilities = readCapabilities(runner, config.python)
   scope.setNotFoundHandler((_request, reply) => send(reply, 404, errorBody('NOT_FOUND', 'No run control resource exists at that path.')))
   scope.addHook('onReady', async () => {
     const lost = await records.recoverLost()
@@ -612,7 +680,7 @@ export async function controlRoutes(scope: FastifyInstance, options: ControlsRou
 
   scope.get('/:project_id/:workflow_id/:run_id', async (request, reply) => {
     const key = keyOf(request.params as Record<string, string>)
-    const facts = await readFacts(store, key, config, runner)
+    const facts = await readFacts(store, key, config, runner, capabilities)
     const { controls } = controlsOf(facts)
     const supervisor = facts.supervisor.state === 'held' || facts.controller.state === 'held' ? 'running'
       : facts.supervisor.state === 'unknown' || facts.controller.state === 'unknown' ? 'unknown' : 'not_running'
@@ -627,7 +695,7 @@ export async function controlRoutes(scope: FastifyInstance, options: ControlsRou
     const params = request.params as Record<string, string>
     const key = keyOf(params)
     if (!/^c-[0-9a-f]{12}$/.test(params.record_id ?? '')) throw new ControlsError(404, 'NOT_FOUND', 'No such record.')
-    await readFacts(store, key, config, runner)
+    await readFacts(store, key, config, runner, capabilities)
     const record = await records.get(key, params.record_id)
     if (!record) throw new ControlsError(404, 'NOT_FOUND', 'No such record.')
     return send(reply, 200, conform(controlResponseSchema, { record }, log))
@@ -642,7 +710,7 @@ export async function controlRoutes(scope: FastifyInstance, options: ControlsRou
     const key = keyOf(request.params as Record<string, string>)
     const parsed = cleanPreviewRequestSchema.safeParse(request.body)
     if (!parsed.success) invalid('The preview body must be exactly { run_state_token }.')
-    const facts = await readFacts(store, key, config, runner)
+    const facts = await readFacts(store, key, config, runner, capabilities)
     refuseIfStale(facts, parsed.data.run_state_token)
     const offer = offerOf(SPEC_BY_ID.get('clean')!, facts)
     if (!offer.available) throw new ControlsError(422, 'NOT_AVAILABLE', offer.reason ?? 'This control is not available.')
@@ -654,6 +722,28 @@ export async function controlRoutes(scope: FastifyInstance, options: ControlsRou
     }
     const output = tailLines(result.output, secrets, 200).join('\n')
     return send(reply, 200, conform(cleanPreviewResponseSchema, { exitCode: result.exitCode, output }, log))
+  })
+
+  // The relaunch dry run for the lane the dialog chose: guards 1 to 4 and 6, `relaunch` offered and the lane among its choices; no
+  // request_id, no record. Its first line is the controller's verdict, shown before Confirm.
+  scope.post('/:project_id/:workflow_id/:run_id/relaunch-preview', { bodyLimit: 16 * 1024 }, async (request, reply) => {
+    const key = keyOf(request.params as Record<string, string>)
+    const parsed = relaunchPreviewRequestSchema.safeParse(request.body)
+    if (!parsed.success) invalid('The preview body must be exactly { run_state_token, lane }.')
+    const facts = await readFacts(store, key, config, runner, capabilities)
+    refuseIfStale(facts, parsed.data.run_state_token)
+    const offer = offerOf(SPEC_BY_ID.get('relaunch')!, facts)
+    if (!offer.available) throw new ControlsError(422, 'NOT_AVAILABLE', offer.reason ?? 'This control is not available.')
+    if (!facts.relaunchLanes.includes(parsed.data.lane)) invalid('The lane is not one of the offered choices.')
+    let result
+    try {
+      result = await runner.captureStreams(config.python, relaunchDryRun(facts.runDir, parsed.data.lane))
+    } catch {
+      throw new ControlsError(500, 'SPAWN_FAILED', 'The dry run could not be started.')
+    }
+    const first = (text: string, pick: (line: string) => boolean = () => true) => text.split('\n').map(line => line.trimEnd()).find(line => line.trim() !== '' && pick(line))
+    const line = first(result.stdout) ?? first(result.stderr, candidate => candidate.startsWith('Blocked:')) ?? first(result.stderr) ?? ''
+    return send(reply, 200, conform(relaunchPreviewResponseSchema, { exitCode: result.exitCode, line: redactLine(line, secrets) }, log))
   })
 
   scope.post('/:project_id/:workflow_id/:run_id/:control_id', { bodyLimit: 64 * 1024 }, async (request, reply) => {
@@ -674,7 +764,7 @@ export async function controlRoutes(scope: FastifyInstance, options: ControlsRou
     const leased = !inFlight.has(runKey)
     if (leased) inFlight.add(runKey)
     try {
-      const facts = await readFacts(store, key, config, runner)
+      const facts = await readFacts(store, key, config, runner, capabilities)
       refuseIfStale(facts, body.run_state_token)
       if (!leased) throw new ControlsError(409, 'BUSY', 'Another control of this run is starting or running. Wait for it to finish.')
       const offer = offerOf(spec, facts)

@@ -454,7 +454,7 @@ type InputsSection = z.infer<typeof inputsSectionSchema>
 
 /** A registered packet after loading: either verified content or the reason it cannot be trusted. */
 type LoadedPacket = PacketRegistration & (
-  | { ok: true; gate: { status: string; reasons: string[] }; result: Record<string, unknown>; deferred: DeferredCheck[]; reusedFrom: string | null }
+  | { ok: true; gate: { status: string; reasons: string[] }; result: Record<string, unknown>; deferred: DeferredCheck[]; reusedFrom: { path: string; sha256: string } | null }
   | { ok: false; reason: string }
 )
 
@@ -490,6 +490,8 @@ export type LoadedRun = {
   sessionInput: SessionNodeInput
   /** The panel record the panels route serves (live `panel.json` first, then the export), or null when it answers 404. */
   panelRecord: PanelResults | null
+  /** The Claude total its export records (`costs.total_usd`), null when none is recorded. */
+  claudeUsd: number | null
 }
 
 export type ArtifactContent = {
@@ -1011,7 +1013,16 @@ export type RunStoreOptions = {
 }
 
 /** A run's summary as `listRuns` last projected it, the key that tells whether its files changed, and its controller pin. */
-type CachedSummary = { key: string; summary: RunSummary; controller: ControllerPin | null }
+type CachedSummary = { key: string; summary: RunSummary; controller: ControllerPin | null; claudeUsd: number | null }
+/** A listed run: its summary and the Claude total its export records (`costs.total_usd`), null when none is recorded. */
+export type ListedRun = { summary: RunSummary; claudeUsd: number | null }
+
+/** The export's `costs.total_usd` (workflow/costs.py): a finite non-negative number, else null (absent, null or malformed). */
+function recordedClaudeUsd(parsed: unknown): number | null {
+  const costs = parsed !== null && typeof parsed === 'object' ? (parsed as Record<string, unknown>).costs : undefined
+  const total = costs !== null && typeof costs === 'object' ? (costs as Record<string, unknown>).total_usd : undefined
+  return typeof total === 'number' && Number.isFinite(total) && total >= 0 ? total : null
+}
 /** The controller PID a run's events last logged, and when: the liveness check reads `/proc` for it on every list. */
 type ControllerPin = { pid: number; at: string }
 
@@ -1106,10 +1117,15 @@ export class RunStore {
    * (`summaryCache`); only the controller's liveness, which no file records, is read again for a running or paused run.
    */
   async listRuns(scope: Scope): Promise<RunSummary[]> {
+    return (await this.listRunEntries(scope)).map(entry => entry.summary)
+  }
+
+  /** `listRuns` with each run's recorded Claude total, from the same read and the same cache. */
+  async listRunEntries(scope: Scope): Promise<ListedRun[]> {
     return this.withRunsRoot(scope, async root => {
       const names = (await fs.readdir(at(root), { withFileTypes: true }))
         .filter(dirent => dirent.isDirectory() && ID_PATTERN.test(dirent.name)).map(dirent => dirent.name).sort()
-      const summaries: RunSummary[] = []
+      const summaries: ListedRun[] = []
       const seen = new Set<string>()
       for (const name of names) {
         const directory = await openDirectory(root, name)
@@ -1120,7 +1136,8 @@ export class RunStore {
           const fingerprint = this.options.summaryCache ? await runFingerprint(directory) : null
           const cached = fingerprint === null ? undefined : this.summaries.get(cacheKey)
           let summary: RunSummary
-          if (cached !== undefined && cached.key === fingerprint) summary = await this.withLiveController(cached, directory)
+          let claudeUsd: number | null
+          if (cached !== undefined && cached.key === fingerprint) { summary = await this.withLiveController(cached, directory); claudeUsd = cached.claudeUsd }
           else {
             const state = await readBounded(directory, ['run-state.json'], this.options.exportByteLimit)
             if (state === null) {
@@ -1131,16 +1148,17 @@ export class RunStore {
             }
             const run = await this.projectRun(scope, name, directory, state)
             summary = run.detail.summary
-            if (fingerprint !== null) this.summaries.set(cacheKey, { key: fingerprint, summary, controller: run.controller })
+            claudeUsd = run.claudeUsd
+            if (fingerprint !== null) this.summaries.set(cacheKey, { key: fingerprint, summary, controller: run.controller, claudeUsd })
           }
           if (seen.has(summary.run_id)) throw invalidRun(name, 'duplicate run ID within the workflow')
           seen.add(summary.run_id)
-          summaries.push(summary)
+          summaries.push({ summary, claudeUsd })
         } finally {
           await directory.close()
         }
       }
-      return summaries.sort(compareRuns)
+      return summaries.sort((a, b) => compareRuns(a.summary, b.summary))
     })
   }
 
@@ -1481,7 +1499,8 @@ export class RunStore {
 
   /** Validates the export and companion files, then projects them onto the public contract. */
   private async projectRun(scope: Scope, runId: string, directory: FileHandle, stateBytes: Buffer): Promise<LoadedRun> {
-    const parsedExport = exportSchema.safeParse(parseJson(stateBytes, `run-state.json of run "${runId}"`))
+    const rawExport = parseJson(stateBytes, `run-state.json of run "${runId}"`)
+    const parsedExport = exportSchema.safeParse(rawExport)
     if (!parsedExport.success) throw invalidRun(runId, `run-state.json ${issueText(parsedExport.error)}`)
     const state = parsedExport.data
     if (state.run_id !== runId) throw invalidRun(runId, 'run-state.json names a different run_id than its directory')
@@ -1503,7 +1522,7 @@ export class RunStore {
     // The one fixLoop every projection of this run reads; repair nodes are added after the definition hash (Appendix A.1 item 13).
     const loop = await this.fixLoopOf(scope, runId, directory, state, definition)
     const shown = projectedDefinition(definition, loop)
-    const events = normalizeEvents(state.run_id, shown, rawEvents, withRepairs(lanes, loop))
+    const events = retypeReuseEvents(scope, state.run_id, normalizeEvents(state.run_id, shown, rawEvents, withRepairs(lanes, loop)), rawEvents, packets)
     const snapshot = projectSnapshot(scope, definition, state, rawEvents, packets, lanes, loop)
     const created_at = state.created_at
     const updated_at = laterTimestamp(laterTimestamp(state.updated_at, rawEvents.at(-1)?.time ?? created_at), created_at)
@@ -1569,7 +1588,7 @@ export class RunStore {
     }
     const logged = rawEvents.findLast(event => event.node === 'controller' && PID_ROW.test(event.message))
     const controller = logged ? { pid: Number(PID_ROW.exec(logged.message)![1]), at: logged.time } : null
-    return { detail, events, packets, review, inputs, reviewDiff, deltaDiff, critiqueArtifacts, fixLoop: loop, sidecar: state.sidecar ?? null, attack: state.attack, panels: state.panels, controller, sessionInput, panelRecord }
+    return { detail, events, packets, review, inputs, reviewDiff, deltaDiff, critiqueArtifacts, fixLoop: loop, sidecar: state.sidecar ?? null, attack: state.attack, panels: state.panels, controller, sessionInput, panelRecord, claudeUsd: recordedClaudeUsd(rawExport) }
   }
 
 
@@ -1766,7 +1785,7 @@ export class RunStore {
       if (packet.data.phase !== registration.phase) { packets.push({ ...registration, ok: false, reason: 'packet phase differs from its registration' }); continue }
       const deferredIds = new Set(packet.data.gate.deferred_checks ?? [])
       const deferred = (packet.data.evidence?.checks ?? []).filter(check => deferredIds.has(check.id)).map(check => ({ id: check.id, check_index: check.worker_check_index }))
-      packets.push({ ...registration, ok: true, gate: packet.data.gate, result: packet.data.result, deferred, reusedFrom: packet.data.reused_from?.path ?? null })
+      packets.push({ ...registration, ok: true, gate: packet.data.gate, result: packet.data.result, deferred, reusedFrom: packet.data.reused_from ?? null })
     }
     return packets
   }
@@ -1894,6 +1913,50 @@ export function normalizeEvents(runId: string, definition: WorkflowDefinition, r
   })
 }
 
+/**
+ * The controller's gate event of a lane's reused candidate attempt (workflow/checks.py reuse_packet writes `reused_from` into the
+ * candidate packet; pipeline.py then logs `candidate_<lane>` with the gate's status) is served as `result_reused`, naming the worker
+ * attempt it reused and that worker result's route. It is identified from the packet registry and the event order, never from a
+ * message: the packet must have loaded, name the same lane's worker packet, which must be registered, loaded and carry the
+ * registered digest the candidate packet recorded, and be the lane's first candidate attempt (the controller reuses no other), and the event is that lane's first gate row with no checked attempt of the lane started before it,
+ * of the packet's own attempt.
+ * Anything else, or a second reused packet for the lane, retypes nothing. Sequence, attempt, status and message stay.
+ */
+const GATE_STATUSES = new Set(['passed', 'blocked'])
+
+export function retypeReuseEvents(scope: Scope, runId: string, events: WorkflowEvent[], raw: readonly RawEvent[], packets: readonly LoadedPacket[]): WorkflowEvent[] {
+  const retyped = new Map<number, { attempt: number; uri: string }>()  // by raw row index
+  const candidates = packets.filter(packet => packet.phase === 'candidate')
+  for (const lane of new Set(candidates.map(packet => packet.node_id))) {
+    const own = candidates.filter(packet => packet.node_id === lane)
+    const reused = own.filter(packet => packet.ok && packet.reusedFrom !== null)
+    if (reused.length !== 1) continue
+    const packet = reused[0] as LoadedPacket & { ok: true; reusedFrom: { path: string; sha256: string } }
+    const match = /^verification\/worker\/([^/]+)\/(\d+)\/packet\.json$/.exec(packet.reusedFrom.path)
+    if (!match || match[1] !== lane) continue
+    if (own.some(other => other.attempt < packet.attempt)) continue
+    const workerAttempt = Number(match[2])
+    if (!Number.isSafeInteger(workerAttempt) || workerAttempt < 1) continue
+    // The reused worker packet must be registered, loaded and the very bytes the candidate packet hashed.
+    const source = packets.find(other => other.phase === 'worker' && other.node_id === lane && other.attempt === workerAttempt)
+    if (!source || !source.ok || source.sha256 !== packet.reusedFrom.sha256) continue
+    const rows = raw.flatMap((event, index) => event.node === `candidate_${lane}` ? [{ event, index }] : [])
+    const gate = rows.findIndex(row => GATE_STATUSES.has(row.event.status))
+    if (gate < 0 || rows.slice(0, gate).some(row => row.event.status === 'running')) continue
+    // The gate row's attempt, counted within the lane's own rows as normalizeEvents counts them (else 1), must be the packet's:
+    // a reused packet of a later attempt (its earlier packet missing) never retypes an earlier attempt's gate.
+    const stated = rows.slice(0, gate + 1).map(row => attemptFromMessage(row.event.message)).filter(value => value !== null)
+    if ((stated.at(-1) ?? 1) !== packet.attempt) continue
+    retyped.set(rows[gate].index, { attempt: workerAttempt, uri: resultRoute(scope, runId, 'worker', lane, workerAttempt) })
+  }
+  // normalizeEvents maps the raw rows one to one, so a row's index is its served event's.
+  if (retyped.size === 0 || events.length !== raw.length) return events
+  return events.map((event, index) => {
+    const reuse = retyped.get(index)
+    return reuse ? eventSchema.parse({ ...event, type: 'result_reused', reused_from_attempt: reuse.attempt, result_uri: reuse.uri }) : event
+  })
+}
+
 type NodeStatus = RunSnapshot['nodes'][number]['status']
 
 /**
@@ -1980,8 +2043,10 @@ export function projectSnapshot(scope: Scope, definition: WorkflowDefinition, st
     if (challenge?.status === 'paused' || (challenge?.status === 'passed' && challenge.hold && challenge.hold.released_at === null)) status = 'paused'
     else if (challenge) status = 'succeeded'
     // A retried lane keeps the failed attempt's error on its checkpoint task until the graph moves on, while its newest packet
-    // passed: a verified lane is not failed (the run showed `failed` through the whole candidate check after a retry).
-    else if (task?.error && !(map.verifyNodes.has(node.node_id) && workerPacket?.ok && workerPacket.gate.status === 'passed')) status = 'failed'
+    // passed: a verified lane is not failed (the run showed `failed` through the whole candidate check after a retry). A lane
+    // check's error also counts only while its task is in `next`: the controller fails the step it stopped on, so an error left
+    // on a lane check the graph has moved past is stale.
+    else if (task?.error && !(map.verifyNodes.has(node.node_id) && ((workerPacket?.ok && workerPacket.gate.status === 'passed') || !state.next.includes(node.node_id)))) status = 'failed'
     else if (frozen && node.node_id === 'handoff') status = 'succeeded'
     else if (handoffOpen && automatic && node.node_id === 'handoff') status = waitingHandoff()
     else if (task && task.interrupts.length > 0) status = 'awaiting_approval'
@@ -2417,15 +2482,29 @@ async function controllerLiveness(procRoot: string, pid: number, loggedAt: strin
   return started <= Date.parse(loggedAt) + START_TOLERANCE_MS ? 'running' : 'unknown'
 }
 
+/** The blocked error of a gate-passed packet whose result contradicts it: its status, and its own error message path-redacted. */
+function contradictionError(raw: Record<string, unknown>): { code: 'VERIFICATION_BLOCKED'; message: string; retryable: true } {
+  const status = typeof raw.status === 'string' ? raw.status : String(raw.status)
+  const error = raw.error
+  const detail = error === null || error === undefined ? null
+    : typeof error === 'object' && typeof (error as Record<string, unknown>).message === 'string' ? (error as Record<string, unknown>).message as string
+      : typeof error === 'string' ? error : JSON.stringify(error)
+  const message = detail === null ? `The gate passed but the result says ${status}` : `The gate passed but the result says ${status}: ${detail}`
+  return { code: 'VERIFICATION_BLOCKED', message: redactPaths(message), retryable: true }
+}
+
 /** Publishes a verified packet's result: scoped artifact links, no worktree paths, and a failed status when the gate did not pass. */
 function projectWorkerResult(scope: Scope, runId: string, nodeId: string, packet: LoadedPacket & { ok: true }): WorkerResult {
   const raw = packet.result
   if (raw.run_id !== runId || raw.node_id !== packet.node_id || raw.attempt !== packet.attempt) {
     throw new ProjectApiError(500, 'EVIDENCE_MISMATCH', 'The verification packet result does not match its registration.')
   }
-  const passed = packet.gate.status === 'passed'
+  const gatePassed = packet.gate.status === 'passed'
+  // A passed gate over a result that says it did not succeed, or that carries an error, is contradictory: served as blocked.
+  const consistent = raw.status === 'succeeded' && (raw.error === null || raw.error === undefined)
+  const passed = gatePassed && consistent
   // A reused candidate packet's checks ran in its worker packet's worktree.
-  const worktree = packet.reusedFrom !== null ? packet.reusedFrom.replace(/packet\.json$/, 'worktree') : `verification/${packet.phase}/${packet.node_id}/${packet.attempt}/worktree`
+  const worktree = packet.reusedFrom !== null ? packet.reusedFrom.path.replace(/packet\.json$/, 'worktree') : `verification/${packet.phase}/${packet.node_id}/${packet.attempt}/worktree`
   const checks = Array.isArray(raw.checks) ? (raw.checks as Record<string, unknown>[]).map(check => ({ ...check, cwd: worktree })) : raw.checks
   const artifacts = Array.isArray(raw.artifacts) ? (raw.artifacts as Record<string, unknown>[]).map(artifact => ({
     ...artifact, uri: typeof artifact.artifact_id === 'string' ? `${runRoute(scope, runId)}/artifacts/${encodeURIComponent(artifact.artifact_id)}` : artifact.uri,
@@ -2439,7 +2518,7 @@ function projectWorkerResult(scope: Scope, runId: string, nodeId: string, packet
     // Worker-phase captures list the changed paths not copied as `file` artifacts; older and candidate-phase results carry none.
     ...(raw.files_not_captured !== undefined ? { files_not_captured: raw.files_not_captured } : {}),
     summary: typeof raw.summary === 'string' ? redactPaths(raw.summary) : raw.summary,
-    error: passed ? raw.error : { code: 'VERIFICATION_BLOCKED', message: redactPaths(packet.gate.reasons.join('; ')) || 'Verification did not pass.', retryable: true },
+    error: passed ? raw.error : gatePassed ? contradictionError(raw) : { code: 'VERIFICATION_BLOCKED', message: redactPaths(packet.gate.reasons.join('; ')) || 'Verification did not pass.', retryable: true },
   }
   try {
     return validateWorkerResult(candidate)

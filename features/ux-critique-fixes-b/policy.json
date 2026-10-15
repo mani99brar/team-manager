@@ -1,0 +1,262 @@
+{
+  "version": "1.4.0",
+  "feature": "UX critique fixes, stage B: one filter bar on every run list with its state in the URL, runs that need the operator and running runs on top everywhere, a folded and dated project page; a run page that opens readable, says when a stopped run stopped, announces its sessions, opens the page its Open link names and shows branch and base instead of the hash; read-only",
+  "independent_review": true,
+  "integration_approval": true,
+  "max_verification_attempts": 3,
+  "setup": [
+    {
+      "argv": [
+        "npm",
+        "ci"
+      ],
+      "timeout_seconds": 600
+    }
+  ],
+  "workers": [
+    {
+      "node_id": "lists",
+      "role": "frontend lists",
+      "required_check_kinds": [
+        "build",
+        "unit",
+        "contract",
+        "browser"
+      ],
+      "owned_paths": [
+        "src/App.tsx",
+        "src/projects/lists.ts",
+        "src/projects/lists.css",
+        "src/projects/RunsHome.tsx",
+        "src/projects/RunRow.tsx",
+        "src/projects/ProjectsView.tsx",
+        "src/projects/routes.ts",
+        "src/projects/pins.ts",
+        "src/projects/runFilter.ts",
+        "src/projects/FilterBar.tsx",
+        "src/projects/dispatch",
+        "tests/unit/lists.test.ts",
+        "tests/unit/routes.test.ts",
+        "tests/unit/dispatch.test.ts",
+        "tests/unit/accepted.test.ts",
+        "tests/project-workflows/dispatch.spec.ts",
+        "tests/project-workflows/revamp-lists.spec.ts",
+        "tests/project-workflows/ux-lists.spec.ts",
+        "tests/project-workflows/ux-time.spec.ts",
+        "tests/project-workflows/projects.spec.ts",
+        "tests/project-workflows/accepted.spec.ts",
+        "tests/project-workflows/fixtures/dispatch.ts",
+        "tests/project-workflows/fixtures/ux-lists.ts",
+        "tests/project-workflows/fixtures/ux-revamp-lists.ts",
+        "tests/project-workflows/fixtures/ux-time.ts",
+        "tests/project-workflows/fixtures/ux-accepted.ts",
+        "tests/project-workflows/fixtures/index.ts",
+        "tests/project-workflows/mock.ts",
+        "tests/project-workflows/seed.ts",
+        "tests/project-workflows/support.ts",
+        "tests/project-workflows/dispatch-app.ts",
+        "docs/VIEWER_DISPATCH.md",
+        "docs/handoff/ux-fixes-b-lists.md"
+      ],
+      "checks": [
+        {
+          "id": "frontend-build",
+          "kind": "build",
+          "argv": [
+            "npm",
+            "run",
+            "build"
+          ],
+          "timeout_seconds": 300,
+          "scenarios": []
+        },
+        {
+          "id": "frontend-lint",
+          "kind": "build",
+          "argv": [
+            "npm",
+            "run",
+            "lint"
+          ],
+          "timeout_seconds": 180,
+          "scenarios": []
+        },
+        {
+          "id": "shared-contract",
+          "kind": "contract",
+          "argv": [
+            "npm",
+            "run",
+            "test:contracts"
+          ],
+          "timeout_seconds": 180,
+          "scenarios": []
+        },
+        {
+          "id": "frontend-unit",
+          "kind": "unit",
+          "argv": [
+            "npm",
+            "run",
+            "test:unit"
+          ],
+          "timeout_seconds": 600,
+          "scenarios": []
+        },
+        {
+          "id": "project-workflows-browser",
+          "kind": "browser",
+          "argv": [
+            "npx",
+            "--no-install",
+            "playwright",
+            "test",
+            "--config=tests/project-workflows/playwright.config.ts"
+          ],
+          "timeout_seconds": 2400,
+          "scenarios": [
+            {
+              "id": "live-first",
+              "description": "At 1440x900 with page.clock installed at a fixed time, by value from this lane's own seeds (projects and workflows only lists seeds; no whole-section count): on the Projects page a seeded project whose only live run is running ranks above a seeded project whose only live runs are non-superseded paused runs, in the rail and in the cards alike (order: waits, running, paused, readable before unreadable, last activity); on the feature page of a seeded workflow holding a needs-you run, a running run, a paused run and three finished runs, the run-list rows read needs-you, running, paused, then the finished runs latest activity first, under a sub-header containing 'needs you and running first, then latest activity'; choosing 'Newest created first' orders the same rows by creation time newest first and the sub-header says 'newest created first', and 'Oldest created first' orders them oldest first and the sub-header says 'oldest created first'; on the project page a feature with a running run is listed above features whose runs all finished, and a feature with a run that needs the operator above both; choosing 'Latest activity first' orders the features by last activity newest first and an open feature's run rows by creation time newest first, 'Earliest activity first' orders both oldest first, and the sub-header names both keys ('latest activity first \u00b7 runs newest created first', 'earliest activity first \u00b7 runs oldest created first'); on Triage the Running section, holding a running run that last moved before today, sits above the Today section, which holds a run that finished today, and a non-superseded run paused today is in Paused, never in Today (section order Needs you, Running, Today, Paused, Recent, and the jump links in that order); every needs-operator run still appears in exactly one state section; choosing 'Newest created first' or 'Oldest created first' on Triage keeps that section order and every run in its section, orders the rows inside each section by creation time newest or oldest first, and each section's sub-header names that order; the seeds give three runs in one Triage section, three features of one seeded project and three runs of one feature whose default, newest and oldest orders all differ, so a sort selection that is ignored fails."
+            },
+            {
+              "id": "run-filters",
+              "description": "With page.clock installed at a fixed time and a seeded workflow's run list answered as two pages by page.route in both phases from the first read (the first with a next_cursor), on its feature page: the filter bar's status toggles 'Needs you', 'Running', 'Paused', 'Failed', 'Succeeded', 'Override', 'Cancelled' each show by value how many loaded runs match under the other controls; 'Failed' leaves exactly the loaded failed rows and the scope line reads '<k> of <n> runs \u00b7 Load more runs'; adding 'Stopped at: Review' leaves only the failed runs whose served focus step is in the Review phase; the search box narrows by run id, feature and headline words; 'Today' keeps only runs that moved or ended today in the viewer's zone; with no match the list says 'No run matches.' and 'Clear filters' restores every row; 'All time' reads the second page on request and the scope line then reads '<k> of <n> runs, all loaded'; when the second page answers with an error, today's 'The next page of runs' error panel shows Retry, the rows already read stay and the scope line still reads '<k> of <n> runs \u00b7 Load more runs', never 'all loaded'; with polling timers paused by page.clock during each counted window, no request other than that workflow's run-list route is issued while the controls change. On the project page of a seeded project the same bar filters every feature's rows: a feature with no matching run reads '0 of <n> runs match' and stays closed, a feature with a match opens, and the scope line says what was read. Every control is a native button, select or input and is at least 44 px tall at 390 px with no sideways page scroll."
+            },
+            {
+              "id": "triage-filters",
+              "description": "Triage at 1440x900 with page.clock installed at a fixed time: one filter bar sits above the Needs-you section and filters every section before sectioning ('Failed' leaves only failed runs in Today and Recent, and Needs you, Running and Paused each read 'No run matches.'); while the filter is active each section's header count reads '<k> of <n>', stage A's quiet line does not render, and the tab title's '(n)', the rail badges and the Pinned section are unchanged by it; its search box finds a seeded run by id in whichever section holds it; Recent has no 'Today' choice and no search box or status pills of its own, and keeps 'Group by project' and 'Show older'; the date choices are 'Any date', 'Today' and '7 days' (no 'All time'), and the scope line reads '<k> of <n> runs \u00b7 live runs and runs finished in the last 7 days'; clearing the bar restores every section's rows; one li per run across the state sections still holds while filtered."
+            },
+            {
+              "id": "project-collapsed",
+              "description": "At 1440x900 on the project page of a seeded project with at least six features: every feature is one li[data-workflow-id] whose header is its a.lists-group-head link (carrying the tone class, the feature id, its state word, its run chips and 'last activity <Mon D>' or 'last activity today') with a 'Show runs' disclosure button beside the link inside the li and never inside it; features with a run that needs the operator or is running, and unreadable features, are open and the rest closed, so at least six feature header rows are inside the first screen; activating 'Show runs' opens the feature (aria-expanded true) and every run row shows 'started <Mon D>' and, when finished, 'ran <span>', a paused row 'paused <n> d (since <Mon D>)'; activating the header link opens the feature page; 'Steps of this definition' appears once per distinct definition revision above the chart and inside no feature, and opened it lists each step; the seeded project whose GitHub status is not_github shows its GitHub column as one line (at most 48 px tall) and its chart is wider than the chart beside a 380 px column; the page does not scroll sideways."
+            },
+            {
+              "id": "list-state-url",
+              "description": "In both phases: on Triage, a search for a seeded run id, the 'Failed' toggle and 'Group by project' put q, status and group into the URL's search with history.length unchanged (replaceState); opening a matching run and going Back shows the same search, toggle and grouping with the window's scroll position restored within 2 px; a reload keeps them; on the project page an opened feature and a status toggle survive opening a run and going Back; on the feature page 'Newest created first' and the loaded pages ('Load more runs' over two pages answered by page.route) survive Back and reload; a URL with an unknown key or a malformed status, date, sort or pages value opens the list with that key's default and no error panel; on the Pi graph page a click on Projects and Back leaves the graph page's URL without a search string."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "node_id": "run",
+      "role": "frontend run page",
+      "required_check_kinds": [
+        "build",
+        "unit",
+        "contract",
+        "browser"
+      ],
+      "owned_paths": [
+        "src/projects/signal",
+        "src/projects/sessions",
+        "src/projects/NowBanner.tsx",
+        "src/projects/RunView.tsx",
+        "src/projects/RunHeader.tsx",
+        "src/projects/run.css",
+        "DESIGN.md",
+        "docs/VIEWER_SIGNAL_BOX.md",
+        "tests/unit/signal.test.ts",
+        "tests/unit/sessions.test.ts",
+        "tests/project-workflows/ux-run.spec.ts",
+        "tests/project-workflows/revamp-pages.spec.ts",
+        "tests/project-workflows/sessions.spec.ts",
+        "tests/project-workflows/fixtures/ux-run.ts",
+        "tests/project-workflows/fixtures/ux-revamp-pages.ts",
+        "tests/project-workflows/fixtures/sessions.ts",
+        "docs/handoff/ux-fixes-b-run.md"
+      ],
+      "checks": [
+        {
+          "id": "frontend-build",
+          "kind": "build",
+          "argv": [
+            "npm",
+            "run",
+            "build"
+          ],
+          "timeout_seconds": 300,
+          "scenarios": []
+        },
+        {
+          "id": "frontend-lint",
+          "kind": "build",
+          "argv": [
+            "npm",
+            "run",
+            "lint"
+          ],
+          "timeout_seconds": 180,
+          "scenarios": []
+        },
+        {
+          "id": "shared-contract",
+          "kind": "contract",
+          "argv": [
+            "npm",
+            "run",
+            "test:contracts"
+          ],
+          "timeout_seconds": 180,
+          "scenarios": []
+        },
+        {
+          "id": "frontend-unit",
+          "kind": "unit",
+          "argv": [
+            "npm",
+            "run",
+            "test:unit"
+          ],
+          "timeout_seconds": 600,
+          "scenarios": []
+        },
+        {
+          "id": "project-workflows-browser",
+          "kind": "browser",
+          "argv": [
+            "npx",
+            "--no-install",
+            "playwright",
+            "test",
+            "--config=tests/project-workflows/playwright.config.ts"
+          ],
+          "timeout_seconds": 2400,
+          "scenarios": [
+            {
+              "id": "graph-readable",
+              "description": "On the seeded guarded run (eight columns) at 1280x900 and 1440x900: the stage opens at no less than 60 % (the detail-level tag reads a percentage of at least 60 and the level 'Standard' or closer) and the card of the step the run is at lies wholly inside the visible stage, clear of the dock; the dock's placement follows the run frame's measured width (run-board's clientWidth, read at each size and never inferred from the viewport width): at 1200 px or more the live dock sits in its own column left of the stage (the dock's right edge at or left of the stage's left edge), and under 1200 px it overlays the stage with its 336 px reserve (the card of the step the run is at starts at least 336 px right of the stage's left edge while the dock is open); the columns keep their x order, the stage's scrollWidth does not exceed its clientWidth and the page is no wider than the window; at 1024x900 the dock overlays the stage as before and the step the run is at is inside the visible stage, clear of the dock; a breakpoint check sizes the window from the measured frame (the viewport width corrected by the measured difference, never a fixed viewport width) until run-board's clientWidth reads exactly 1200 px, where the dock sits in its own column left of the stage, and then exactly 1199 px, where the dock overlays the stage with its 336 px reserve; after 'Fit the graph' every step is in the viewport (integrate, and at 1024 px challenge too), and at that overview every chip label is at most two lines tall and none is cut (its scrollWidth does not exceed its clientWidth); at 390x844 the flow is top to bottom as before."
+            },
+            {
+              "id": "dock-times",
+              "description": "With page.clock fixed: the live dock bar of a seeded failed run reads 'failed <n> d ago' (and '\u00b7 ran <span>' when its span is recorded) and never 'for <span>'; a succeeded run's bar reads 'integrated <age> \u00b7 ran <span>'; a paused run's 'paused <n> d (since <Mon D>)'; an interrupted run's 'interrupted <n> d (since <Mon D>)'; an accepted run's bar still contains 'operator override' and then its age, never 'succeeded' and no second outcome word, and keeps tone-override; a running run's bar reads 'for <span>' and the span advances when the clock moves one minute; no bar contains a span of the form '<3+ digits>h<2 digits>m'."
+            },
+            {
+              "id": "sessions-cue",
+              "description": "On the seeded sessions run at 1440x900: a cue directly under the stage reads 'Sessions \u00b7 <n> \u00b7' then the dock's Spent figure (metered and covered apart) and '\u2193', its bottom at most 900 px and the stage ending above its top; the cue is a link, and activating it scrolls the Sessions heading into view and focuses it without changing the URL; the Sessions table lists every session of the payload in its order with label, linked node, model, status, started, duration, cost and session id by value, each row at most 56 px tall at 1440 px; a Claude row has one 'Copy' button and a 'Show command' toggle that reveals the resume command (its text equals the payload's command), a pi row has neither; a seeded run without sessions shows no cue and its stage ends within 8 px of the window's bottom."
+            },
+            {
+              "id": "now-open",
+              "description": "At 1440x900 on a seeded run whose Now banner has a focus step: activating 'Open <step> \u203a' in the live dock navigates to that step's node page (the URL ends /nodes/<id> and the node page renders its header); going Back returns to the run page; activating 'Show in graph' beside it centres that step's card in the stage and opens its sheet (data-node-id equals the step) without changing the URL; both are reachable with the keyboard; 'Show in graph' is on the run page's button allow-list."
+            },
+            {
+              "id": "identity-line",
+              "description": "At 1440x900 on seeded run pages: the identity line outside Details shows no definition revision (no 12-hex-character run of the revision); a run whose definition is current shows the visible chip definition-current reading 'definition current', a run whose definition changed shows definition-changed reading 'definition changed since'; run-branch reads '<source branch> @ <first 7 characters of the base commit>' with both full values in its title, visible on the identity line outside run-details; a run whose inputs record no source branch reads 'no branch recorded @ <sha>'; Details still lists Source branch, Base commit and the Pinned definition with its revision; at 390x844 run-branch is hidden, a changed definition is still visible and the page does not scroll sideways."
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "critique_app": {
+    "argv": [
+      "npx",
+      "--no-install",
+      "tsx",
+      "tests/project-workflows/dispatch-app.ts"
+    ],
+    "ready_path": "/api/dispatch/projects",
+    "timeout_seconds": 180
+  }
+}

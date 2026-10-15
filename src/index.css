@@ -5,6 +5,9 @@
   text-rendering: optimizeLegibility;
   line-height: 1.45;
 
+  /* The type floor: nothing the operator reads is smaller, except uppercase labels and text in a zoomable canvas. */
+  --type-floor: 13px;
+
   --bg: #f5f6f8;
   --surface: #ffffff;
   --surface-alt: #eceff3;
@@ -75,3 +78,7 @@
 * { box-sizing: border-box; }
 html, body, #root { height: 100%; }
 body { margin: 0; min-width: 320px; color: var(--text); background: var(--bg); overflow-x: hidden; }
+
+@media (max-width: 719px) {
+  :root { --type-floor: 14px; }
+}

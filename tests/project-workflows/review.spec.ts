@@ -61,7 +61,9 @@ test(`[scenario:review-verdict] The review node shows the verdict, reviewer, bun
   for (const row of await findingRows(page).all()) {
     await expect(row.locator('.ui-sev')).toHaveCount(1)
     await expect(row.locator('.finding-message')).toHaveCount(1)
-    await expect(row.locator('.finding-field-label')).toHaveText(['Worker', 'Reviewer', 'Requirement'])
+    await expect(row.getByTestId('finding-worker')).toHaveCount(1)
+    await expect(row.getByTestId('finding-reviewer')).toHaveCount(1)
+    await expect(row.locator('.finding-field-label')).toHaveText(['Requirement'])
   }
   for (const row of await findingRows(page).all()) {
     await expect(row).toHaveAttribute('data-severity', 'P2')
@@ -125,7 +127,9 @@ test(`[scenario:review-blocked] A blocked review shows the verdict, the failed n
   await expect(reviewer).toContainText('print-mode session')
   await expect(page.getByTestId('review-summary')).toHaveText('blocked with 2 findings: 1 open, 1 resolved, 1 blocking')
 
-  // The unresolved P1 is marked as the blocking finding; the resolved P2 is listed but not blocking.
+  // The unresolved P1 is marked as the blocking finding; the resolved P2 is listed but not blocking (the list opens on the P1, All shows both).
+  await expect(findingRows(page)).toHaveCount(1)
+  await toggle(page, 'all').click()
   await expect(findingRows(page)).toHaveCount(2)
   const blocking = byDisposition(page, 'open')
   await expect(blocking).toHaveCount(1)

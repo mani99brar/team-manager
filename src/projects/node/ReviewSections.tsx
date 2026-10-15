@@ -2,12 +2,12 @@ import type { FixLoop } from '../../../contracts/projects/v1.ts'
 import type { ReviewResult, RunDetail, RunInputs, RunScope } from '../api.ts'
 import { archivedRounds } from '../critique.ts'
 import { laneWording, runLanes } from '../findings.ts'
-import { BlockingFindings, CritiqueEvidence, ReviewPanel } from '../ReviewDetail.tsx'
+import { CritiqueEvidence, ReviewPanel } from '../ReviewDetail.tsx'
 import { NodeSection } from '../SectionIndex.tsx'
 import { Figures, SeverityChip } from '../ui/index.tsx'
 import { severityClass, severityTone } from '../tone.ts'
 import type { Resource } from '../useResource.ts'
-import { blockingFindings, reviewFigures } from './panels.ts'
+import { reviewFigures } from './panels.ts'
 import './review.css'
 import '../critique.css'
 
@@ -85,10 +85,10 @@ function EarlierRounds({ scope, loop }: { scope: RunScope; loop: FixLoop | null 
 }
 
 /**
- * The independent review's sections (docs/PRD_VIEWER_UX.md 4.7, docs/PRD_VIEWER_REVAMP.md 5.4): four figures, then what blocks
- * integration, one card per unresolved P0 or P1 before the findings, then the recorded verdict, the findings as cards with
- * their filter row and the reviewer cards, then the "Earlier rounds" list of archived rounds (PRD_USER_CRITIQUE 4.5). The
- * node page holds the review and the fix loop; these sections only render them.
+ * The independent review's sections (docs/PRD_VIEWER_UX.md 4.7, docs/PRD_VIEWER_REVAMP.md 5.4): four figures, then the
+ * recorded verdict, the one findings list (opening on the open P0/P1, each marked in place) with its filter row and the
+ * reviewer cards, then the "Earlier rounds" list of archived rounds (PRD_USER_CRITIQUE 4.5). The node page holds the review
+ * and the fix loop; these sections only render them.
  */
 export function ReviewSections({ scope, review, onRetryReview, unscopedUri, definitionNodes, snapshotNodes, inputs, fixLoop, refreshToken, onNavigate, onOpenRequirement, onOpenFile }: {
   scope: RunScope
@@ -108,11 +108,6 @@ export function ReviewSections({ scope, review, onRetryReview, unscopedUri, defi
   return (
     <>
       {recorded !== null && <ReviewFigures review={recorded} lanes={runLanes(definitionNodes, inputs)} />}
-      {recorded !== null && blockingFindings(recorded).length > 0 && (
-        <NodeSection sectionKey="blocking" title="Blocks integration" className="blocking-section" testId="blocking-findings">
-          <BlockingFindings review={recorded} scope={scope} definitionNodes={definitionNodes} inputs={inputs} onOpenRequirement={onOpenRequirement} />
-        </NodeSection>
-      )}
       <NodeSection sectionKey="review" title="Review result">
         <ReviewPanel
           scope={scope}

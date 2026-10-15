@@ -18,6 +18,7 @@ import {
   folderInfo,
   node,
   nodeBody,
+  openCollapsedGraph,
   openGraph,
   roots,
   waitForApi,
@@ -98,7 +99,7 @@ test('package and plugin files show a persistent installed-file notice; personal
 })
 
 test('an unavailable location is visible with its error, refuses creation, and recovers on Refresh when restored', async ({ page }) => {
-  await openGraph(page)
+  await openCollapsedGraph(page)
   await expandButton(page, 'Pi').click()
   await fit(page)
   const missing = node(page, `Pi/${PI_MISSING}`)
@@ -109,8 +110,10 @@ test('an unavailable location is visible with its error, refuses creation, and r
   await expect(currentCrumb(page)).toHaveText(LABELS[PI_MISSING])
   await expect(folderInfo(page)).toContainText('Unavailable')
   await expect(folderInfo(page)).toContainText('does not exist')
-  await expect(page.getByRole('button', { name: 'New file…' })).toBeDisabled()
-  await expect(page.getByRole('button', { name: 'New folder…' })).toBeDisabled()
+  // An unavailable location offers no creation: the File operations toolbar is not shown at all.
+  await expect(page.getByRole('toolbar', { name: 'File operations' })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'New file…' })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'New folder…' })).toHaveCount(0)
   await expandButton(page, LABELS[PI_MISSING]).click()
   await expect(page.getByRole('status')).toContainText('unavailable')
   await expect(missing.locator('.empty-tag')).toHaveCount(0)
@@ -189,7 +192,8 @@ test('creating at a source node requires choosing an available location; the fil
   expect((await stat(join(roots.piPersonal, folder))).isDirectory()).toBe(true)
   // Location nodes themselves are never rename/move/delete targets.
   await nodeBody(page, `Pi/${PI}`).click()
-  for (const name of ['Rename…', 'Move…', 'Delete…']) await expect(page.getByRole('button', { name })).toBeDisabled()
+  for (const name of ['Rename…', 'Move…', 'Delete…']) await expect(page.getByRole('button', { name })).toHaveCount(0)
+  for (const name of ['New file…', 'New folder…']) await expect(page.getByRole('button', { name })).toBeEnabled()
 })
 
 test('copy chooses a destination location under the other source, then a folder in it; move never crosses locations', async ({ page }) => {

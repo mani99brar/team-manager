@@ -12,6 +12,7 @@ import { stateTone, toneClass } from '../tone.ts'
 import { Time } from '../Time.tsx'
 import { cardStateWord, syncPhrase } from './derive.ts'
 import { StateGlyph, VisibilityChip } from './common.tsx'
+import { githubNotReadText } from './GithubColumn.tsx'
 import type { ProjectRunInfo } from './projectModel.ts'
 import type { DispatchOverview, ProjectDispatch } from './types.ts'
 
@@ -29,15 +30,16 @@ function Card({ data, onNavigate }: { data: CardData; onNavigate: (pathname: str
   const git = dispatch?.git ?? null
   const github = dispatch?.github ?? null
   const read = github?.status === 'read'
-  const word = cardStateWord({ tone: info.tone, waits: info.waits, running: info.running, allBad: info.allBad, featureCount: info.readableFeatures, worstLatestCount: info.worstLatestCount })
+  const loading = info.state === 'loading'
+  const word = cardStateWord({ tone: info.tone, waits: info.waits, running: info.running, paused: info.paused, allBad: info.allBad, loading, featureCount: info.readableFeatures, worstLatestCount: info.worstLatestCount })
   const latest = info.latestRun
-  const latestTone = latest ? stateTone({ status: latest.status, attention: latest.activity?.attention?.kind ?? null, accepted: latest.accepted }) : 'idle'
+  const latestTone = latest ? stateTone({ status: latest.status, accepted: latest.accepted }) : 'idle'
   const checkout = git?.checkout ?? null
   return (
     <li>
-      <AppLink href={projectPathname(project.project_id)} onNavigate={onNavigate} className={`dispatch-card ui-card ${toneClass(info.tone)}`} data-project-id={project.project_id}>
+      <AppLink href={projectPathname(project.project_id)} onNavigate={onNavigate} className={`dispatch-card ui-card ${toneClass(loading ? 'idle' : info.tone)}`} data-project-id={project.project_id}>
         <span className="dispatch-card-top">
-          <StateGlyph tone={info.tone} live={info.tone === 'run'} />
+          <StateGlyph tone={loading ? 'idle' : info.tone} live={!loading && info.tone === 'run'} />
           <span className="dispatch-card-name">{project.name}</span>
           <span className="dispatch-card-word">{word}</span>
         </span>
@@ -53,10 +55,18 @@ function Card({ data, onNavigate }: { data: CardData; onNavigate: (pathname: str
           </span>
         )}
         <span className="dispatch-card-line">
-          {info.allBad
-            ? 'its run state cannot be read by this viewer'
-            : <>{plural(info.features, 'feature')} · {plural(info.runCount, 'run')}{countsText(info)}{info.badFeatures > 0 ? ` · ${info.badFeatures} cannot be read` : ''}</>}
+          {loading
+            ? 'reading runs…'
+            : info.allBad
+              ? 'its run state cannot be read by this viewer'
+              : <>{plural(info.features, 'feature')} · {plural(info.runCount, 'run')}{countsText(info)}{info.badFeatures > 0 ? ` · ${info.badFeatures} cannot be read` : ''}</>}
         </span>
+        {!loading && (info.waits > 0 || info.paused > 0 || info.running > 0) && (
+          // What needs the operator and what is live, each counted once: a run that needs the operator is a wait, never running.
+          <span className="dispatch-card-line dispatch-card-live" data-testid="dispatch-card-live">
+            {[info.waits > 0 ? `${info.waits} waits on you` : '', info.running > 0 ? `${info.running} running` : '', info.paused > 0 ? `${info.paused} paused` : ''].filter(Boolean).join(' · ')}
+          </span>
+        )}
         {latest && (
           <span className={`dispatch-card-line ${toneClass(latestTone)}`}>
             latest <code>{latest.run_id}</code> <span className="dispatch-word">{latest.accepted ? OVERRIDE_LABEL : STATUS_LABEL[latest.status]}</span>
@@ -66,7 +76,7 @@ function Card({ data, onNavigate }: { data: CardData; onNavigate: (pathname: str
         <span className="dispatch-card-foot">
           {read
             ? <><span>{plural(github.open_prs ?? 0, 'open PR')}</span><span>{plural(github.open_issues ?? 0, 'open issue')}</span></>
-            : <span className="dispatch-muted">GitHub not read: {github?.reason ?? 'not read yet'}</span>}
+            : <span className="dispatch-muted">{githubNotReadText(github ?? null)}</span>}
           <span className="dispatch-card-open" aria-hidden="true">Open ›</span>
         </span>
       </AppLink>
@@ -77,7 +87,8 @@ function Card({ data, onNavigate }: { data: CardData; onNavigate: (pathname: str
 type Props = {
   cards: readonly CardData[]
   overview: DispatchOverview | null
-  repositoryCount: number
+  /** How many repositories the projects live in, null until the dispatch overview is read, 'failed' when that read failed. */
+  repositoryCount: number | null | 'failed'
   /** When the run lists were read (`homeMeta.settledAt`), not a ticking clock; null until they are read (V15). */
   runsReadAt: number | null
   /** The reason the run read failed, when it did; null otherwise (V15). */
@@ -87,15 +98,20 @@ type Props = {
 
 export function ProjectsPage({ cards, overview, repositoryCount, runsReadAt, runsError, onNavigate }: Props) {
   const githubReads = (overview?.projects ?? []).map(p => p.github).filter(g => g.status === 'read' && g.read_at !== null)
+  const noGithubRemote = (overview?.projects ?? []).length > 0 && (overview?.projects ?? []).every(p => p.github.status === 'not_github')
   const oldestGithub = githubReads.length ? githubReads.reduce((oldest, g) => (Date.parse(g.read_at!) < Date.parse(oldest) ? g.read_at! : oldest), githubReads[0].read_at!) : null
   return (
     <section className="dispatch-projects" aria-labelledby="dispatch-projects-title" data-testid="dispatch-projects">
       <header className="dispatch-page-head">
         <h1 id="dispatch-projects-title">Projects</h1>
         <p className="dispatch-meta" data-testid="dispatch-projects-meta">
-          {plural(cards.length, 'project')} in {plural(repositoryCount, 'repository').replace('repositorys', 'repositories')}
-          {' · '}<span data-testid="dispatch-runs-read">{runsReadAt !== null ? <>runs read <Time iso={new Date(runsReadAt).toISOString()} /></> : `runs not read${runsError ? `: ${runsError}` : ''}`}</span>
-          {' · '}{oldestGithub ? <>GitHub read <Time iso={oldestGithub} /></> : 'GitHub not read'}
+          {repositoryCount === null
+            ? <>{plural(cards.length, 'project')} · repositories: reading…</>
+            : repositoryCount === 'failed'
+            ? <>{plural(cards.length, 'project')} · repositories not read</>
+            : <>{plural(cards.length, 'project')} in {plural(repositoryCount, 'repository').replace('repositorys', 'repositories')}</>}
+          {' · '}<span data-testid="dispatch-runs-read">{runsReadAt !== null ? <>runs read <Time iso={new Date(runsReadAt).toISOString()} /></> : runsError ? `runs not read: ${runsError}` : 'reading runs…'}</span>
+          {oldestGithub ? <>{' · '}GitHub read <Time iso={oldestGithub} /></> : noGithubRemote ? null : <>{' · '}GitHub not read</>}
         </p>
         <p className="dispatch-muted">Each card opens the project's own page: runs by feature on the step chart, local against origin, pull requests and issues. Ordered as the rail is.</p>
       </header>

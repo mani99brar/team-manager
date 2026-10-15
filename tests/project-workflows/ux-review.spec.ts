@@ -18,7 +18,9 @@ installHooks()
 const nodeUrl = (runId: string, nodeId: string) => runUrl(runId, nodeId, UX_REVIEW_WORKFLOW_ID)
 const findings = (page: Page) => page.getByTestId('review-findings')
 const findingRows = (page: Page) => findings(page).getByTestId('finding')
-const blockingCards = (page: Page) => page.getByTestId('blocking-finding')
+/** The findings that block, marked in place in the one findings list. */
+const blockingCards = (page: Page) => findingRows(page).and(page.locator('[data-blocking="true"]'))
+const showAll = (page: Page) => findings(page).getByTestId('findings-filters').locator('button[data-filter="all"]').click()
 const reviewer = (page: Page, id: string) => page.locator(`[data-testid="reviewer-entry"][data-reviewer="${id}"]`)
 const indexLink = (page: Page, key: string) => page.getByTestId('section-index').locator(`a[data-section="${key}"]`)
 const pageWidth = (page: Page) => page.evaluate(() => (globalThis as unknown as { document: { documentElement: { scrollWidth: number } } }).document.documentElement.scrollWidth)
@@ -27,26 +29,35 @@ const precedes = async (first: Locator, second: Locator) => first.evaluate((a, b
 const display = (target: Locator) => target.evaluate(element => (globalThis as unknown as { getComputedStyle: (target: unknown) => { display: string } }).getComputedStyle(element).display)
 const overflow = (target: Locator) => target.evaluate(element => (element as unknown as { scrollWidth: number; clientWidth: number }).scrollWidth - (element as unknown as { clientWidth: number }).clientWidth)
 
-test(`[scenario:review-blocking-first] A review opens on its blocking finding before the finding cards; reviewers show their time only from served fields; phone width shows the same findings as cards (${phase})`, async ({ page }, testInfo) => {
+test(`[scenario:review-blocking-first] A review opens on its blocking finding, marked in place in the one findings list; reviewers show their time only from served fields; phone width shows the same findings as cards (${phase})`, async ({ page }, testInfo) => {
   await page.setViewportSize({ width: 1440, height: 900 })
   // A fixed clock: a reviewer that recorded no verdict shows no ticking time.
   await page.clock.install({ time: new Date('2026-03-05T10:00:00Z') })
   await page.goto(nodeUrl(RUN_REVIEW_PENDING, 'review'))
   await expect(nodeDetail(page)).toHaveAttribute('data-node-id', 'review')
+  // It opens on the open P0/P1: the one blocking finding; All shows both findings.
+  await expect(findingRows(page)).toHaveCount(1)
+  await showAll(page)
   await expect(findingRows(page)).toHaveCount(2)
 
-  // The blocking card: outside the findings, no `finding` test id, before the finding cards, in the first screen.
+  // The blocking card: the first card of the one list, marked in place, in the first screen. There is no second list.
   const cards = blockingCards(page)
   await expect(cards).toHaveCount(1)
   await expect(cards).toContainText(PENDING_P1)
-  await expect(cards).toContainText('P1 · open · coverage · lane ui')
-  await expect(findings(page).getByTestId('blocking-finding')).toHaveCount(0)
-  await expect(page.getByTestId('blocking-findings').getByTestId('finding')).toHaveCount(0)
-  expect(await precedes(cards.first(), findingRows(page).first())).toBe(true)
+  await expect(cards.locator('.finding-card-head')).toContainText('P1 coverage ui open blocks integration')
+  await expect(cards.getByTestId('finding-reviewer')).toHaveText('coverage')
+  await expect(cards.getByTestId('finding-worker')).toHaveText('ui')
+  await expect(page.getByTestId('blocking-finding')).toHaveCount(0)
+  await expect(page.getByTestId('blocking-findings')).toHaveCount(0)
+  expect(await precedes(cards.first(), findingRows(page).nth(1))).toBe(true)
+  await expect(findingRows(page).first()).toHaveAttribute('data-blocking', 'true')
   expect((await cards.first().boundingBox())!.y).toBeLessThan(900)
-  await expect(cards.getByRole('link', { name: 'Requirement in the ui task ›' })).toBeVisible()
-  await expect(indexLink(page, 'blocking')).toHaveAttribute('data-count', '1')
+  await cards.getByTestId('finding-more').click()
+  await expect(cards.getByRole('link', { name: 'Open in the ui task' })).toBeVisible()
+  // The index has no Blocking entry; Findings counts every finding and notes the open P0/P1.
+  await expect(indexLink(page, 'blocking')).toHaveCount(0)
   await expect(indexLink(page, 'review')).toHaveAttribute('data-count', '2')
+  await expect(indexLink(page, 'review')).toContainText('1 open P0/P1')
 
   // Decided: from launch to the accepted file. No verdict: the launch time only, and nothing ticks.
   await expect(reviewer(page, 'coverage').getByTestId('reviewer-status')).toHaveText('blocked the candidate')
@@ -62,18 +73,22 @@ test(`[scenario:review-blocking-first] A review opens on its blocking finding be
 
   // Both reviewers approved: their durations, and no blocking card.
   await page.goto(nodeUrl(RUN_REVIEW_APPROVED, 'review'))
+  // Nothing blocks, so the list opens on every finding.
   await expect(findingRows(page)).toHaveCount(3)
   await expect(reviewer(page, 'general').getByTestId('reviewer-time')).toHaveText('took 3m49s')
   await expect(reviewer(page, 'coverage').getByTestId('reviewer-time')).toHaveText('took 2m04s')
   await expect(blockingCards(page)).toHaveCount(0)
   await expect(indexLink(page, 'blocking')).toHaveCount(0)
+  await expect(indexLink(page, 'review')).not.toContainText('open P0/P1')
 
   // A print reviewer records no launch time: said so, with no duration or deadline.
   await page.goto(nodeUrl(RUN_REVIEW_PRINT, 'review'))
+  await expect(findingRows(page)).toHaveCount(1)
+  await showAll(page)
   await expect(findingRows(page)).toHaveCount(2)
   await expect(blockingCards(page)).toHaveCount(1)
   await expect(blockingCards(page)).toContainText(PRINT_P1)
-  expect(await precedes(blockingCards(page).first(), findingRows(page).first())).toBe(true)
+  await expect(findingRows(page).first()).toHaveAttribute('data-blocking', 'true')
   const print = reviewer(page, 'review')
   await expect(print.getByTestId('reviewer-time')).toContainText('launch time not recorded (print)')
   await expect(print).not.toContainText(/took|deadline/)
@@ -84,7 +99,10 @@ test(`[scenario:review-blocking-first] A review opens on its blocking finding be
   await expect(findingRows(page)).toHaveCount(2)
   expect(await display(findingRows(page).first())).toBe('flex')
   await expect(findingRows(page).first().locator('.ui-sev')).toHaveCount(1)
-  await expect(findingRows(page).first().locator('.finding-field-label')).toHaveText(['Worker', 'Reviewer', 'Requirement'])
+  // Every field still labelled: the head names the reviewer and the lane, the requirement keeps its label.
+  await expect(findingRows(page).first().getByTestId('finding-reviewer')).toBeVisible()
+  await expect(findingRows(page).first().getByTestId('finding-worker')).toBeVisible()
+  await expect(findingRows(page).first().locator('.finding-field-label')).toHaveText(['Requirement'])
   for (const card of await findingRows(page).all()) expect(await overflow(card)).toBeLessThanOrEqual(0)
   await expect.poll(() => pageWidth(page)).toBeLessThanOrEqual(390)
   await expect(blockingCards(page)).toHaveCount(1)

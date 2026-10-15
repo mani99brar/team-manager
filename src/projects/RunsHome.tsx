@@ -1,20 +1,24 @@
-import { useEffect, useMemo, useState, type MouseEvent, type ReactNode } from 'react'
-import { describeApiError, type Project, type ProjectRuns, type RunSummary, type WorkflowDefinition, type WorkflowRuns } from './api.ts'
+import { useEffect, useMemo, useState, useSyncExternalStore, type MouseEvent, type ReactNode } from 'react'
+import { describeApiError, fetchRegistryPage, type Project, type ProjectRuns, type RunSummary, type WorkflowDefinition, type WorkflowRuns } from './api.ts'
+import type { RegistryRuns } from '../../contracts/projects/dispatch.ts'
 import {
   PAUSED_SHOWN,
-  filterRecent, firstRows, groupByDay, groupByProject, homeSections, laneNamesOf, latestFeature, latestRun, movedAt, NEXT_STEP,
-  RECENT_SHOWN, recentCounts, rowSummary, searchRows, sincePausedLabel, stepTally, waitingKind, workflowTitle,
-  type ListRow, type RecentFilter, type WaitingKind,
+  classifyRuns, classOf, compareCreated, firstRows, groupByDay, groupByProject, homeSections, laneNamesOf, latestFeature, latestRun, movedAt, NEXT_STEP,
+  mergeRunRows, RECENT_SHOWN, registryKey, rowSummary, sectionOrderWords, sortHomeSections, sortRuns, stepTally, workflowTitle,
+  type HomeSections, type ListRow, type ListSort, type NeedKind, type RowGroup, type RunClasses,
 } from './lists.ts'
+import { FilterBar, NoMatch, type ListControl } from './FilterBar.tsx'
+import { filterItems, matchesFilter, offeredDate, scopeLine, statusCounts, type FilterItem } from './runFilter.ts'
 import { LiveStatus } from './LiveStatus.tsx'
-import { AppLink, LoadingPanel, StatusBadge } from './panels.tsx'
+import { AppLink, ErrorPanel, LoadingPanel, StatusBadge } from './panels.tsx'
 import { runPathname, workflowPathname } from './routes.ts'
-import { RunRow } from './RunRow.tsx'
+import { PinToggle, RunRow } from './RunRow.tsx'
+import { pinStore } from './pins.ts'
 import { shortRevision } from './status.ts'
 import { Time } from './Time.tsx'
 import { formatAgo } from './time.ts'
 import { stateTone, toneClass } from './tone.ts'
-import { Chip, FilterButton, FilterRow, Section } from './ui/index.tsx'
+import { Chip, FilterButton, Section } from './ui/index.tsx'
 import { useTimeZone } from './useNow.ts'
 import type { Resource, ResourceMeta } from './useResource.ts'
 import './lists.css'
@@ -41,14 +45,16 @@ const namesOf = (row: Row) => contextOf(row).filter((name): name is string => Bo
 const hrefOf = (row: Row) => runPathname(row.project.project_id, row.workflow.workflow_id, row.run.run_id)
 
 /** What a Needs-you card's chip says waits, in words beside its colour. */
-const WAITING_LABEL: Record<WaitingKind, string> = { question: 'question waits', pane: 'pane needs you', approval: 'approval waits' }
+const WAITING_LABEL: Record<NeedKind, string> = {
+  question: 'question waits', pane: 'pane needs you', approval: 'approval waits', decision: 'decision waits', interrupted: 'run interrupted',
+}
 
 /**
  * A run that waits on the operator (docs/PRD_VIEWER_REVAMP.md 5.1): a warn card whose link is its direct child, named by the
  * run id first, then what waits, the feature and project, the served headline, the next step as a label and since when. The
  * exact command needs the run detail, so it stays on the run page.
  */
-function NeedsCard({ row, kind, now, onNavigate }: { row: Row; kind: WaitingKind; now: number; onNavigate: (pathname: string) => void }) {
+function NeedsCard({ row, kind, now, onNavigate }: { row: Row; kind: NeedKind; now: number; onNavigate: (pathname: string) => void }) {
   const { run } = row
   const since = run.activity?.attention?.since ?? null
   const headline = run.activity?.headline ?? null
@@ -62,7 +68,7 @@ function NeedsCard({ row, kind, now, onNavigate }: { row: Row; kind: WaitingKind
           <StatusBadge status={run.status} accepted={Boolean(run.accepted)} />
         </span>
         <span className="home-card-context">{namesOf(row)}</span>
-        <span className="home-card-summary">{rowSummary(run, row.labels)}</span>
+        <span className="home-card-summary">{rowSummary(run, row.labels, kind)}</span>
         {headline && <span className="home-card-cause" data-testid="run-cause">{headline}</span>}
         <span className="home-card-foot">
           <span className="home-card-next" data-testid="next-step">Next: {NEXT_STEP[kind]}</span>
@@ -70,8 +76,72 @@ function NeedsCard({ row, kind, now, onNavigate }: { row: Row; kind: WaitingKind
           <span className="home-card-open" aria-hidden="true">open run ›</span>
         </span>
       </AppLink>
+      <PinToggle target={run} className="home-card-pin" />
     </li>
   )
+}
+
+/** What Triage's "All time" has read of the registry's pages: their runs, the workflows they could not read, and where it stopped. */
+type AllRead = {
+  runs: RunSummary[]
+  unreadable: RegistryRuns['unreadable']
+  /** The cursor of the next page to read: null before the first page and after the last. */
+  cursor: string | null
+  /** Every page answered and no cursor remains. */
+  done: boolean
+  loading: boolean
+  /** The failed page's error; Retry reads that page again, and only it. */
+  error: unknown
+}
+
+const NOTHING_READ: AllRead = { runs: [], unreadable: [], cursor: null, done: false, loading: false, error: null }
+
+/**
+ * Reads the registry's pages one after another while `active` ("All time" chosen), one request per page: from the first page
+ * each time it becomes active (a reload or choosing "All time" again), and from the failed page on Retry, never a page already
+ * read. Leaving "All time" stops the read and drops what it read, with no request.
+ */
+function useAllRuns(active: boolean): AllRead & { retry: () => void } {
+  const [read, setRead] = useState<AllRead>(NOTHING_READ)
+  // One pass reads pages until none remains or one fails, from the read it starts with (nothing, or what was read before Retry).
+  const [pass, setPass] = useState<{ id: number; from: AllRead } | null>(null)
+  const [seen, setSeen] = useState(false)
+  if (seen !== active) {
+    setSeen(active)
+    setRead(active ? { ...NOTHING_READ, loading: true } : NOTHING_READ)
+    setPass(previous => (active ? { id: (previous?.id ?? 0) + 1, from: NOTHING_READ } : null))
+  }
+  useEffect(() => {
+    if (pass === null) return
+    const controller = new AbortController()
+    let acc: AllRead = pass.from
+    let cursor = acc.cursor
+    void (async () => {
+      try {
+        do {
+          const page = await fetchRegistryPage(cursor, controller.signal)
+          if (controller.signal.aborted) return
+          const known = new Set(acc.unreadable.map(item => `${item.project_id}/${item.workflow_id}`))
+          cursor = page.next_cursor
+          acc = {
+            runs: [...acc.runs, ...page.runs], unreadable: [...acc.unreadable, ...page.unreadable.filter(item => !known.has(`${item.project_id}/${item.workflow_id}`))],
+            cursor, done: cursor === null, loading: cursor !== null, error: null,
+          }
+          setRead(acc)
+        } while (cursor !== null)
+      } catch (error) {
+        if (controller.signal.aborted) return
+        setRead({ ...acc, loading: false, error })
+      }
+    })()
+    return () => controller.abort()
+  }, [pass])
+  const retry = () => {
+    if (read.error === null || pass === null) return
+    setRead({ ...read, loading: true, error: null })
+    setPass({ id: pass.id + 1, from: { ...read, error: null } })
+  }
+  return { ...read, retry }
 }
 
 type HomeProps = {
@@ -79,10 +149,20 @@ type HomeProps = {
   runs: Resource<ProjectRuns[]>
   meta: ResourceMeta
   now: number
+  /** The home read's cadence in force, so the live status reads stale only after a poll is late at that cadence. */
+  pollMs?: number
   /** The read-only note, said once at the rail's foot. */
   note?: string | null
   onNavigate: (pathname: string) => void
+  /** The list's state from the URL (the one filter bar) and its writers. */
+  list: ListControl
+  /** The opened folds of this page (Paused's "Show all", the superseded fold) and their writer. */
+  folds: Readonly<Record<string, boolean>>
+  onFold: (key: string, open: boolean | null) => void
 }
+
+/** A Triage row as the filter bar reads it: the run, its class in the unfiltered list, and the names it is searched by. */
+const itemOf = (row: Row, classes: RunClasses): FilterItem => ({ run: row.run, cls: classOf(classes, row.run), names: [row.title, row.project.name] })
 
 /**
  * Runs home, `/projects` (docs/PRD_VIEWER_REVAMP.md 5.1, after PRD_VIEWER_UX 4.1): a project rail with a status dot per
@@ -90,18 +170,70 @@ type HomeProps = {
  * as cards and a searchable, filterable Recent grouped by day. Everything renders from the run lists' served activity; no run
  * detail is read for it.
  */
-export function RunsHome({ runs, meta, now, note = null, onNavigate }: HomeProps) {
+export function RunsHome({ projects, runs, meta, now, pollMs, note = null, onNavigate, list, folds, onFold }: HomeProps) {
   const [zone] = useTimeZone()
   const loaded = runs.status === 'ready' ? runs.data : null
   const rows = useMemo(() => loaded?.flatMap(entry => rowsOf(entry.project, entry.workflows)) ?? [], [loaded])
-  const sections = homeSections(rows, now, zone)
-  const [allPaused, setAllPaused] = useState(false)
-  const pausedShown = allPaused ? sections.paused : sections.paused.slice(0, PAUSED_SHOWN)
-  const errors = (loaded ?? []).flatMap(entry => entry.error !== null
-    ? [{ what: entry.project.name, error: entry.error }]
-    : entry.workflows.filter(item => item.error !== null).map(item => ({ what: `${entry.project.name} · ${item.workflow.workflow_id}`, error: item.error })))
+  // "All time" (a URL date the other lists do not offer reads as "Any date" here and there): the registry's pages, read on request.
+  const allTime = offeredDate('triage', list.filter.date) === 'all'
+  const allRead = useAllRuns(allTime)
+  // The pages' runs as rows, named by the workflow the home read holds (else by its id alone); each run once, the home row first.
+  const allRows = useMemo(() => {
+    if (!allTime) return rows
+    const workflows = new Map((loaded ?? []).flatMap(entry => entry.workflows.map(item => [`${entry.project.project_id}/${item.workflow.workflow_id}`, item] as const)))
+    const pageRows = allRead.runs.map((run): Row => {
+      const project = projects.find(candidate => candidate.project_id === run.project_id) ?? { project_id: run.project_id, name: run.project_id }
+      const known = workflows.get(`${run.project_id}/${run.workflow_id}`)
+      const workflow = known?.workflow ?? ({ workflow_id: run.workflow_id, name: run.workflow_id, nodes: [] } as unknown as WorkflowDefinition)
+      return { key: registryKey(run), run, project, workflow, title: workflowTitle(workflow, known ? latestFeature(known.runs) : null), labels: labelsOf(workflow) }
+    })
+    return mergeRunRows(rows, pageRows)
+  }, [allTime, rows, allRead.runs, loaded, projects])
+  // The list's one classification, over every loaded run before any filter: every section, row, card and count below reads
+  // it, so hiding a run never changes what another needs. Under "All time" it covers every run read; the tab title, the
+  // badges and Pinned still count the home read only.
+  const homeClasses = useMemo(() => classifyRuns(rows.map(row => row.run)), [rows])
+  const allClasses = useMemo(() => (allTime ? classifyRuns(allRows.map(row => row.run)) : homeClasses), [allTime, allRows, homeClasses])
+  const classes = homeClasses
+  const all = homeSections(rows, now, zone, classes)
+  // The one bar filters the full set before sectioning: each section keeps its runs that match, in the chosen sort.
+  const filter = useMemo(() => ({ ...list.filter, date: offeredDate('triage', list.filter.date) }), [list.filter])
+  const filtering = list.active
+  const context = { now, zone }
+  const keep = (items: Row[]) => (filtering ? items.filter(row => matchesFilter(itemOf(row, classes), filter, context)) : items)
+  const sections: HomeSections<Row> = sortHomeSections({
+    needsYou: keep(all.needsYou), today: keep(all.today), running: keep(all.running), paused: keep(all.paused),
+    superseded: keep(all.superseded), recent: keep(all.recent), classes,
+  }, filter.sort)
+  const sectioned = [...all.needsYou, ...all.running, ...all.today, ...all.paused, ...all.superseded, ...all.recent]
+  const matched = sections.needsYou.length + sections.running.length + sections.today.length + sections.paused.length + sections.superseded.length + sections.recent.length
+  const counts = statusCounts(sectioned.map(row => itemOf(row, classes)), filter, context)
+  const allPaused = folds['paused-all'] === true
+  const homeErrors = (loaded ?? []).flatMap(entry => entry.error !== null
+    ? [{ what: entry.project.name, error: entry.error as unknown }]
+    : entry.workflows.filter(item => item.error !== null).map(item => ({ what: `${entry.project.name} · ${item.workflow.workflow_id}`, error: item.error as unknown })))
+  // Under "All time" a workflow the registry's pages could not read is named too, so "all loaded" never claims it.
+  const errors = allTime ? [...homeErrors, ...allRead.unreadable.flatMap(item => {
+    const what = `${projects.find(project => project.project_id === item.project_id)?.name ?? item.project_id} · ${item.workflow_id}`
+    return homeErrors.some(entry => entry.what === what) ? [] : [{ what, error: new Error(`Not read by All time (${item.code})`) as unknown }]
+  })] : homeErrors
+  // A project is unread when its own read failed or every one of its workflows' run lists did.
+  const unreadProjects = (loaded ?? []).filter(entry => entry.error !== null || (entry.workflows.length > 0 && entry.workflows.every(item => item.error !== null))).length
+  // Workflows not read inside projects that were: a separate clause, never mixed into the project fraction.
+  const unreadWorkflows = (loaded ?? []).filter(entry => entry.error === null && !entry.workflows.every(item => item.error !== null))
+    .reduce((sum, entry) => sum + entry.workflows.filter(item => item.error !== null).length, 0)
+  // With nothing waiting, running or finished today, Paused is the only work left: it shows every paused run, unfolded. With no
+  // run list read there is no evidence for that, so the quiet line needs one read list (a partial read says it is incomplete).
+  // Under a filter the sections say what matched instead.
+  const listsRead = (loaded ?? []).some(entry => entry.error === null && entry.workflows.some(item => item.error === null))
+  const quiet = !filtering && listsRead && all.needsYou.length === 0 && all.today.length === 0 && all.running.length === 0
+  const pausedShown = allPaused || quiet ? sections.paused : sections.paused.slice(0, PAUSED_SHOWN)
   const count = (items: Row[]) => (loaded === null ? null : items.length)
-  const needsCount = count(sections.needsYou)
+  // The tab title counts what waits, over the unfiltered list.
+  const needsCount = count(all.needsYou)
+  /** A section's header count: its rows, or "<k> of <n>" while the bar filters. */
+  const heading = (title: string, shown: Row[], total: Row[]) => `${title}${loaded === null ? '' : ` · ${filtering ? `${shown.length} of ${total.length}` : total.length}`}`
+  const order = sectionOrderWords(filter.sort)
 
   // The tab title keeps the count of what waits, so a background tab still says it.
   useEffect(() => {
@@ -119,28 +251,30 @@ export function RunsHome({ runs, meta, now, note = null, onNavigate }: HomeProps
     target?.querySelector<HTMLElement>('a[data-run-id]')?.focus({ preventScroll: true })
   }
   const jumps: { id: string; label: string; count: number | null }[] = [
-    { id: 'needs-you', label: 'Needs you', count: needsCount },
-    { id: 'today-runs', label: 'Today', count: count(sections.today) },
+    { id: 'needs-you', label: 'Needs you', count: count(sections.needsYou) },
     { id: 'running-runs', label: 'Running', count: count(sections.running) },
+    { id: 'today-runs', label: 'Today', count: count(sections.today) },
     { id: 'paused-runs', label: 'Paused', count: count(sections.paused) },
     { id: 'recent-runs', label: 'Recent', count: count(sections.recent) },
   ]
-  const rowsList = (items: Row[], trailing?: (row: Row) => { text: string; tone: 'pause' } | null): ReactNode => (
+  const rowsList = (items: Row[], trailing?: (row: Row) => { text: string; tone?: 'pause' } | null): ReactNode => (
     <ul className="run-rows">
       {items.map(row => (
-        <RunRow key={row.key} run={row.run} labels={row.labels} context={contextOf(row)} lanes={laneNamesOf(row.workflow.nodes)}
+        <RunRow key={row.key} run={row.run} cls={classOf(classes, row.run)} labels={row.labels} context={contextOf(row)} lanes={laneNamesOf(row.workflow.nodes)}
           trailing={trailing?.(row) ?? null} now={now} onNavigate={onNavigate} href={hrefOf(row)} />
       ))}
     </ul>
   )
+  const sub = (rows: Row[], empty: string, words = order) => (filtering && rows.length === 0 ? 'No run matches.' : rows.length === 0 ? empty : [stepTally(rows), words].filter(Boolean).join(' · '))
+  const none = (shown: Row[], total: Row[]) => filtering && shown.length === 0 && total.length > 0 && <NoMatch />
 
   return (
-    <div className="home-layout triage-layout">
+    <div className="triage-layout">
       <section className="runs-home" aria-labelledby="runs-home-title">
         <div className="runs-home-head">
           <h2 id="runs-home-title">Runs</h2>
-          {loaded !== null && <LiveStatus status="running" meta={meta} now={now} />}
-          {loaded !== null && (
+          {loaded !== null && <LiveStatus status="running" meta={meta} now={now} pollMs={pollMs} />}
+          {loaded !== null && !allTime && (
             <nav className="home-jumps" aria-label="Sections" data-testid="home-jumps">
               {jumps.map(jump => (
                 <a key={jump.id} href={`#${jump.id}`} className={jump.count ? 'has-rows' : ''} onClick={jumpTo(jump.id)} data-section={jump.id}>
@@ -152,32 +286,73 @@ export function RunsHome({ runs, meta, now, note = null, onNavigate }: HomeProps
         </div>
         {runs.status === 'loading' || runs.status === 'idle' ? <LoadingPanel>Loading the runs of every project…</LoadingPanel> : (
           <>
-            <Section id="needs-you" headingId="needs-you-title" data-testid="needs-you" className="home-section" title={`Needs you${needsCount !== null ? ` · ${needsCount}` : ''}`}
-              sub={needsCount === 0 ? 'nothing waits on you' : 'longest waiting first; the command is on the run page'}>
+            {/* The one home read failed: never an empty or all-clear claim. A failed poll keeps the rows read before and says so. */}
+            {runs.status === 'error' && <p className="home-incomplete" role="status" data-testid="home-not-read">Runs not read: {describeApiError(runs.error)}</p>}
+            {runs.status === 'error' && <Pinned rows={[]} classes={classes} now={now} onNavigate={onNavigate} />}
+            {/* "All time" reads the registry's pages on its own: a failed home read still lists what they read, with the bar to leave. */}
+            {runs.status === 'error' && allTime && (
+              <AllRuns rows={allRows} classes={allClasses} read={allRead} filter={filter} filtering={filtering} context={context} list={list} now={now} onNavigate={onNavigate} />
+            )}
+            {runs.status === 'ready' && meta.lastError !== null && (
+              <p className="home-incomplete" role="status" data-testid="home-not-read">Runs not read: {describeApiError(meta.lastError)} · showing the runs read before</p>
+            )}
+            {runs.status === 'ready' && (<>
+            {(unreadProjects > 0 || unreadWorkflows > 0) && loaded !== null && (
+              <p className="home-incomplete" role="status">
+                <span data-testid="lists-incomplete">{loaded.length - unreadProjects} of {loaded.length} projects read; lists incomplete</span>
+                {unreadWorkflows > 0 && <span data-testid="lists-incomplete-workflows">{` · ${unreadWorkflows} ${unreadWorkflows === 1 ? 'workflow' : 'workflows'} of read projects not read`}</span>}
+                {' · '}<a href="#lists-attention" data-testid="lists-incomplete-link" onClick={jumpTo('lists-attention')}>See Attention</a>
+              </p>
+            )}
+            <Pinned rows={rows} classes={classes} now={now} onNavigate={onNavigate} />
+            {allTime ? (
+              <AllRuns rows={allRows} classes={allClasses} read={allRead} filter={filter} filtering={filtering} context={context} list={list} now={now} onNavigate={onNavigate} />
+            ) : (
+              <FilterBar kind="triage" state={filter} counts={counts} scope={scopeLine('triage', matched, sectioned.length, false)} active={filtering}
+                onChange={(next, options) => list.change(next, options)} onCommit={list.flush} onClear={list.clear} />
+            )}
+            {!allTime && (<>
+            {quiet && <p className="home-quiet" data-testid="home-quiet">Nothing waits on you, moved today or runs</p>}
+            <Section id="needs-you" headingId="needs-you-title" data-testid="needs-you" className="home-section" hidden={quiet} title={heading('Needs you', sections.needsYou, all.needsYou)}
+              sub={filtering && sections.needsYou.length === 0 ? 'No run matches.' : all.needsYou.length === 0 ? 'nothing waits on you' : `${sectionOrderWords(filter.sort, true)}; the command is on the run page`}>
+              {none(sections.needsYou, all.needsYou)}
               {sections.needsYou.length > 0 && (
                 <ul className="home-cards">
-                  {sections.needsYou.map(row => <NeedsCard key={row.key} row={row} kind={waitingKind(row.run)!} now={now} onNavigate={onNavigate} />)}
+                  {sections.needsYou.map(row => <NeedsCard key={row.key} row={row} kind={classOf(classes, row.run).needs!} now={now} onNavigate={onNavigate} />)}
                 </ul>
               )}
             </Section>
-            <Section id="today-runs" headingId="today-title" data-testid="today-runs" className="home-section" title={`Today${count(sections.today) !== null ? ` · ${count(sections.today)}` : ''}`}
-              sub={sections.today.length === 0 ? 'nothing moved today' : `every run that moved today, running first · ${stepTally(sections.today) || 'latest activity first'}`}>
-              {sections.today.length > 0 && rowsList(sections.today)}
-            </Section>
-            <Section id="running-runs" headingId="running-title" data-testid="running-runs" className="home-section" title={`Running${count(sections.running) !== null ? ` · ${count(sections.running)}` : ''}`}
-              sub={sections.running.length === 0 ? 'nothing else is running' : `since an earlier day · ${stepTally(sections.running) || 'latest activity first'}`}>
+            <Section id="running-runs" headingId="running-title" data-testid="running-runs" className="home-section" hidden={quiet} title={heading('Running', sections.running, all.running)}
+              sub={sub(sections.running, 'nothing is running')}>
+              {none(sections.running, all.running)}
               {sections.running.length > 0 && rowsList(sections.running)}
             </Section>
-            <Section id="paused-runs" headingId="paused-title" data-testid="paused-runs" className="home-section" title={`Paused${count(sections.paused) !== null ? ` · ${count(sections.paused)}` : ''}`}
-              sub={sections.paused.length === 0 ? 'nothing is paused' : `since an earlier day, longest paused first · ${stepTally(sections.paused) || ''}`}>
-              {sections.paused.length > 0 && rowsList(pausedShown, row => ({ text: sincePausedLabel(row.run, now), tone: 'pause' }))}
+            <Section id="today-runs" headingId="today-title" data-testid="today-runs" className="home-section" hidden={quiet} title={heading('Today', sections.today, all.today)}
+              sub={sub(sections.today, 'nothing finished today')}>
+              {none(sections.today, all.today)}
+              {sections.today.length > 0 && rowsList(sections.today)}
+            </Section>
+            <Section id="paused-runs" headingId="paused-title" data-testid="paused-runs" className="home-section" title={heading('Paused', sections.paused, all.paused)}
+              sub={sub(sections.paused, 'nothing is paused')}>
+              {none(sections.paused, all.paused)}
+              {sections.paused.length > 0 && rowsList(pausedShown)}
               {sections.paused.length > pausedShown.length && (
-                <button type="button" className="home-show-older" data-testid="paused-show-all" onClick={() => setAllPaused(true)}>Show all {sections.paused.length} paused</button>
+                <button type="button" className="home-show-older" data-testid="paused-show-all" onClick={() => onFold('paused-all', true)}>Show all {sections.paused.length} paused</button>
+              )}
+              {sections.superseded.length > 0 && (
+                // Paused runs a later run of their own feature replaced: nobody waits on them, so they stay folded away.
+                <details className="home-superseded" data-testid="superseded-runs" open={folds.superseded === true}
+                  onToggle={event => { const open = (event.currentTarget as HTMLDetailsElement).open; if (open !== (folds.superseded === true)) onFold('superseded', open ? true : null) }}>
+                  <summary>{sections.superseded.length} superseded</summary>
+                  {rowsList(sections.superseded, row => ({ text: `superseded by ${classOf(classes, row.run).supersededBy}` }))}
+                </details>
               )}
             </Section>
-            <Recent rows={sections.recent} now={now} zone={zone} onNavigate={onNavigate} />
-            {errors.length > 0 && (
-              <Section headingId="attention-title" data-testid="lists-errors" role="alert" className="home-section" title={`Attention · ${errors.length}`}
+            <Recent rows={sections.recent} total={all.recent.length} filtering={filtering} sort={filter.sort} classes={classes} now={now} zone={zone} onNavigate={onNavigate} list={list} />
+            </>)}
+            </>)}
+            {(runs.status === 'ready' || allTime) && errors.length > 0 && (
+              <Section id="lists-attention" headingId="attention-title" data-testid="lists-errors" role="alert" className="home-section" title={`Attention · ${errors.length}`}
                 sub="Some runs could not be loaded, so these lists may be incomplete.">
                 <ul className="home-cards">
                   {errors.map(({ what, error }) => (
@@ -197,51 +372,121 @@ export function RunsHome({ runs, meta, now, note = null, onNavigate }: HomeProps
   )
 }
 
-const FILTER_LABEL: Record<RecentFilter, string> = { all: 'All', failed: 'Failed', succeeded: 'Succeeded', today: 'Today' }
+/**
+ * Triage under "All time": one list of every run read (the home read and the registry's pages, each run once) in place of the
+ * sections, filtered by the bar's status, phase and text and in its sort. Its scope line says "all loaded" only once every page
+ * answered; a failed page keeps the rows and the filters and offers Retry, which reads that page only.
+ */
+function AllRuns({ rows, classes, read, filter, filtering, context, list, now, onNavigate }: {
+  rows: Row[]; classes: RunClasses; read: AllRead & { retry: () => void }; filter: ListControl['filter']; filtering: boolean
+  context: { now: number; zone: 'local' | 'utc' }; list: ListControl; now: number; onNavigate: (pathname: string) => void
+}) {
+  const items = rows.map(row => ({ ...itemOf(row, classes), row }))
+  const shown = sortRuns(filterItems(items, filter, context), filter.sort, classes)
+  const scope = scopeLine('all', shown.length, rows.length, !read.done)
+  const reading = read.loading ? `Reading older runs… (${rows.length} read)` : null
+  return (
+    <>
+      <FilterBar kind="triage" state={filter} counts={statusCounts(items, filter, context)} scope={scope} active={filtering}
+        onChange={(next, options) => list.change(next, options)} onCommit={list.flush} onClear={list.clear} reading={reading} />
+      <Section id="all-runs" headingId="all-runs-title" data-testid="all-runs" className="home-section" title={`All runs · ${filtering ? `${shown.length} of ${rows.length}` : rows.length}`}
+        sub={filtering && shown.length === 0 ? 'No run matches.' : `every project · ${sectionOrderWords(filter.sort)}`}>
+        {shown.length === 0 && rows.length > 0 && <NoMatch onClear={list.clear} />}
+        {shown.length > 0 && (
+          <ul className="run-rows">
+            {shown.map(({ row }) => (
+              <RunRow key={row.key} run={row.run} cls={classOf(classes, row.run)} labels={row.labels} context={contextOf(row)} lanes={laneNamesOf(row.workflow.nodes)}
+                now={now} onNavigate={onNavigate} href={hrefOf(row)} />
+            ))}
+          </ul>
+        )}
+        {read.error !== null && <ErrorPanel error={read.error} what="The next page of runs" onRetry={read.retry} />}
+      </Section>
+    </>
+  )
+}
 
 /**
- * Recent (docs/PRD_VIEWER_REVAMP.md 5.1): finished runs of the last seven days, newest first, searched client-side on the run
- * id, the feature and the outcome, filtered (All, Failed, Succeeded, Today) and grouped by day or by project; the first ten
- * rows show, the rest behind "Show older" until the search, the filter or the grouping changes.
+ * Triage's Pinned section ("Add to Triage", decisions.md [O6]): the runs the operator pinned in this browser, newest first, at
+ * the top. A shortcut only: a pinned run keeps its place in its own section too. A pin whose run Triage did not read names
+ * its id as a link to its run page; when the browser cannot keep pins, the section says so.
  */
-function Recent({ rows, now, zone, onNavigate }: { rows: Row[]; now: number; zone: 'local' | 'utc'; onNavigate: (pathname: string) => void }) {
-  const [query, setQuery] = useState('')
-  const [filter, setFilter] = useState<RecentFilter>('all')
-  const [byProject, setByProject] = useState(false)
-  const view = `${query}\u0000${filter}\u0000${byProject}`
-  const [expandedFor, setExpandedFor] = useState<string | null>(null)
-  // The filter counts are over the set the search narrowed to (P2 1), so a button's number equals the rows that filter keeps.
-  const searched = searchRows(rows, query)
-  const counts = recentCounts(searched, now, zone)
-  const kept = filterRecent(searched, filter, now, zone)
-  const groups = byProject ? groupByProject(kept) : groupByDay(kept, now, zone)
-  const shown = expandedFor === view ? { groups, hidden: 0 } : firstRows(groups, RECENT_SHOWN)
-  const filters = (['all', 'failed', 'succeeded', 'today'] as const).map(id => ({ id, label: FILTER_LABEL[id], count: id === 'failed' || id === 'succeeded' ? counts[id] : undefined }))
+function Pinned({ rows, classes, now, onNavigate }: { rows: readonly Row[]; classes: RunClasses; now: number; onNavigate: (pathname: string) => void }) {
+  const pinned = pinStore()
+  const pins = useSyncExternalStore(pinned.subscribe, pinned.list)
+  const saved = useSyncExternalStore(pinned.subscribe, pinned.saved)
+  if (pins.length === 0 && saved) return null
+  const byKey = new Map(rows.map(row => [row.key, row]))
   return (
-    <Section id="recent-runs" headingId="recent-title" data-testid="recent-runs" className="home-section" title={`Recent · ${rows.length}`} sub="finished in the last 7 days, before today">
+    <Section id="pinned-runs" headingId="pinned-title" data-testid="pinned-runs" className="home-section" title={`Pinned · ${pins.length}`}
+      sub={pins.length === 0 ? 'no run pinned' : saved ? 'pinned in this browser, newest first; each run also stays in its own section' : 'newest first; each run also stays in its own section'}>
+      {!saved && <p className="projects-muted lists-empty" data-testid="pins-not-saved">Pins are not saved in this browser</p>}
+      {pins.length > 0 && (
+        <ul className="run-rows">
+          {pins.map(pin => {
+            const key = `${pin.project_id}/${pin.workflow_id}/${pin.run_id}`
+            const row = byKey.get(key)
+            if (row) {
+              return <RunRow key={key} run={row.run} cls={classOf(classes, row.run)} labels={row.labels} context={contextOf(row)} now={now} onNavigate={onNavigate} href={hrefOf(row)} />
+            }
+            return (
+              <li key={key} className="run-row-item pinned-unread">
+                <span className="run-row pinned-unread-row">
+                  <AppLink href={runPathname(pin.project_id, pin.workflow_id, pin.run_id)} onNavigate={onNavigate} className="pinned-unread-link">{pin.run_id}</AppLink>
+                  <span className="projects-muted">not among the runs read</span>
+                </span>
+                <PinToggle target={pin} />
+              </li>
+            )
+          })}
+        </ul>
+      )}
+    </Section>
+  )
+}
+
+/** Recent's groups under a sort: the groups keep the order the default rows give them; the rows inside each follow the sort. */
+function sortedGroups<T extends { run: Row['run'] }>(groups: RowGroup<T>[], sort: ListSort): RowGroup<T>[] {
+  if (sort === 'live') return groups
+  const compare = compareCreated(sort === 'newest' ? 'desc' : 'asc')
+  return groups.map(group => ({ ...group, rows: [...group.rows].sort((a, b) => compare(a.run, b.run)) }))
+}
+
+/**
+ * Recent (docs/PRD_VIEWER_REVAMP.md 5.1): finished runs of the last seven days before today, latest first, grouped by day or
+ * by project; the first ten rows show, the rest behind "Show older". Its search and status filters are Triage's one bar;
+ * the grouping and "Show older" live in the URL with the bar's state.
+ */
+function Recent({ rows, total, filtering, sort, classes, now, zone, onNavigate, list }: {
+  rows: Row[]; total: number; filtering: boolean; sort: ListSort; classes: RunClasses; now: number; zone: 'local' | 'utc'; onNavigate: (pathname: string) => void; list: ListControl
+}) {
+  const byProject = list.search.group
+  // Groups are made from the rows in the default order, so a sort re-orders rows inside a group and never the groups.
+  const live = [...rows].sort((a, b) => Date.parse(b.run.activity?.finished_at ?? b.run.updated_at) - Date.parse(a.run.activity?.finished_at ?? a.run.updated_at) || a.run.run_id.localeCompare(b.run.run_id))
+  const groups = sortedGroups(byProject ? groupByProject(live) : groupByDay(live, now, zone), sort)
+  const shown = list.search.older ? { groups, hidden: 0 } : firstRows(groups, RECENT_SHOWN)
+  return (
+    <Section id="recent-runs" headingId="recent-title" data-testid="recent-runs" className="home-section" title={`Recent · ${filtering ? `${rows.length} of ${total}` : total}`}
+      sub={filtering && rows.length === 0 ? 'No run matches.' : `finished in the last 7 days, before today · ${sectionOrderWords(sort)}`}>
       <div className="home-tools">
-        <label htmlFor="runs-search" className="visually-hidden">Search runs</label>
-        <input id="runs-search" className="home-search" type="search" value={query} placeholder="Search run id, feature or outcome" autoComplete="off"
-          onChange={event => setQuery(event.target.value)} />
-        <FilterRow aria-label="Filter recent runs" filters={filters} selected={filter} onSelect={id => setFilter(id as RecentFilter)} />
         <div className="ui-filters" role="group" aria-label="Group recent runs">
-          <FilterButton pressed={byProject} onClick={() => setByProject(value => !value)}>Group by project</FilterButton>
+          <FilterButton pressed={byProject} onClick={() => list.change({ group: !byProject })}>Group by project</FilterButton>
         </div>
       </div>
-      {rows.length === 0 && <p className="projects-muted lists-empty">No run finished in the last 7 days.</p>}
-      {rows.length > 0 && kept.length === 0 && <p className="projects-muted lists-empty">No recent run matches.</p>}
+      {total === 0 && <p className="projects-muted lists-empty">No run finished in the last 7 days.</p>}
+      {total > 0 && rows.length === 0 && <NoMatch />}
       {shown.groups.map(group => (
         <div key={group.key} className="recent-group" data-day={byProject ? undefined : group.key} data-group={byProject ? group.key : undefined}>
           <h3 className="recent-group-label">{group.label}</h3>
           <ul className="run-rows">
             {group.rows.map(row => (
-              <RunRow key={row.key} run={row.run} labels={row.labels} context={contextOf(row)} now={now} onNavigate={onNavigate} href={hrefOf(row)} />
+              <RunRow key={row.key} run={row.run} cls={classOf(classes, row.run)} labels={row.labels} context={contextOf(row)} now={now} onNavigate={onNavigate} href={hrefOf(row)} />
             ))}
           </ul>
         </div>
       ))}
       {shown.hidden > 0 && (
-        <button type="button" className="home-show-older" onClick={() => setExpandedFor(view)}>Show older {shown.hidden}</button>
+        <button type="button" className="home-show-older" onClick={() => list.change({ older: true })}>Show older {shown.hidden}</button>
       )}
     </Section>
   )
@@ -271,6 +516,7 @@ export function ProjectRunGroups({ projectId, workflows, runs, now, onNavigate }
         const labels = labelsOf(workflow)
         const count = entry === null ? null : `${entry.runs.length}${entry.more ? '+' : ''} ${entry.runs.length === 1 && !entry.more ? 'run' : 'runs'}`
         const last: RunSummary | null = entry ? latestRun(entry.runs) : null
+        const classes = classifyRuns(entry?.runs ?? [])
         return (
           <li key={workflow.workflow_id} className="lists-group" data-workflow-id={workflow.workflow_id}>
             <AppLink href={workflowPathname(projectId, workflow.workflow_id)} onNavigate={onNavigate}
@@ -290,7 +536,7 @@ export function ProjectRunGroups({ projectId, workflows, runs, now, onNavigate }
             {entry !== null && entry.runs.length > 0 && (
               <ul className="run-rows" data-testid="project-runs">
                 {entry.runs.map(run => (
-                  <RunRow key={run.run_id} run={run} labels={labels} now={now} onNavigate={onNavigate} href={runPathname(projectId, workflow.workflow_id, run.run_id)} />
+                  <RunRow key={run.run_id} run={run} cls={classOf(classes, run)} labels={labels} now={now} onNavigate={onNavigate} href={runPathname(projectId, workflow.workflow_id, run.run_id)} />
                 ))}
               </ul>
             )}

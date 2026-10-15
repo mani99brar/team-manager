@@ -2,24 +2,27 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Breadcrumbs, type PathCrumb } from '../graph/Breadcrumbs.tsx'
 import type { ControllerReading } from '../../contracts/projects/triage.ts'
 import {
-  describeApiError, fetchProjects, fetchRegistryRuns, fetchReviewResult, fetchRunDetail, fetchRuns, fetchWorkflowRuns, fetchWorkflows, ProjectsApiError,
+  describeApiError, fetchHomeRuns, fetchProjects, fetchReviewResult, fetchRunDetail, fetchRuns, fetchWorkflowRuns, fetchWorkflows, ProjectsApiError,
   type RunPage, type RunSummary,
 } from './api.ts'
-import { endedAt, isFinished, laneNamesOf, latestFeature, LISTS_POLL_MS, readsNextPage, RECENT_WINDOW_MS, recordReading, reviewStepsOf, workflowTitle, type ServedRun } from './lists.ts'
+import { classifyRuns, classOf, endedAt, isFinished, laneNamesOf, latestFeature, LISTS_POLL_MS, listsPollMs, RECENT_WINDOW_MS, recordReading, reviewStepsOf, sortRuns, workflowTitle, type ServedRun } from './lists.ts'
+import { FilterBar, NoMatch } from './FilterBar.tsx'
+import { useListState } from './dispatch/listState.ts'
+import { cappedScopeLine, filterItems, scopeLine, statusCounts } from './runFilter.ts'
 import './theme.css'
 import './lists.css'
 import { ServedRunContext } from './LiveStatus.tsx'
 import { AppLink, EmptyPanel, ErrorPanel, LoadingPanel } from './panels.tsx'
-import { projectPathname, projectsPathname, runPathname, triagePathname, workflowPathname, type ProjectsRoute } from './routes.ts'
-import { RunRow } from './RunRow.tsx'
+import { MAX_LIST_PAGES, projectPathname, projectsPathname, routeToPathname, runPathname, triagePathname, workflowPathname, type ProjectsRoute } from './routes.ts'
+import { PinToggle, RunRow } from './RunRow.tsx'
 import { RunsHome } from './RunsHome.tsx'
 import { fetchDispatchOverview } from './dispatch/client.ts'
 import { fetchProjectSteps } from './dispatch/client.ts'
 import { Rail, type RailRow } from './dispatch/Rail.tsx'
 import { ProjectsPage, type CardData } from './dispatch/ProjectsPage.tsx'
 import { ProjectPage, type RunsState } from './dispatch/ProjectPage.tsx'
-import { projectRunInfo } from './dispatch/projectModel.ts'
-import { everyRunListFailed, railBadge, railOrder, type RailInfo } from './dispatch/derive.ts'
+import { FAILED_RUN_INFO, projectRunInfo } from './dispatch/projectModel.ts'
+import { everyRunListFailed, railBadge, railBadgeTone, railOrder, type RailInfo } from './dispatch/derive.ts'
 import { dateOnly } from './dispatch/format.ts'
 import './dispatch/dispatch.css'
 import { RunView } from './RunView.tsx'
@@ -29,11 +32,18 @@ import { Time } from './Time.tsx'
 import { stateTone, toneClass, TONE_LABEL } from './tone.ts'
 import { Chip, Section } from './ui/index.tsx'
 import { TimeReferenceContext, useNow, useTimeZone } from './useNow.ts'
-import { usePoll } from './usePoll.ts'
+import { POLL_INTERVAL_MS, usePoll } from './usePoll.ts'
 import { useResource } from './useResource.ts'
 import { WorkflowGraph } from './WorkflowGraph.tsx'
 
 const LOADING_FAILED = 'Loading failed.'
+
+/** The feature page's order in words: its sub-header and the run history's name. */
+const FEATURE_ORDER = {
+  live: { sub: 'needs you and running first, then latest activity', history: 'needs you and running first' },
+  newest: { sub: 'newest created first', history: 'newest created first' },
+  oldest: { sub: 'oldest created first', history: 'oldest created first' },
+} as const
 
 type Props = {
   /** Null when the pathname is under /projects but malformed. */
@@ -43,14 +53,52 @@ type Props = {
   onRefreshingChange: (refreshing: boolean) => void
   onNavigate: (pathname: string) => void
   onAnnounce: (message: string) => void
+  /** The URL's search on this Projects pathname: the shown list's state (filters, sort, grouping, loaded pages). */
+  search?: string
+  /** Replaces the current entry's search with a list's new state (no new history entry). */
+  onSearch?: (pathname: string, search: string) => void
+  /** The scroll position and opened folds recorded in the history entry Back returned to, once per return. */
+  restore?: { key: string; memory: ListMemory } | null
+  /** Reports the shown list's opened folds, so they are recorded in its history entry when the operator leaves. */
+  onFolds?: (folds: Record<string, boolean>) => void
+  /** Registers the shown list's flush of a pending search, so a link outside the list (a root) writes it before leaving. */
+  onFlush?: (flush: (() => void) | null) => void
 }
+
+/** What a list's history entry keeps for Back within the page session: its scroll position and its opened folds. */
+export type ListMemory = { scroll: number; folds: Record<string, boolean> }
+
+const NO_SEARCH = () => undefined
 
 /**
  * The Projects root: registered projects, their workflow definitions and runs, read-only. Every level
  * loads from the scoped API and shows loading, empty, not-found and failure states in place; nothing
  * is ever substituted from fixtures.
  */
-export function ProjectsView({ route, refreshToken, onRefreshingChange, onNavigate, onAnnounce }: Props) {
+export function ProjectsView({ route, refreshToken, onRefreshingChange, onNavigate: navigateTo, onAnnounce, search = '', onSearch = NO_SEARCH, restore = null, onFolds = NO_SEARCH, onFlush = NO_SEARCH }: Props) {
+  // The shown list's state lives in the URL; a search still being typed is written before the operator leaves the list.
+  const pagePath = route === null ? null : routeToPathname(route)
+  const list = useListState(search, pagePath, onSearch)
+  const flushList = list.flush
+  const onNavigate = useCallback((pathname: string) => { flushList(); navigateTo(pathname) }, [flushList, navigateTo])
+  useEffect(() => {
+    onFlush(flushList)
+    return () => onFlush(null)
+  }, [onFlush, flushList])
+  // The opened folds of the shown list (the project page's features, Paused's "Show all", the superseded fold): a new page
+  // starts with none, a return through Back with the ones its entry recorded.
+  const [foldState, setFoldState] = useState<{ path: string | null; folds: Record<string, boolean> }>(() => ({ path: pagePath, folds: restore?.memory.folds ?? {} }))
+  if (foldState.path !== pagePath) setFoldState({ path: pagePath, folds: restore?.memory.folds ?? {} })
+  const folds = foldState.folds
+  const setFold = useCallback((key: string, open: boolean | null) => setFoldState(previous => {
+    const next = { ...previous.folds }
+    if (open === null) delete next[key]
+    else next[key] = open
+    return { ...previous, folds: next }
+  }), [])
+  const clearFolds = useCallback((prefix: string) => setFoldState(previous => ({ ...previous, folds: Object.fromEntries(Object.entries(previous.folds).filter(([key]) => !key.startsWith(prefix))) })), [])
+  useEffect(() => { onFolds(folds) }, [folds, onFolds])
+
   const projectId = route && route.level !== 'projects' && route.level !== 'triage' ? route.projectId : null
   const workflowId = route && (route.level === 'workflow' || route.level === 'run') ? route.workflowId : null
   const runId = route && route.level === 'run' ? route.runId : null
@@ -72,12 +120,16 @@ export function ProjectsView({ route, refreshToken, onRefreshingChange, onNaviga
   const listGeneration = `${runsKey}\u0000${refreshToken}`
   useEffect(() => { setMorePages({ base: null, pages: [], loading: false, error: null }) }, [listGeneration])
   const listPoll = usePoll(route?.level === 'workflow' && !morePages.loading && morePages.pages.length === 0)
-  const runPoll = usePoll(route?.level === 'run' && !finished)
+  // A failed run can still be repaired or resumed, so it is re-read, at the lists' slower cadence (the live chip's stale
+  // threshold follows that cadence, LiveStatus).
+  const [runFailed, setRunFailed] = useState(false)
+  const runPoll = usePoll(route?.level === 'run' && !finished, runFailed ? LISTS_POLL_MS : POLL_INTERVAL_MS)
   const { state: firstPage, reload: reloadRuns, meta: runsMeta } = useResource(runsKey, loadRuns, refreshToken, listPoll)
   const scope = useMemo(() => (projectId === null || workflowId === null || runId === null ? null : { projectId, workflowId, runId }), [projectId, workflowId, runId])
   const loadDetail = useCallback((signal: AbortSignal) => fetchRunDetail({ projectId: projectId!, workflowId: workflowId!, runId: runId! }, signal), [projectId, workflowId, runId])
   const { state: detail, reload: reloadDetail, meta: detailMeta } = useResource(scope === null ? null : `run:${scope.projectId}/${scope.workflowId}/${scope.runId}`, loadDetail, refreshToken, runPoll)
   const detailStatus = detail.status === 'ready' ? detail.data.summary.status : null
+  useEffect(() => { setRunFailed(detailStatus === 'failed') }, [detailStatus])
   useEffect(() => { setFinished(detailStatus === 'succeeded' || detailStatus === 'cancelled') }, [detailStatus])
 
   // The lists (docs/PRD_VIEWER_UX.md 4.1) read run lists only, never a run detail, and re-read them every 15 s. Runs home
@@ -89,15 +141,20 @@ export function ProjectsView({ route, refreshToken, onRefreshingChange, onNaviga
   const [zone] = useTimeZone()
   const listClock = useNow(railLevel, LISTS_POLL_MS)
   const projectsData = projects.status === 'ready' ? projects.data : null
-  const homePoll = usePoll(railLevel, LISTS_POLL_MS)
-  const loadHome = useCallback((signal: AbortSignal) => {
-    const cutoff = Date.now() - RECENT_WINDOW_MS
-    return fetchRegistryRuns(projectsData ?? [], (runs, cursor) => readsNextPage(runs, cursor, cutoff), signal)
-  }, [projectsData])
+  // One request reads every project's runs back to the Recent cutoff (the registry home read); it and the overview poll every
+  // 15 s while any row read runs or needs the operator, else every 60 s. The key never carries the cadence, so the last rows
+  // stay shown while a poll reads.
+  const [homeCadence, setHomeCadence] = useState(LISTS_POLL_MS)
+  const homePoll = usePoll(railLevel, homeCadence)
+  const loadHome = useCallback((signal: AbortSignal) => fetchHomeRuns(projectsData ?? [], Date.now() - RECENT_WINDOW_MS, signal), [projectsData])
   const homeKey = railLevel && projectsData !== null ? `home:${projectsData.map(project => project.project_id).join('\u0000')}` : null
   const { state: homeRuns, meta: homeMeta } = useResource(homeKey, loadHome, refreshToken, homePoll)
-  // The dispatch overview (git and GitHub per project) for the rail badges, the cards and the project page; polled at the list rate.
-  const overviewPoll = usePoll(railLevel, LISTS_POLL_MS)
+  const homeRows = homeRuns.status === 'ready' ? homeRuns.data : null
+  useEffect(() => {
+    if (homeRows !== null) setHomeCadence(listsPollMs(homeRows.flatMap(entry => entry.workflows.flatMap(item => item.runs))))
+  }, [homeRows])
+  // The dispatch overview (git and GitHub per project) for the rail badges, the cards and the project page; at the home read's cadence.
+  const overviewPoll = usePoll(railLevel, homeCadence)
   const { state: overview, meta: overviewMeta } = useResource(railLevel ? 'dispatch-overview' : null, fetchDispatchOverview, refreshToken, overviewPoll)
   const overviewData = overview.status === 'ready' ? overview.data : null
   // The project page's step chart, one read per project.
@@ -105,6 +162,8 @@ export function ProjectsView({ route, refreshToken, onRefreshingChange, onNaviga
   const loadSteps = useCallback((signal: AbortSignal) => fetchProjectSteps(projectId!, signal), [projectId])
   const { state: projectSteps } = useResource(route?.level === 'project' && projectId !== null ? `steps:${projectId}` : null, loadSteps, refreshToken, stepsPoll)
   const projectStepsData = projectSteps.status === 'ready' ? projectSteps.data : null
+  // Which of loading, failed or read a missing step entry means in the reading pane: a failed read never says "reading…".
+  const projectStepsRead = projectSteps.status === 'ready' ? 'read' as const : projectSteps.status === 'error' ? 'failed' as const : 'loading' as const
   const workflowsData = workflows.status === 'ready' ? workflows.data : null
   const projectRunsPoll = usePoll(route?.level === 'project', LISTS_POLL_MS)
   const loadProjectRuns = useCallback((signal: AbortSignal) => fetchWorkflowRuns(projectId!, workflowsData ?? [], () => false, signal), [projectId, workflowsData])
@@ -125,38 +184,45 @@ export function ProjectsView({ route, refreshToken, onRefreshingChange, onNaviga
   // overview's git and GitHub, ordered needs-you, running, readable, unreadable, then by last activity ([D6]).
   const homeRunsData = homeRuns.status === 'ready' ? homeRuns.data : null
   const overviewMap = useMemo(() => new Map((overviewData?.projects ?? []).map(entry => [entry.project_id, entry])), [overviewData])
+  // Until the registry run read settles, every project is `loading` (no "cannot be read", no zero counts); a failed request
+  // is a failed read for every project.
+  const homeFailed = homeRuns.status === 'error'
   const dispatchProjects = useMemo(() => {
     if (projectsData === null) return []
     const runsByProject = new Map((homeRunsData ?? []).map(entry => [entry.project.project_id, entry]))
     return projectsData.map(project => {
-      const info = projectRunInfo(runsByProject.get(project.project_id) ?? null)
+      const entry = runsByProject.get(project.project_id) ?? null
+      const info = homeFailed && entry === null ? FAILED_RUN_INFO : projectRunInfo(entry)
       const dispatch = overviewMap.get(project.project_id) ?? null
       const git = dispatch?.git ?? null
       const isPrimary = git !== null && git.clone_primary === project.project_id
       const unpushed = isPrimary && git?.origin?.compare === 'compared' ? git.origin.ahead : null
       const primaryName = git?.clone_primary && git.clone_primary !== project.project_id
         ? projectsData.find(p => p.project_id === git.clone_primary)?.name ?? git.clone_primary : null
-      const railInfo: RailInfo = { projectId: project.project_id, name: project.name, waits: info.waits, paused: info.paused, running: info.running, allBad: info.allBad, lastActivity: info.lastActivity, unpushed }
+      const railInfo: RailInfo = { projectId: project.project_id, name: project.name, waits: info.waits, paused: info.paused, running: info.running, allBad: info.allBad, lastActivity: info.lastActivity, unpushed, loading: info.state === 'loading' }
       return { project, dispatch, info, primaryName, railInfo, unpushed }
     })
-  }, [projectsData, homeRunsData, overviewMap])
+  }, [projectsData, homeRunsData, overviewMap, homeFailed])
   const orderedProjects = useMemo(() => {
     const byId = new Map(dispatchProjects.map(entry => [entry.project.project_id, entry]))
     return railOrder(dispatchProjects.map(entry => entry.railInfo)).map(railInfo => byId.get(railInfo.projectId)!).filter(Boolean)
   }, [dispatchProjects])
   const railRows: RailRow[] = useMemo(() => orderedProjects.map(entry => ({
     projectId: entry.project.project_id, name: entry.project.name, tone: entry.info.tone,
-    badge: railBadge(entry.railInfo), repoShort: entry.dispatch?.github.repo ? entry.dispatch.github.repo.split('/')[1] : entry.dispatch?.git.repository_label ?? null,
+    badge: railBadge(entry.railInfo), badgeTone: railBadgeTone(entry.railInfo), loading: entry.info.state === 'loading', repoShort: entry.dispatch?.github.repo ? entry.dispatch.github.repo.split('/')[1] : entry.dispatch?.git.repository_label ?? null,
     features: entry.info.features, allBad: entry.info.allBad,
     date: entry.info.lastActivity ? dateOnly(new Date(entry.info.lastActivity).toISOString(), zone) : null,
     worst: TONE_LABEL[entry.info.tone],
   })), [orderedProjects, zone])
-  const triageBadge = useMemo(() => ({
+  const triageBadge = useMemo(() => (homeRunsData === null || dispatchProjects.some(entry => entry.info.state === 'loading') ? null : {
     waits: dispatchProjects.reduce((sum, entry) => sum + entry.info.waits, 0),
     paused: dispatchProjects.reduce((sum, entry) => sum + entry.info.paused, 0),
-  }), [dispatchProjects])
+  }), [dispatchProjects, homeRunsData])
   const cards: CardData[] = useMemo(() => orderedProjects.map(entry => ({ project: entry.project, dispatch: entry.dispatch, info: entry.info, primaryName: entry.primaryName })), [orderedProjects])
-  const repositoryCount = useMemo(() => new Set((overviewData?.projects ?? []).map(entry => entry.git.clone_id ?? entry.project_id)).size || projectsData?.length || 0, [overviewData, projectsData])
+  // Null until the dispatch overview is read: the header says "repositories: reading…", never a count it has not read; a
+  // failed overview read says the repositories were not read, never that they are still reading.
+  const overviewFailed = overview.status === 'error'
+  const repositoryCount = useMemo(() => (overviewData !== null ? new Set(overviewData.projects.map(entry => entry.git.clone_id ?? entry.project_id)).size : overviewFailed ? 'failed' as const : null), [overviewData, overviewFailed])
 
   // What the run page reads beyond its export (B2, B3): the served activity and run directory, and the controller reading of
   // every poll, so the live chip and the Now banner believe `not_running` only once it has held for 15 s (6.3).
@@ -209,16 +275,32 @@ export function ProjectsView({ route, refreshToken, onRefreshingChange, onNaviga
   const reviewersKey = projectId !== null && workflowId !== null && latestReviewedId !== null ? `feature-review:${projectId}/${workflowId}/${latestReviewedId}` : null
   const { state: featureReviewers } = useResource(reviewersKey, loadReviewers, refreshToken)
   const reviewers = featureReviewers.status === 'ready' ? featureReviewers.data : []
+  // Neither the reviewers nor the review steps show until the reviewer read has settled (or there is none to make).
+  const reviewersSettled = reviewersKey === null || featureReviewers.status === 'ready' || featureReviewers.status === 'error'
+  const featureClasses = useMemo(() => classifyRuns(runs), [runs])
+  // "All time" reads every remaining page; otherwise the list never reads past the page count its URL can restore.
+  const allTime = route?.level === 'workflow' && list.search.date === 'all'
+  const atPageCap = pages.length >= MAX_LIST_PAGES && !allTime
+  // One request per page: a page already being read is never asked for again.
+  const reading = useRef<string | null>(null)
   const loadMore = async () => {
-    if (!nextCursor || projectId === null || workflowId === null || firstPageData === null) return
+    if (!nextCursor || atPageCap || projectId === null || workflowId === null || firstPageData === null || reading.current === nextCursor) return
+    reading.current = nextCursor
     setMorePages({ ...extra, base: firstPageData, loading: true, error: null })
     try {
       const page = await fetchRuns(projectId, workflowId, { cursor: nextCursor })
       setMorePages(previous => (previous.base === firstPageData ? { ...previous, pages: [...previous.pages, page], loading: false } : previous))
     } catch (error) {
       setMorePages(previous => (previous.base === firstPageData ? { ...previous, loading: false, error } : previous))
+    } finally {
+      reading.current = null
     }
   }
+  // The feature page reads the pages its URL asks for ("Load more runs" writes them), and every remaining page under "All
+  // time", one after another through the same cursor path; a failed page stops it until Retry.
+  const wantedPages = route?.level !== 'workflow' ? 1 : allTime ? Number.POSITIVE_INFINITY : list.search.pages
+  const moreWanted = route?.level === 'workflow' && firstPageData !== null && nextCursor !== null && !extra.loading && extra.error === null && pages.length < wantedPages
+  useEffect(() => { if (moreWanted) void loadMore() })
 
   const projectName = projects.status === 'ready' && projectId !== null ? projects.data.find(project => project.project_id === projectId)?.name ?? projectId : projectId
   const currentWorkflow = workflows.status === 'ready' && workflowId !== null ? workflows.data.find(workflow => workflow.workflow_id === workflowId) ?? null : null
@@ -259,6 +341,20 @@ export function ProjectsView({ route, refreshToken, onRefreshingChange, onNaviga
     announced.current = message
     onAnnounce(message)
   }, [route, projects, workflows, firstPage, detail, homeRuns, projectName, workflowName, refreshing, refreshFailed, onAnnounce])
+
+  // Back to a list puts its scroll position back once the list's first read has settled (its appended pages included).
+  const settled = route?.level === 'triage' ? homeRuns.status === 'ready' || homeRuns.status === 'error'
+    : route?.level === 'project' ? workflows.status === 'error' || (workflows.status === 'ready' && (projectRuns.status === 'ready' || projectRuns.status === 'error'))
+      : route?.level === 'workflow' ? firstPage.status === 'error' || (firstPage.status === 'ready' && !moreWanted && !extra.loading)
+        : route?.level === 'projects' ? projects.status !== 'loading' && projects.status !== 'idle'
+          : false
+  const scrolled = useRef<string | null>(null)
+  useEffect(() => {
+    if (restore === null || !settled || scrolled.current === restore.key) return
+    scrolled.current = restore.key
+    const top = restore.memory.scroll
+    requestAnimationFrame(() => window.scrollTo(0, top))
+  }, [restore, settled])
 
   // The Projects trail starts at Projects (the roots strip leads Home) and ends at the node a node page shows.
   const crumbs: PathCrumb[] = [{ id: 'projects', label: 'Projects', pathname: projectsPathname() }]
@@ -308,7 +404,7 @@ export function ProjectsView({ route, refreshToken, onRefreshingChange, onNaviga
           <p>The backend's project registry is empty. Projects are registered by the operator in the server configuration, not from this page.</p>
         </EmptyPanel>
       )
-    } else content = <RunsHome projects={projects.data} runs={homeRuns} meta={homeMeta} now={listClock} note={info} onNavigate={onNavigate} />
+    } else content = <RunsHome projects={projects.data} runs={homeRuns} meta={homeMeta} now={listClock} pollMs={homeCadence} note={info} onNavigate={onNavigate} list={list} folds={folds} onFold={setFold} />
   } else if (route.level === 'project') {
     if (workflows.status === 'loading' || workflows.status === 'idle') content = <LoadingPanel>Loading workflows of {projectName}…</LoadingPanel>
     else if (workflows.status === 'error' && notFound(workflows.error)) {
@@ -328,10 +424,10 @@ export function ProjectsView({ route, refreshToken, onRefreshingChange, onNaviga
     } else {
       const projectEntry = projectsData?.find(p => p.project_id === route.projectId) ?? { project_id: route.projectId, name: projectName ?? route.projectId }
       content = (
-        <ProjectPage project={projectEntry} workflows={workflows.data}
+        <ProjectPage key={route.projectId} project={projectEntry} workflows={workflows.data} list={list} folds={folds} onFold={setFold} onClearFolds={clearFolds}
           projectRuns={projectRuns.status === 'ready' ? projectRuns.data : []}
           runsState={projectRunsState}
-          steps={projectStepsData} dispatch={overviewMap.get(route.projectId) ?? null} overview={overviewData}
+          steps={projectStepsData} stepsRead={projectStepsRead} dispatch={overviewMap.get(route.projectId) ?? null} overview={overviewData}
           allProjects={projectsData ?? []} now={listClock} zone={zone} onNavigate={onNavigate} />
       )
     }
@@ -349,17 +445,25 @@ export function ProjectsView({ route, refreshToken, onRefreshingChange, onNaviga
       )
     } else if (firstPage.status === 'error') content = <ErrorPanel error={firstPage.error} what={`The runs of ${workflowName}`} onRetry={reloadRuns} />
     else {
+      const items = runs.map(run => ({ run, cls: classOf(featureClasses, run), kindOf: (nodeId: string) => currentWorkflow?.nodes.find(node => node.node_id === nodeId)?.kind }))
+      const context = { now: listClock, zone }
+      const shown = sortRuns(filterItems(items, list.filter, context), list.filter.sort, featureClasses)
+      const order = FEATURE_ORDER[list.filter.sort]
+      // At the page cap (outside "All time") a cursor remains that this list cannot follow: it says why, never "Load more runs".
+      const capped = atPageCap && nextCursor !== null
+      const scope = capped ? cappedScopeLine(shown.length, runs.length, MAX_LIST_PAGES) : scopeLine('feature', shown.length, runs.length, nextCursor !== null)
+      const readingOlder = allTime && extra.loading ? `Reading older runs… (${runs.length} read)` : null
       content = (
         <div className="workflow-view">
           <Section headingId="runs-title" className="feature-runs" title={`${workflowName}: runs`}
-            sub={runs.length > 0 ? `${runs.length}${nextCursor ? '+' : ''} ${runs.length === 1 && !nextCursor ? 'run' : 'runs'}, newest first` : undefined}>
+            sub={runs.length > 0 ? <span data-testid="feature-runs-sub">{`${runs.length} ${runs.length === 1 ? 'run' : 'runs'} · ${order.sub}`}</span> : undefined}>
             {currentWorkflow && laneNamesOf(currentWorkflow.nodes).length > 0 && (
               <p className="feature-lanes">
                 <span className="projects-muted">Lanes</span>
                 {laneNamesOf(currentWorkflow.nodes).map(lane => <Chip key={lane} plain className="lane-chip">{lane}</Chip>)}
               </p>
             )}
-            {currentWorkflow && (reviewers.length > 0
+            {currentWorkflow && reviewersSettled && (reviewers.length > 0
               ? (
                 // The run's actual reviewers, from the latest finished run's review result (PRD_VIEWER_REFINE 5.7).
                 <p className="feature-reviewers">
@@ -375,9 +479,13 @@ export function ProjectsView({ route, refreshToken, onRefreshingChange, onNaviga
                 </p>
               ))}
             {runs.length > 0 && (
-              // The run history at a glance: one chip per listed run, newest first, its status in colour, glyph and title.
-              <ol className="run-history" aria-label="Run history, newest first">
-                {runs.map(run => (
+              <FilterBar kind="feature" state={list.filter} counts={statusCounts(items, list.filter, context)} scope={scope} active={list.active}
+                onChange={(next, options) => list.change(next, options)} onCommit={list.flush} onClear={list.clear} reading={readingOlder} />
+            )}
+            {shown.length > 0 && (
+              // The run history at a glance: one chip per shown run, in the list's order, its status in colour, glyph and title.
+              <ol className="run-history" aria-label={`Run history, ${order.history}`}>
+                {shown.map(({ run }) => (
                   <li key={run.run_id}>
                     <AppLink href={runPathname(route.projectId, route.workflowId, run.run_id)} onNavigate={onNavigate}
                       className={`ui-chip plain ${toneClass(stateTone({ status: run.status, accepted: run.accepted }))} run-history-chip`} title={`${run.run_id} · ${run.accepted ? OVERRIDE_LABEL : STATUS_LABEL[run.status]}`}
@@ -393,20 +501,29 @@ export function ProjectsView({ route, refreshToken, onRefreshingChange, onNaviga
                 <p>The workflow definition exists (see its current graph below) but it has never been run, or its runs are stored elsewhere. Runs are started from the workflow CLI.</p>
               </EmptyPanel>
             ) : (
-              <ul className="run-rows run-list" data-testid="run-list">
-                {runs.map(run => (
-                  <RunRow key={run.run_id} run={run} labels={labels} now={listClock} onNavigate={onNavigate} href={runPathname(route.projectId, route.workflowId, run.run_id)} />
-                ))}
-              </ul>
+              shown.length === 0 ? <NoMatch onClear={list.clear} /> : (
+                <ul className="run-rows run-list" data-testid="run-list">
+                  {shown.map(({ run, cls }) => (
+                    <RunRow key={run.run_id} run={run} cls={cls} labels={labels} now={listClock} onNavigate={onNavigate} href={runPathname(route.projectId, route.workflowId, run.run_id)} />
+                  ))}
+                </ul>
+              )
             )}
-            {nextCursor && (
+            {nextCursor && !capped && (
               <div className="projects-actions">
-                <button type="button" className="button" onClick={() => void loadMore()} disabled={extra.loading} aria-busy={extra.loading}>
+                <button type="button" className="button" disabled={extra.loading} aria-busy={extra.loading}
+                  onClick={() => { list.change({ pages: Math.min(MAX_LIST_PAGES, pages.length + 1) }); void loadMore() }}>
                   {extra.loading ? 'Loading more runs…' : 'Load more runs'}
                 </button>
               </div>
             )}
-            {extra.error !== null && <ErrorPanel error={extra.error} what="The next page of runs" onRetry={() => void loadMore()} />}
+            {capped && (
+              <p className="projects-muted lists-empty" data-testid="feature-page-cap">
+                {`This list stops after ${MAX_LIST_PAGES} pages, the most a link can restore; choose "All time" in Date to read every older run.`}
+              </p>
+            )}
+            {/* Retry reads the failed page again; at the cap it cannot, so the panel says what failed and offers none. */}
+            {extra.error !== null && <ErrorPanel error={extra.error} what="The next page of runs" onRetry={capped ? undefined : () => void loadMore()} />}
           </Section>
           <section aria-label="Current definition" className="workflow-definition">
             {workflows.status === 'loading' && <LoadingPanel>Loading the current definition…</LoadingPanel>}
@@ -470,7 +587,13 @@ export function ProjectsView({ route, refreshToken, onRefreshingChange, onNaviga
   return (
     <>
       <div className={`navigation${route?.level === 'projects' || route?.level === 'triage' || route?.level === 'project' ? ' navigation-dispatch' : ''}`}>
-        <Breadcrumbs custom={{ crumbs, onNavigate }} selected={null} index={null} onNavigate={() => undefined} />
+        {scope !== null ? (
+          // On run and node pages the crumbs share their row with the run's "Add to Triage" toggle, outside the workspace.
+          <div className="crumb-row" data-testid="crumb-row">
+            <Breadcrumbs custom={{ crumbs, onNavigate }} selected={null} index={null} onNavigate={() => undefined} />
+            <PinToggle target={{ project_id: scope.projectId, workflow_id: scope.workflowId, run_id: scope.runId }} className="crumb-pin" />
+          </div>
+        ) : <Breadcrumbs custom={{ crumbs, onNavigate }} selected={null} index={null} onNavigate={() => undefined} />}
         {/* Runs home says it at the rail's foot (docs/PRD_VIEWER_REVAMP.md 3); a Projects root without the rail says it here. */}
         {info !== null && !homeShown && <p className="folder-info" data-testid="projects-info">{info}</p>}
       </div>

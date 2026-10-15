@@ -19,21 +19,33 @@ reading pane. The viewer code lives in `src/projects/dispatch/`; the look is the
 Appears on `/projects`, Triage, the project page and the workflow page (`railLevel` in `ProjectsView`). Run pages have no rail.
 
 - `aside[data-testid="dispatch-rail"]` with `a[data-testid="rail-all-projects"]` and `a[data-testid="rail-triage"]` at the top,
-  then `ul[data-testid="dispatch-rail-list"]` of `a.dispatch-rail-row[data-project-id]` in rail order ([D6]: needs you, running,
-  readable, unreadable, then by last activity). Each row: a glyph, the name, a badge (`.dispatch-rail-badge`: "N waits on you" /
+  then `ul[data-testid="dispatch-rail-list"]` of `a.dispatch-rail-row[data-project-id]` in rail order ([D6], reordered by
+  ux-critique-fixes-b: waits on you, then running, then paused, each by count; readable before unreadable; then by last activity,
+  then project id; `railOrder` in `derive.ts`). The Projects cards follow the same order. Below 1000 px the compact Triage chip
+  (`a[data-testid="chip-triage"]`) reads "Triage · N waits[ · M paused]": its number is the needs-operator count only, never
+  summed with paused. Each row: a glyph, the name, a badge (`.dispatch-rail-badge`: "N waits on you" /
   "N paused" / "N running" / "N unpushed" on the clone's primary only) and a sub-line (repository · "N features" or "cannot be
   read" · date). The current page's row has `aria-current="page"`.
+- Counts (ux-critique-fixes M2, M19): every count reads one classification of the project's runs (`classifyRuns`, `lists.ts`).
+  "N waits on you" counts a question, a pane, an approval, a decision at the design challenge and an interrupted latest run
+  (paused or running), never as running; "N paused" counts only paused runs that need nobody and that no later run of their
+  own project and workflow superseded; "N running" the rest of the running runs. The badge carries its own tone class
+  (`tone-warn`, `tone-pause`, `tone-run`; `badge-neutral` for unpushed), never the row's latest result; when nothing waits or
+  runs and a live paused run exists, the row's glyph and tone are pause.
+- Loading (M1): until the registry run read settles each row says "reading…" with no badge, and the Triage count and the
+  chip say "…"; "cannot be read" is for a failed read only (`ProjectRunInfo.state`: `loading` | `failed` | `read`).
 - At 999px and below the rail is hidden and `nav[data-testid="dispatch-chips"]` (a `.dispatch-chip` row, `overflow-x: auto`)
   shows instead, starting "All projects", "Triage · N".
 
 ## The Projects page (`src/projects/dispatch/ProjectsPage.tsx`)
 
 - `section[data-testid="dispatch-projects"]`, heading `h1` "Projects", `p[data-testid="dispatch-projects-meta"]` ("N projects in
-  M repositories · runs read <time> · GitHub read <time>").
+  M repositories · runs read <time> · GitHub read <time>"; "GitHub not read" when no project was read, and nothing about GitHub
+  when no project has a GitHub remote).
 - `ul[data-testid="dispatch-cards"]` of `a.dispatch-card[data-project-id]`, each one link to `/projects/<p>`: the state word
   (`.dispatch-card-word`, e.g. "1 of 3 features failed last"), the repository and `.dispatch-vis` chip for a read GitHub
   project, "on <checkout> · <sync>" (`.dispatch-card-line`), the non-zero run counts, the latest run, and the footer with open
-  PR/issue counts or "GitHub not read: <reason>".
+  PR/issue counts, "no GitHub remote" for a `not_github` project, "GitHub reads are turned off" or "GitHub not read: <reason>".
 
 ## The project page (`src/projects/dispatch/ProjectPage.tsx`)
 
@@ -41,24 +53,50 @@ Appears on `/projects`, Triage, the project page and the workflow page (`railLev
 - Header `header[data-testid="dispatch-project-header"]`: `h1` name, the `https://github.com/<owner>/<name>` link and `.dispatch-vis`
   chip, `p.dispatch-meta` with `span[data-testid="dispatch-sync"]` (the sync phrase + "as of origin/<d> updated here <time>"),
   `p[data-testid="dispatch-figures"]`, the jump buttons ("Runs by feature", "Local and GitHub", "Pull requests · N open", "Issues
-  · N open") that move focus to `#dispatch-runs-section`, `#g-local`, `#g-prs`, `#g-iss`, and a filter box `input#dispatch-filter`
-  (`/` focuses it, Escape clears it).
+  · N open") that move focus to `#dispatch-runs-section`, `#g-local`, `#g-prs`, `#g-iss`, and the shared filter bar
+  (`div[data-testid="run-filter"]`, `FilterBar.tsx`: search `run-filter-q`, `run-filter-phase`, `run-filter-date` with "Any date",
+  "Today", "7 days", "30 days", `run-filter-sort`, the status toggles `button[data-filter]`, `run-filter-scope` "Reading runs…" while
+  the run lists are read, "Runs not read: <reason>" when every list failed, "<k> of <n> runs · <N> feature(s) cannot be read" when
+  some failed, else "<k> of <n> runs · the first 50 runs of each feature" or ", all loaded", never "all loaded" unless every
+  feature was read and none has more; `/` focuses the search, Escape clears it). The bar filters every feature's
+  rows; its state lives in the URL search (`routes.ts` `parseListSearch` / `listSearchString`).
+- A project whose GitHub status is `not_github` shows its GitHub column as one line under the header
+  (`aside[data-testid="dispatch-github"].dispatch-gh-line`, holding `#g-local`/`dispatch-gh-local` with the local sync and "no GitHub
+  remote", said once, and the ahead button when there are commits ahead); the chart takes the full width, with a run
+  selected too (the body keeps one grid track however wide it is).
 - **Step chart** (`src/projects/dispatch/StepChart.tsx`), `div[data-testid="dispatch-chart"]`:
   - `div[data-testid="dispatch-axis"]` — the sticky axis of the eight phase labels (Challenge, Launch, Freeze, Verify, Candidate,
-    Review, Approval, Integrate).
-  - `ul[data-testid="dispatch-features"]` of `li.dispatch-feature[data-workflow-id]`, each with `a.lists-group-head.ui-card.tone-<tone>`
+    Review, Approval, Integrate). Where the chart's container is under 640px the axis shows two-letter short forms (Ch, La, Fr, Ve,
+    Ca, Re, Ap, In) and `p[data-testid="dispatch-axis-legend"]` under the chart names each with its full phase name (it may wrap).
+  - `div[data-testid="dispatch-defs"]` above the features: one `details[data-testid="dispatch-def"][data-revision]` "Steps of this
+    definition · N steps · <the first three features that use it>" per distinct definition revision (the features that use it listed inside), so every
+    feature's steps stay reachable; no feature carries its own fold.
+  - `p[data-testid="project-features-sub"]` names the order: "<F> features · needs you and running first, then latest activity"
+    (default: features by their most urgent run, needs you, running, paused, none, then last activity, then workflow id), or
+    "· latest activity first · runs newest created first" / "· earliest activity first · runs oldest created first".
+  - `ul[data-testid="dispatch-features"]` of `li.dispatch-feature[data-workflow-id][data-open]`, each one header row: the link
+    `a.lists-group-head.ui-card.tone-<tone>` (the id, the state word `dispatch-feature-word`, the run count or "0 of N runs match",
+    the run chips oldest first, `dispatch-feature-last` "last activity <Mon D>|today") and beside it, inside the `li` and never
+    inside the link, `button[data-testid="dispatch-feature-toggle"]` "Show runs" / "Hide runs" (`aria-expanded`, `aria-controls`).
+    Open by default: a feature with a needs-operator or running run, or one that cannot be read; while a filter is active, every
+    feature with a match (an unreadable one stays open). The operator's toggles hold until the filter changes and are kept in the
+    history entry for Back. Each open run row carries `dispatch-run-when`: "started <Mon D> · ran <span>", "started <Mon D> ·
+    running <span>" (the list clock) or the stopped words. Each header
     (**[L1]: this hook keeps `accepted.spec.ts` passing — the header carries the feature's tone class, `tone-(override|fail|idle)`
     and never `tone-ok` when the latest run was accepted**; the tone is the latest registry run's). The header lists landed shas
     and a chain of run chips.
   - Run rows: `button.dispatch-run[data-run-id]`, `aria-selected`; the stop glyph (`.dispatch-stop-glyph`) sits in the stop phase
     cell (`.dispatch-cell`, one per phase), lane dots (`.dispatch-dot`), `×N` attempts (`.dispatch-att`). A multi-lane phase cell
     carries `.multi` and collapses to one mark at a chart width of 440px or less (container query on `#dispatch-runs-section`).
-  - "ended here" counts: `div[data-testid="dispatch-ends"]`. A feature that cannot be read shows a `.dispatch-badrow` with the
+  - "ended here" counts: `div[data-testid="dispatch-ends"]`; a non-empty `.dispatch-en` cell reads "<n> ended at <phase>" ("<n> landed"
+    under Integrate) and carries that sentence as its `aria-label` and `title`; in a container under 640px it shows the count alone.
+    A run row names its run by the whole run id; the landed shas of a feature header are separate chips in `.dispatch-landed`. A feature that cannot be read shows a `.dispatch-badrow` with the
     recorded error and `python -m workflow status <run-id> --by operator` (the literal placeholder for a whole-workflow failure).
 - **GitHub column** (`src/projects/dispatch/GithubColumn.tsx`), `aside[data-testid="dispatch-github"]`: four cards —
   `#g-local`/`[data-testid="dispatch-gh-local"]` (Local and GitHub, with `[data-testid="dispatch-ahead-naming"]` and
   `[data-testid="dispatch-landings"]`), `#g-prs`/`[data-testid="dispatch-gh-prs"]`, `#g-iss`/`[data-testid="dispatch-gh-issues"]`,
-  and `[data-testid="dispatch-gh-others"]`. When GitHub was not read each card says "GitHub not read: <reason>".
+  and `[data-testid="dispatch-gh-others"]`. GitHub's state is said once: a project that was not read has the Local and GitHub card and no Pull requests or Issues card, and that card
+  says "GitHub not read: <reason>" ("GitHub reads are turned off" when off); a read whose latest refresh failed keeps its data and says so once.
 - **Reading pane** (`src/projects/dispatch/ReadingPane.tsx`), `aside[data-testid="dispatch-pane"][data-run-id]`, docks only while
   a run is selected: the lead sentence (`[data-testid="dispatch-pane-lead"]`), facts, `[data-testid="dispatch-pane-steps"]`, the
   run page's `CommandBlock` (`[data-testid="now-next"]`, its command `now-command` and `copy-command`; run 002, V2), and
@@ -71,6 +109,18 @@ Appears on `/projects`, Triage, the project page and the workflow page (`railLev
 `projects-workspace`, and on Triage the Runs-home ids are unchanged: `needs-you`, `running-runs`, `today-runs`, `paused-runs`,
 `recent-runs`, `run-list` (feature page), `projects-info` (the read-only note, now at the foot of the Triage content),
 `lists-errors`. `data-workflow-id` and `a.lists-group-head` are reused on the step chart ([L1]).
+
+## Stage A of the UX critique fixes (lane `lists`)
+
+- The project page builds each feature's rows from the run summaries (page 1 of each workflow); the `/steps` tracks join them
+  when they arrive (`ChartRun.steps` is null until then), so a pending steps read never makes a feature read "0 runs".
+  The reading pane says "Reading the recorded steps…" only while `/steps` loads, "The recorded steps could not be read." when
+  it failed, and "No steps recorded for this run." when it was read without an entry for the run.
+- The Projects card says "reading runs…" while the run read is pending, the header "repositories: reading…" until the
+  overview is read ("repositories not read" when that read failed), and a line `[data-testid="dispatch-card-live"]` with "N waits on you · N running · N paused".
+- "Add to Triage" (`src/projects/pins.ts`): a `button.pin-toggle` beside each run row's link (inside its `li`, never inside
+  the link, no `data-run-id`), in the reading pane's head, and on run and node pages in `[data-testid="crumb-row"]` beside the
+  crumbs, outside `projects-workspace`. Triage lists the pins in `[data-testid="pinned-runs"]` at the top.
 
 ## Run 002 additions (V1–V22)
 

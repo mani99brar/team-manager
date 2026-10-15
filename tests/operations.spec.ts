@@ -219,9 +219,10 @@ test('Delete confirms with the full source, location and path, refuses nonempty 
   // Sources and locations offer no rename/move/delete.
   for (const id of [`Pi/${PI}`, 'Pi']) {
     await nodeBody(page, id).click()
-    await expect(page.getByRole('button', { name: 'Delete…' })).toBeDisabled()
-    await expect(page.getByRole('button', { name: 'Rename…' })).toBeDisabled()
-    await expect(page.getByRole('button', { name: 'Move…' })).toBeDisabled()
+    await expect(page.getByRole('button', { name: 'Delete…' })).toHaveCount(0)
+    await expect(page.getByRole('button', { name: 'Rename…' })).toHaveCount(0)
+    await expect(page.getByRole('button', { name: 'Move…' })).toHaveCount(0)
+    await expect(page.getByRole('button', { name: 'New file…' })).toBeEnabled()
   }
 })
 

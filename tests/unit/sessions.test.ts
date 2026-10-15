@@ -11,7 +11,7 @@ import type { NightShiftDecision, SessionRow, Sessions } from '../../contracts/p
 import {
   aggregateCostText, costText, decisionsForNode, durationText, fixRoundShort, fixRoundText, groupSessions, jevText, laneResultText,
   nightShiftCountText, nightShiftNodes, outcomeText, providerText, resumeText, RESUME_NOTE, reviewerRoundsOf, reviewerTone, sessionsForNode,
-  spentText, stageCardOf, totalsText,
+  sessionsCueText, spentText, stageCardOf, totalsText,
 } from '../../src/projects/sessions/model.ts'
 import { stageExecutor } from '../../src/projects/signal/executor.ts'
 import { stageNodes } from '../../src/projects/signal/model.ts'
@@ -175,4 +175,12 @@ test('the night-shift block\'s wording: executed and held, each provider, Jev pi
   assert.equal(nightShiftCountText({ ...PAYLOAD, night_shift: [] }), null)
   assert.deepEqual(nightShiftNodes(PAYLOAD).map(entry => [entry.nodeId, entry.decisions.length]), [['challenge', 1], ['approval', 1]])
   assert.deepEqual(decisionsForNode(PAYLOAD, 'approval').map(decision => decision.decision), ['held'])
+})
+
+test('sessionsCueText: the cue counts the listed sessions and carries the dock\'s Spent text, or says the cost is not recorded', () => {
+  const count = groupSessions(PAYLOAD).reduce((sum, group) => sum + group.rows.length, 0)
+  assert.equal(sessionsCueText(PAYLOAD), `Sessions · ${count} · ${spentText(PAYLOAD.totals)} ↓`)
+  assert.match(sessionsCueText(PAYLOAD)!, /reported by Claude · \$[\d.]+ covered ↓$/)
+  assert.equal(sessionsCueText({ ...PAYLOAD, totals: { metered_usd: 0, covered_usd: 0, not_recorded: count } }), `Sessions · ${count} · cost not recorded ↓`)
+  assert.equal(sessionsCueText({ ...PAYLOAD, sessions: [] }), null)
 })

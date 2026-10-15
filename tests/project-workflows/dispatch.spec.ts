@@ -6,10 +6,13 @@
  * are mocked from `fixtures/dispatch.ts` through `installHooks`; candidate phase: the real server serves the seeded repositories.
  */
 import { test, expect, type Locator, type Page } from '@playwright/test'
-import { attach, installHooks, phase, projectUrl, renderedText, workspace } from './support.ts'
+import { attach, gotoProjectOpen, installHooks, liveDock, openAllFeatures, phase, projectUrl, renderedText, runUrl, workflowUrl, workspace } from './support.ts'
+import { PROJECT, RUN_FAILED, WORKFLOW_ID } from './fixtures.ts'
+import { RUN_SESSIONS, UX_SESSIONS_WORKFLOW_ID } from './fixtures/sessions.ts'
+import { REVAMP_PAGES_WORKFLOW_ID, RUN_REVAMP_BLOCKED, RUN_REVAMP_DONE, RUN_REVAMP_RUNNING } from './fixtures/ux-revamp-pages.ts'
 import { mockDispatchResponse } from './mock.ts'
 import {
-  DISPATCH_BUSY, DISPATCH_LOCAL, DISPATCH_NOORIGIN, DISPATCH_TRIO, DISPATCH_UNREADABLE, DISPATCH_WIDGETS, DISPATCH_WIDGETS_WT,
+  DISPATCH_BUSY, DISPATCH_LOCAL, DISPATCH_NOORIGIN, DISPATCH_TRIO, DISPATCH_UNREADABLE, DISPATCH_WIDGETS, DISPATCH_WIDGETS_WT, RUN_WT_DROPPED,
 } from './fixtures/dispatch.ts'
 
 installHooks()
@@ -19,6 +22,8 @@ const TRIAGE = '/projects/-/triage'
 const card = (page: Page, id: string) => page.locator(`.dispatch-card[data-project-id="${id}"]`)
 const railRow = (page: Page, id: string) => page.locator(`.dispatch-rail-row[data-project-id="${id}"]`)
 const run = (page: Page, id: string) => page.locator(`.dispatch-run[data-run-id="${id}"]`)
+/** The project page's filter-bar search box. */
+const projectSearch = (page: Page) => page.getByTestId('dispatch-project').getByTestId('run-filter-q')
 
 /** The bounding box of a locator, or a failing assertion. */
 async function box(locator: Locator) {
@@ -30,7 +35,8 @@ async function box(locator: Locator) {
 test(`[scenario:dispatch-overview] /projects shows one card per project in rail order with state, repository, sync, counts and GitHub; the runs-read time is fixed (${phase})`, async ({ page }, testInfo) => {
   await page.goto(PROJECTS)
   await expect(page.getByRole('heading', { level: 1, name: 'Projects' })).toBeVisible()
-  await expect(page.getByTestId('dispatch-projects-meta')).toContainText('projects in')
+  // The repository count waits for the dispatch overview (until then the header says "repositories: reading…").
+  await expect(page.getByTestId('dispatch-projects-meta')).toContainText('projects in', { timeout: 30_000 })
   await expect(page.getByTestId('dispatch-cards')).toBeVisible()
   // The three readable-feature project whose worst latest result is failed (its fourth workflow cannot be read, [L8]).
   await expect(card(page, DISPATCH_TRIO)).toContainText('1 of 3 features failed last')
@@ -40,8 +46,9 @@ test(`[scenario:dispatch-overview] /projects shows one card per project in rail 
   await expect(card(page, DISPATCH_WIDGETS).locator('.dispatch-vis')).toHaveText('public')
   await expect(card(page, DISPATCH_WIDGETS)).toContainText('open PR')
   await expect(card(page, DISPATCH_WIDGETS)).toContainText('open issue')
-  // The non-GitHub project: no chip, the fixed reason.
-  await expect(card(page, DISPATCH_LOCAL)).toContainText('GitHub not read: not a GitHub remote')
+  // The non-GitHub project: no chip, and its foot says so in plain words once.
+  await expect(card(page, DISPATCH_LOCAL)).toContainText('no GitHub remote')
+  await expect(card(page, DISPATCH_LOCAL)).not.toContainText('GitHub not read')
   await expect(card(page, DISPATCH_LOCAL).locator('.dispatch-vis')).toHaveCount(0)
   // Card order equals rail order, and each card holds exactly one link: itself (V17).
   const cardOrder = await page.getByTestId('dispatch-cards').locator('.dispatch-card').evaluateAll(els => els.map(el => el.getAttribute('data-project-id')))
@@ -112,7 +119,7 @@ test(`[scenario:dispatch-triage] /projects/-/triage shows the former Runs home c
   await expect(page.getByTestId('running-runs')).toBeVisible()
   await expect(page.getByTestId('recent-runs')).toBeVisible()
   await expect(page.getByTestId('rail-triage')).toHaveAttribute('aria-current', 'page')
-  await page.goto(projectUrl(DISPATCH_WIDGETS))
+  await gotoProjectOpen(page, projectUrl(DISPATCH_WIDGETS))
   await page.getByTestId('rail-triage').click()
   await expect(page).toHaveURL(/\/projects\/-\/triage$/)
   await page.getByTestId('rail-all-projects').click()
@@ -121,7 +128,8 @@ test(`[scenario:dispatch-triage] /projects/-/triage shows the former Runs home c
 })
 
 test(`[scenario:dispatch-project] The project page header shows repository, checkout, sync, figures and jump buttons that move focus; git-not-read says so (${phase})`, async ({ page }, testInfo) => {
-  await page.goto(projectUrl(DISPATCH_WIDGETS))
+  test.slow() // the features are opened on every project page it reads
+  await gotoProjectOpen(page, projectUrl(DISPATCH_WIDGETS))
   const header = page.getByTestId('dispatch-project-header')
   await expect(header.getByRole('heading', { level: 1, name: 'Widgets' })).toBeVisible()
   await expect(header.getByRole('link', { name: /acme\/widgets/ })).toHaveAttribute('href', 'https://github.com/acme/widgets')
@@ -134,8 +142,8 @@ test(`[scenario:dispatch-project] The project page header shows repository, chec
     await header.getByRole('button', { name }).click()
     await expect(page.locator(`#${id}`)).toBeFocused()
   }
-  // The filter narrows the run rows; Escape clears it.
-  const filter = page.locator('#dispatch-filter')
+  // The filter bar's search narrows the run rows; Escape clears it.
+  const filter = projectSearch(page)
   await filter.fill('ui-polish-001')
   await expect(run(page, 'ui-polish-002')).toHaveCount(0)
   await expect(run(page, 'ui-polish-001')).toHaveCount(1)
@@ -143,14 +151,15 @@ test(`[scenario:dispatch-project] The project page header shows repository, chec
   await page.keyboard.press('Escape')
   await expect(filter).toHaveValue('')
   // A project whose git could not be read says "git not read", never "checkout detached".
-  await page.goto(projectUrl(DISPATCH_UNREADABLE))
+  await gotoProjectOpen(page, projectUrl(DISPATCH_UNREADABLE))
   await expect(page.getByTestId('dispatch-project-header')).toContainText('git not read')
   await expect(page.getByTestId('dispatch-project-header')).not.toContainText('detached')
   await attach(page, testInfo, 'dispatch-project')
 })
 
 test(`[scenario:dispatch-chart] The step chart: sticky axis once, solid/dotted track, lane dots, chips, landed sha, ended counts, 440px collapse, and a workflow-level error with the literal placeholder (${phase})`, async ({ page }, testInfo) => {
-  await page.goto(projectUrl(DISPATCH_WIDGETS))
+  test.slow() // the features are opened on every project page it reads
+  await gotoProjectOpen(page, projectUrl(DISPATCH_WIDGETS))
   const axis = page.getByTestId('dispatch-axis')
   await expect(axis).toHaveCount(1) // the sticky axis appears once
   await expect(axis).toHaveCSS('position', 'sticky')
@@ -193,19 +202,24 @@ test(`[scenario:dispatch-chart] The step chart: sticky axis once, solid/dotted t
   await expect(broken).toContainText('plan.json is missing')
   await expect(broken).toContainText('python -m workflow status broken-001 --by operator')
   // A workflow whose runs could not be listed: Trio's extra workflow, its row with the literal `<run-id>` placeholder ([P34]).
-  await page.goto(projectUrl(DISPATCH_TRIO))
+  await gotoProjectOpen(page, projectUrl(DISPATCH_TRIO))
   const locked = page.locator('li[data-workflow-id="trio-locked"]')
   await expect(locked).toContainText('cannot be read')
   await expect(locked).toContainText('could not be listed')
   await expect(locked).toContainText('python -m workflow status <run-id> --by operator')
-  // Every feature group exposes the "Steps of this definition" fold, the unreadable workflow included (V7, [P30]).
-  await expect(locked.getByTestId('dispatch-def')).toHaveCount(1)
-  await expect(locked.getByTestId('dispatch-def')).toContainText('Steps of this definition')
+  // Every feature's steps stay reachable from a "Steps of this definition" fold, once per revision above the chart, the
+  // unreadable workflow's included (V7, [P30]); no feature carries a fold of its own.
+  const lockedFold = page.getByTestId('dispatch-defs').getByTestId('dispatch-def').filter({ hasText: 'trio-locked' })
+  await expect(lockedFold).toHaveCount(1)
+  await expect(lockedFold).toContainText('Steps of this definition')
+  await expect(locked.getByTestId('dispatch-def')).toHaveCount(0)
   // A filter matching none of a feature's runs says "0 of N runs match" in its group header, not "0 runs" (V30).
-  await page.goto(projectUrl(DISPATCH_WIDGETS))
-  await page.locator('#dispatch-filter').fill('zzzznomatch')
+  await gotoProjectOpen(page, projectUrl(DISPATCH_WIDGETS))
+  await projectSearch(page).fill('zzzznomatch')
   await expect(page.locator('li[data-workflow-id="ui-polish"] a.lists-group-head')).toContainText('0 of 3 runs match')
-  await page.locator('#dispatch-filter').fill('')
+  await expect(page.locator('li[data-workflow-id="ui-polish"]')).toHaveAttribute('data-open', 'false')
+  await projectSearch(page).fill('')
+  await openAllFeatures(page)
   // A landed sha in a run row sits on one line at 1100px (V29): its box is a single client rect, never a mid-sha break.
   await page.setViewportSize({ width: 1100, height: 900 })
   const landedSha = run(page, 'ui-polish-001').locator('.dispatch-res code').first()
@@ -216,7 +230,8 @@ test(`[scenario:dispatch-chart] The step chart: sticky axis once, solid/dotted t
 })
 
 test(`[scenario:dispatch-pane] Selecting a run docks the pane with facts, the lead, steps, today's CommandBlock and Open run page; j/k move; Close and Escape undock and return focus (${phase})`, async ({ page }, testInfo) => {
-  await page.goto(projectUrl(DISPATCH_WIDGETS))
+  test.slow() // the features are opened on every project page it reads
+  await gotoProjectOpen(page, projectUrl(DISPATCH_WIDGETS))
   // With nothing selected there is no pane and the project is not docked.
   await expect(page.getByTestId('dispatch-pane')).toHaveCount(0)
   await expect(page.getByTestId('dispatch-project')).not.toHaveClass(/has-pane/)
@@ -260,11 +275,49 @@ test(`[scenario:dispatch-pane] Selecting a run docks the pane with facts, the le
   await page.goto(`${projectUrl(DISPATCH_WIDGETS)}/workflows/ui-polish/runs/ui-polish-002`)
   const runPageCommand = (await page.getByTestId('now-command').first().innerText()).trim()
   expect(runPageCommand).toBe(paneCommand)
-  await page.goto(projectUrl(DISPATCH_WIDGETS))
+  await gotoProjectOpen(page, projectUrl(DISPATCH_WIDGETS))
   await attach(page, testInfo, 'dispatch-pane')
 })
 
+test(`A failed steps read on a cold project page: the selected run's pane says the steps could not be read, never "reading…" (${phase})`, async ({ page }) => {
+  // The 503 is installed before the first load, so the steps resource never holds data a failed reload could keep.
+  await page.route(url => url.pathname === `/api/dispatch/projects/${DISPATCH_WIDGETS}/steps`,
+    route => route.fulfill({ status: 503, json: { error: { code: 'STEPS_UNREADABLE', message: 'held for the test' } } }))
+  await gotoProjectOpen(page, projectUrl(DISPATCH_WIDGETS))
+  await run(page, 'ui-polish-002').click()
+  const pane = page.getByTestId('dispatch-pane')
+  await expect(pane).toHaveAttribute('data-run-id', 'ui-polish-002', { timeout: 30_000 })
+  await expect(pane.getByTestId('dispatch-pane-steps-state')).toHaveText('The recorded steps could not be read.', { timeout: 30_000 })
+  await expect(pane.locator('.dispatch-fact', { hasText: 'Lanes' }).locator('dd')).toHaveText('not read')
+  await expect(pane.getByText('reading…', { exact: false })).toHaveCount(0)
+  await expect(pane.getByText('Reading the recorded steps…')).toHaveCount(0)
+  await page.unrouteAll({ behavior: 'ignoreErrors' })
+})
+
+test(`A failed steps read: a run row with no served focus says its steps were not read, never "reading steps…" (${phase})`, async ({ page }) => {
+  await page.route(url => url.pathname === `/api/dispatch/projects/${DISPATCH_WIDGETS_WT}/steps`,
+    route => route.fulfill({ status: 503, json: { error: { code: 'STEPS_UNREADABLE', message: 'held for the test' } } }))
+  await gotoProjectOpen(page, projectUrl(DISPATCH_WIDGETS_WT))
+  const dropped = run(page, RUN_WT_DROPPED)
+  await expect(dropped.locator('.dispatch-run-2')).toContainText('steps not read', { timeout: 30_000 })
+  await expect(dropped).toHaveAttribute('aria-label', /Steps not read\.$/)
+  await expect(page.getByTestId('dispatch-chart').getByText('reading steps…')).toHaveCount(0)
+  await page.unrouteAll({ behavior: 'ignoreErrors' })
+})
+
+test(`A failed overview read on a cold Projects page: the header says the repositories were not read, never "repositories: reading…" (${phase})`, async ({ page }) => {
+  await page.route(url => url.pathname === '/api/dispatch/projects',
+    route => route.fulfill({ status: 503, json: { error: { code: 'OVERVIEW_UNREADABLE', message: 'held for the test' } } }))
+  await page.goto(PROJECTS)
+  const meta = page.getByTestId('dispatch-projects-meta')
+  await expect(meta).toContainText('repositories not read', { timeout: 30_000 })
+  await expect(meta).not.toContainText('repositories: reading…')
+  await expect(meta).toContainText(/^\d+ projects? · repositories not read/)
+  await page.unrouteAll({ behavior: 'ignoreErrors' })
+})
+
 test(`[scenario:dispatch-github] The GitHub cards group PRs and issues, name the match, fold long groups, say the merged scope, a head-null read is read, and a not-read project keeps local counts (${phase})`, async ({ page }, testInfo) => {
+  test.slow() // the features are opened on every project page it reads
   // In the worker phase only, serve Widgets' GitHub read with head null (an empty repository, Appendix A allows it): the card
   // must say the default branch has no commits, not "GitHub not read", and keep its PR and issue counts ([P35], V26). The
   // candidate server cannot produce this, as fixture mode never refreshes and the fixture file carries no head change.
@@ -275,7 +328,7 @@ test(`[scenario:dispatch-github] The GitHub cards group PRs and issues, name the
       await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) })
     })
   }
-  await page.goto(projectUrl(DISPATCH_WIDGETS))
+  await gotoProjectOpen(page, projectUrl(DISPATCH_WIDGETS))
   const prs = page.getByTestId('dispatch-gh-prs')
   await expect(prs).toContainText('showing the 20 most recently updated')
   await expect(prs).toContainText('Possibly related')
@@ -322,22 +375,131 @@ test(`[scenario:dispatch-github] The GitHub cards group PRs and issues, name the
     expect(await title.evaluate(el => el.getClientRects().length), `the heading is one line at ${width}px`).toBe(1)
   }
   await page.setViewportSize({ width: 1280, height: 900 })
-  // A not-read project: every GitHub card says so and shows no GitHub count, while the local sync and counts stay (V11).
-  await page.goto(projectUrl(DISPATCH_LOCAL))
-  await expect(page.getByTestId('dispatch-gh-prs')).toContainText('GitHub not read: not a GitHub remote')
-  await expect(page.getByTestId('dispatch-gh-issues')).toContainText('GitHub not read: not a GitHub remote')
-  await expect(page.getByTestId('dispatch-gh-local')).toContainText('GitHub not read')
+  // A project without a GitHub remote: its GitHub column is one line that says it has no GitHub remote and shows no GitHub
+  // count, while the local sync stays (V11); no pull-request or issue card is drawn for it.
+  await gotoProjectOpen(page, projectUrl(DISPATCH_LOCAL))
+  await expect(page.getByTestId('dispatch-github')).toContainText('no GitHub remote')
+  await expect(page.getByTestId('dispatch-github')).not.toContainText('GitHub not read')
+  await expect(page.getByTestId('dispatch-gh-prs')).toHaveCount(0)
+  await expect(page.getByTestId('dispatch-gh-issues')).toHaveCount(0)
+  await expect(page.getByTestId('dispatch-github')).not.toContainText(/\d+ open/)
+  await expect(page.getByTestId('dispatch-gh-local')).toContainText('no GitHub remote')
   await expect(page.getByTestId('dispatch-gh-local')).toContainText('origin/main') // the local sync still shows
   await attach(page, testInfo, 'dispatch-github')
 })
 
+/** The overview as the phase serves it, with each project's GitHub state edited by `edit` (a project it leaves alone keeps its read). */
+type OverviewEdit = (project: { project_id: string; github: Record<string, unknown> }) => void
+async function answerOverview(page: Page, first: OverviewEdit) {
+  let edit = first
+  await page.route(url => url.pathname === '/api/dispatch/projects', async route => {
+    try {
+      const body = phase === 'worker' ? JSON.parse(String(mockDispatchResponse(new URL(route.request().url())).body)) : await (await route.fetch()).json()
+      for (const project of body.projects) edit(project)
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) })
+    } catch { /* the test ended while this read was in flight */ }
+  })
+  return (next: OverviewEdit) => { edit = next }
+}
+
+const NOT_READ = { repo: null, read_at: null, visibility: null, default_branch: null, pushed_at: null, head: null, open_prs: null, open_issues: null, prs: [], issues: [] }
+const bodyText = (page: Page) => page.locator('body').innerText()
+const occurrences = (text: string, needle: string) => text.split(needle).length - 1
+
+test(`[scenario:github-wording] GitHub's state is said once per page in plain words: no GitHub remote, or GitHub not read with its reason (${phase})`, async ({ page }, testInfo) => {
+  test.slow() // three project pages and four overview variants
+  await page.setViewportSize({ width: 1440, height: 900 })
+  // The seeds serve one project per state they hold; `unavailable` and `off` are answered here in both phases.
+  const answer = await answerOverview(page, project => {
+    if (project.project_id === DISPATCH_TRIO) project.github = { status: 'unavailable', reason: 'gh is not installed', ...NOT_READ }
+    if (project.project_id === DISPATCH_BUSY) project.github = { status: 'off', reason: 'GitHub reads are disabled', ...NOT_READ }
+  })
+  await page.goto(PROJECTS)
+  await expect(page.getByTestId('dispatch-projects-meta')).toContainText('projects in', { timeout: 30_000 })
+  await expect(card(page, DISPATCH_LOCAL)).toContainText('no GitHub remote')
+  await expect(card(page, DISPATCH_LOCAL)).not.toContainText('GitHub not read')
+  await expect(card(page, DISPATCH_TRIO)).toContainText('GitHub not read: gh is not installed')
+  await expect(card(page, DISPATCH_BUSY)).toContainText('GitHub reads are turned off')
+  await expect(card(page, DISPATCH_WIDGETS)).toContainText('open PR')
+  await expect(page.getByTestId('dispatch-projects-meta')).toContainText(/GitHub read /)
+  expect(await bodyText(page)).not.toContain('GitHub not read: not a GitHub remote')
+  await attach(page, testInfo, 'github-wording')
+
+  // A project without a GitHub remote: "no GitHub remote" once, in the column's one line, with no Pull requests or Issues card.
+  await gotoProjectOpen(page, projectUrl(DISPATCH_LOCAL))
+  await expect(page.getByTestId('dispatch-github')).toContainText('no GitHub remote')
+  await expect(page.getByTestId('dispatch-github').locator('.dispatch-gline')).toHaveCount(1)
+  await expect(page.getByTestId('dispatch-gh-prs')).toHaveCount(0)
+  await expect(page.getByTestId('dispatch-gh-issues')).toHaveCount(0)
+  let text = await bodyText(page)
+  expect(occurrences(text, 'no GitHub remote')).toBe(1)
+  expect(text).not.toContain('GitHub not read')
+
+  // Any other not-read status: "GitHub not read: <reason>" once, on the Local and GitHub card, and no card repeats it.
+  await gotoProjectOpen(page, projectUrl(DISPATCH_TRIO))
+  await expect(page.getByTestId('dispatch-gh-local-notread')).toHaveText('GitHub not read: gh is not installed')
+  await expect(page.getByTestId('dispatch-gh-prs')).toHaveCount(0)
+  await expect(page.getByTestId('dispatch-gh-issues')).toHaveCount(0)
+  text = await bodyText(page)
+  expect(occurrences(text, 'GitHub not read: gh is not installed')).toBe(1)
+  expect(text).not.toContain('GitHub not read: not a GitHub remote')
+  await gotoProjectOpen(page, projectUrl(DISPATCH_BUSY))
+  await expect(page.getByTestId('dispatch-gh-local-notread')).toHaveText('GitHub reads are turned off')
+  expect(occurrences(await bodyText(page), 'GitHub reads are turned off')).toBe(1)
+
+  // A project whose GitHub was read keeps its pull request and issue counts, and says nothing is not read.
+  await gotoProjectOpen(page, projectUrl(DISPATCH_WIDGETS))
+  await expect(page.getByTestId('dispatch-gh-prs').locator('h3')).toContainText('3 open')
+  await expect(page.getByTestId('dispatch-gh-issues').locator('h3')).toContainText('3 open')
+  await expect(page.getByTestId('dispatch-github')).not.toContainText('no GitHub remote')
+
+  // The Projects page meta line: nothing about GitHub when no project has a GitHub remote, "GitHub not read" when none was read.
+  answer(project => { project.github = { status: 'not_github', reason: 'not a GitHub remote', ...NOT_READ } })
+  await page.goto(PROJECTS)
+  await expect(page.getByTestId('dispatch-projects-meta')).toContainText('projects in', { timeout: 30_000 })
+  await expect(page.getByTestId('dispatch-projects-meta')).not.toContainText('GitHub')
+  expect(await bodyText(page)).not.toContain('GitHub not read')
+  answer(project => { project.github = { status: 'unavailable', reason: 'gh is not installed', ...NOT_READ } })
+  await page.goto(PROJECTS)
+  await expect(page.getByTestId('dispatch-projects-meta')).toContainText('projects in', { timeout: 30_000 })
+  await expect(page.getByTestId('dispatch-projects-meta')).toContainText('GitHub not read')
+  await expect(page.getByTestId('dispatch-projects-meta')).not.toContainText('GitHub read')
+  await page.unrouteAll({ behavior: 'ignoreErrors' })
+})
+
+test(`A project without a GitHub remote keeps one body track with a run selected, however wide the body: no empty GitHub column beside the chart (${phase})`, async ({ page }) => {
+  await page.setViewportSize({ width: 1700, height: 900 })
+  await gotoProjectOpen(page, projectUrl(DISPATCH_LOCAL))
+  await run(page, 'sync-001').click()
+  await expect(page.getByTestId('dispatch-pane')).toBeVisible()
+  await expect(page.getByTestId('dispatch-project')).toHaveClass(/has-pane/)
+  const container = page.locator('.dispatch-body-container')
+  // Widen the window until the body's container reaches the three-column width (876 px), capped at 2560 px.
+  let width = 1700
+  let containerWidth = await container.evaluate(el => el.clientWidth)
+  while (containerWidth < 876 && width < 2560) {
+    width = Math.min(2560, width + 200)
+    await page.setViewportSize({ width, height: 900 })
+    containerWidth = await container.evaluate(el => el.clientWidth)
+  }
+  expect(containerWidth, `the body container is at least 876 px wide (window ${width} px)`).toBeGreaterThanOrEqual(876)
+  const body = page.locator('.dispatch-project-body')
+  await expect(body).toHaveClass(/dispatch-project-body-wide/)
+  const tracks = await body.evaluate(el => el.ownerDocument.defaultView!.getComputedStyle(el).gridTemplateColumns.split(' ').length)
+  expect(tracks, 'the body has a single grid track').toBe(1)
+  const bodyWidth = await body.evaluate(el => el.getBoundingClientRect().width)
+  const mainWidth = await page.locator('.dispatch-project-main').evaluate(el => el.getBoundingClientRect().width)
+  expect(Math.abs(mainWidth - bodyWidth), 'the main column fills the body width').toBeLessThanOrEqual(1)
+})
+
 test(`[scenario:dispatch-git-truth] The worktree shares its clone; the primary counts against origin with the naming split and the landings by value; no path leaks on every page (${phase})`, async ({ page }, testInfo) => {
-  await page.goto(projectUrl(DISPATCH_WIDGETS_WT))
+  test.slow() // thirteen page loads come within a second of 30 s on a loaded 4-core host
+  await gotoProjectOpen(page, projectUrl(DISPATCH_WIDGETS_WT))
   await expect(page.getByTestId('dispatch-gh-local')).toContainText('shares its clone with Widgets')
   await expect(railRow(page, DISPATCH_WIDGETS_WT)).not.toContainText('unpushed')
   // The Also checked out as card names the other checkout and whether it is the same clone.
   await expect(page.getByTestId('dispatch-gh-others')).toContainText('same clone')
-  await page.goto(projectUrl(DISPATCH_WIDGETS))
+  await gotoProjectOpen(page, projectUrl(DISPATCH_WIDGETS))
   const local = page.getByTestId('dispatch-gh-local')
   await expect(local).toContainText('Counted against origin/main as this clone has it')
   await expect(local).toContainText('origin/main last updated here')
@@ -348,18 +510,19 @@ test(`[scenario:dispatch-git-truth] The worktree shares its clone; the primary c
   await expect(page.getByTestId('dispatch-landings')).toContainText('2 of 2 landings on local main')
   await expect(page.getByTestId('dispatch-landings')).toContainText('1 on origin')
   await expect(page.getByTestId('dispatch-landings')).toContainText('0 unknown')
-  await page.goto(projectUrl(DISPATCH_NOORIGIN))
+  await gotoProjectOpen(page, projectUrl(DISPATCH_NOORIGIN))
   await expect(page.getByTestId('dispatch-gh-local')).toContainText('not compared with origin')
   // renderedText passes on every seeded page and a workflow page (V21): no absolute path reaches the browser.
   for (const url of [PROJECTS, TRIAGE, projectUrl(DISPATCH_WIDGETS), projectUrl(DISPATCH_WIDGETS_WT), projectUrl(DISPATCH_NOORIGIN), projectUrl(DISPATCH_LOCAL), projectUrl(DISPATCH_TRIO), projectUrl(DISPATCH_BUSY), projectUrl(DISPATCH_UNREADABLE), `${projectUrl(DISPATCH_WIDGETS)}/workflows/ui-polish`]) {
     await page.goto(url)
     await renderedText(workspace(page))
   }
-  await page.goto(projectUrl(DISPATCH_WIDGETS))
+  await gotoProjectOpen(page, projectUrl(DISPATCH_WIDGETS))
   await attach(page, testInfo, 'dispatch-git-truth')
 })
 
 test(`[scenario:dispatch-phone] At 390 px the rail is a chip row, cards stack, the GitHub column stacks, the pane fills the screen, and every target is at least 44 px (${phase})`, async ({ page }, testInfo) => {
+  test.slow() // the features are opened on every project page it reads
   await page.setViewportSize({ width: 390, height: 844 })
   await page.goto(PROJECTS)
   const chips = page.getByTestId('dispatch-chips')
@@ -368,7 +531,7 @@ test(`[scenario:dispatch-phone] At 390 px the rail is a chip row, cards stack, t
   await expect(chips).toContainText('Triage')
   const noSideways = async () => expect(await page.evaluate('document.documentElement.scrollWidth - document.documentElement.clientWidth') as number).toBeLessThanOrEqual(0)
   await noSideways()
-  await page.goto(projectUrl(DISPATCH_WIDGETS))
+  await gotoProjectOpen(page, projectUrl(DISPATCH_WIDGETS))
   await noSideways()
   await run(page, 'ui-polish-002').click()
   const pane = page.getByTestId('dispatch-pane')
@@ -397,6 +560,7 @@ test(`[scenario:dispatch-phone] At 390 px the rail is a chip row, cards stack, t
 })
 
 test(`[scenario:dispatch-dock] Selecting a run docks the pane beside the chart without squeezing it or scrolling the page; the GitHub column count comes from the body's width (${phase})`, async ({ page }, testInfo) => {
+  test.slow() // the features are opened on every project page it reads
   // Where the GitHub column sits relative to the chart: beside it (its left edge is at or past the chart's right edge) or
   // under it (the body stacked to one column). V23 decides the count from the body's own width (a container query), so the
   // chart never drops under 480px while the column is beside it, whatever the shell's border and padding around the body.
@@ -407,7 +571,7 @@ test(`[scenario:dispatch-dock] Selecting a run docks the pane beside the chart w
   }
   for (const width of [1280, 1440, 1920]) {
     await page.setViewportSize({ width, height: 900 })
-    await page.goto(projectUrl(DISPATCH_WIDGETS))
+    await gotoProjectOpen(page, projectUrl(DISPATCH_WIDGETS))
     await page.evaluate('window.scrollTo(0, 0)')
     await run(page, 'ui-polish-002').click()
     await expect(page.getByTestId('dispatch-pane')).toBeVisible()
@@ -436,7 +600,7 @@ test(`[scenario:dispatch-dock] Selecting a run docks the pane beside the chart w
   // container query does not, because it measures the body, not the viewport.
   for (const width of [1600, 1680, 1720, 1760]) {
     await page.setViewportSize({ width, height: 900 })
-    await page.goto(projectUrl(DISPATCH_WIDGETS))
+    await gotoProjectOpen(page, projectUrl(DISPATCH_WIDGETS))
     await page.evaluate('window.scrollTo(0, 0)')
     await run(page, 'ui-polish-002').click()
     await expect(page.getByTestId('dispatch-pane')).toBeVisible()
@@ -447,9 +611,10 @@ test(`[scenario:dispatch-dock] Selecting a run docks the pane beside the chart w
 })
 
 test(`[scenario:dispatch-axis] Each stop glyph's centre lies within its phase label's column and no label is cut with an ellipsis, at 1440 and 1100 px (${phase})`, async ({ page }, testInfo) => {
+  test.slow() // the features are opened on every project page it reads
   for (const width of [1440, 1100]) {
     await page.setViewportSize({ width, height: 900 })
-    await page.goto(projectUrl(DISPATCH_WIDGETS))
+    await gotoProjectOpen(page, projectUrl(DISPATCH_WIDGETS))
     const axis = page.getByTestId('dispatch-axis')
     await expect(axis).toBeVisible()
     // No axis label is cut with an ellipsis character (narrow columns use the fixed short forms).
@@ -469,7 +634,8 @@ test(`[scenario:dispatch-axis] Each stop glyph's centre lies within its phase la
 })
 
 test(`[scenario:dispatch-sections] "Needs you and running" lists waiting and running runs before the chart; same-repo wording; a missing reflog says "update time not recorded" (${phase})`, async ({ page }, testInfo) => {
-  await page.goto(projectUrl(DISPATCH_BUSY))
+  test.slow()
+  await gotoProjectOpen(page, projectUrl(DISPATCH_BUSY))
   const needs = page.getByTestId('dispatch-needs')
   await expect(needs).toContainText('Needs you and running')
   await expect(needs.getByRole('link', { name: /ship-001/ })).toBeVisible()
@@ -490,7 +656,7 @@ test(`[scenario:dispatch-sections] "Needs you and running" lists waiting and run
   // lists its `broken` feature as an empty readable list, so the plain all-clear shows; the candidate server cannot read
   // broken-001 (its plan.json is missing), so that feature's run list fails and the section is qualified — the clear phrase
   // plus "1 feature cannot be read", never the plain all-clear (V25). Asserted per phase, not weakened to a shared substring.
-  await page.goto(projectUrl(DISPATCH_WIDGETS))
+  await gotoProjectOpen(page, projectUrl(DISPATCH_WIDGETS))
   if (phase === 'worker') {
     await expect(page.getByTestId('dispatch-needs-none')).toContainText('Nothing waits on you; nothing running')
   } else {
@@ -499,11 +665,11 @@ test(`[scenario:dispatch-sections] "Needs you and running" lists waiting and run
     await expect(page.getByTestId('dispatch-needs-none')).toHaveCount(0)
   }
   await expect(page.getByTestId('dispatch-same-repo')).toContainText('same repo as Widgets worktree')
-  await page.goto(projectUrl(DISPATCH_WIDGETS_WT))
+  await gotoProjectOpen(page, projectUrl(DISPATCH_WIDGETS_WT))
   await expect(page.getByTestId('dispatch-same-repo')).toContainText('same repo as Widgets')
   // Trio's trio-locked workflow cannot be listed ([P34]): the section never shows the plain all-clear and says one feature
   // cannot be read, rather than asserting nothing waits on the operator (V25).
-  await page.goto(projectUrl(DISPATCH_TRIO))
+  await gotoProjectOpen(page, projectUrl(DISPATCH_TRIO))
   await expect(page.getByTestId('dispatch-needs')).toContainText('1 feature cannot be read')
   await expect(page.getByTestId('dispatch-needs-none')).toHaveCount(0)
   // In the worker phase only, the run-list state reaches the page as loading or fully failed (route interception, V25, [L12]).
@@ -520,17 +686,18 @@ test(`[scenario:dispatch-sections] "Needs you and running" lists waiting and run
     // Failing every /runs request of one project: "Runs not read: <reason>" and no all-clear.
     const nooriginRuns = (u: URL) => /\/projects\/dispatch-noorigin\/workflows\/[^/]+\/runs$/.test(u.pathname)
     await page.route(nooriginRuns, async route => route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: { code: 'RUNS_UNREADABLE', message: 'the runs could not be read' } }) }))
-    await page.goto(projectUrl(DISPATCH_NOORIGIN))
+    await gotoProjectOpen(page, projectUrl(DISPATCH_NOORIGIN))
     await expect(page.getByTestId('dispatch-needs-failed')).toContainText('Runs not read:')
     await expect(page.getByTestId('dispatch-needs-none')).toHaveCount(0)
     await page.unroute(nooriginRuns)
   }
-  await page.goto(projectUrl(DISPATCH_WIDGETS))
+  await gotoProjectOpen(page, projectUrl(DISPATCH_WIDGETS))
   await attach(page, testInfo, 'dispatch-sections')
 })
 
 test(`[scenario:dispatch-ahead] The commits-ahead button lists the commits and the landings in the pane; Busy shows 50 and "and 2 more" (${phase})`, async ({ page }, testInfo) => {
-  await page.goto(projectUrl(DISPATCH_WIDGETS))
+  test.slow() // the features are opened on every project page it reads
+  await gotoProjectOpen(page, projectUrl(DISPATCH_WIDGETS))
   await page.getByTestId('dispatch-ahead-button').click()
   const pane = page.getByTestId('dispatch-pane')
   await expect(pane).toBeVisible()
@@ -553,7 +720,7 @@ test(`[scenario:dispatch-ahead] The commits-ahead button lists the commits and t
   await expect(pane).toHaveCount(0)
   await expect(page.getByTestId('dispatch-ahead-button')).toBeFocused()
   // Busy is seeded 52 commits ahead: it lists 50 and shows "and 2 more".
-  await page.goto(projectUrl(DISPATCH_BUSY))
+  await gotoProjectOpen(page, projectUrl(DISPATCH_BUSY))
   await page.getByTestId('dispatch-ahead-button').click()
   await expect(page.getByTestId('dispatch-ahead-commits').locator('li')).toHaveCount(50)
   await expect(page.getByTestId('dispatch-ahead-more')).toContainText('and 2 more')
@@ -561,10 +728,19 @@ test(`[scenario:dispatch-ahead] The commits-ahead button lists the commits and t
 })
 
 test(`[scenario:dispatch-folds] Each feature group has a "Steps of this definition" fold, and a group longer than five folds to "Show N more" (${phase})`, async ({ page }, testInfo) => {
-  await page.goto(projectUrl(DISPATCH_WIDGETS))
-  const def = page.getByTestId('dispatch-def').first()
+  test.slow() // the features are opened on every project page it reads
+  await gotoProjectOpen(page, projectUrl(DISPATCH_WIDGETS))
+  // One fold per distinct definition revision, above the chart and inside no feature; every feature's steps are reachable.
+  const folds = page.getByTestId('dispatch-defs').getByTestId('dispatch-def')
+  const revisions = await folds.evaluateAll(els => els.map(el => el.getAttribute('data-revision')))
+  expect(new Set(revisions).size, 'one fold per revision').toBe(revisions.length)
+  await expect(page.getByTestId('dispatch-features').getByTestId('dispatch-def')).toHaveCount(0)
+  const features = await page.getByTestId('dispatch-features').locator('li[data-workflow-id]').evaluateAll(els => els.map(el => el.getAttribute('data-workflow-id')))
+  for (const index of revisions.keys()) await folds.nth(index).locator('summary').click()
+  const named = (await folds.locator('.dispatch-def-users').allInnerTexts()).flatMap(text => text.split(', '))
+  for (const feature of features) expect(named, `${feature}'s steps are reachable from a fold`).toContain(feature)
+  const def = folds.first()
   await expect(def).toContainText('Steps of this definition')
-  await def.locator('summary').click()
   await expect(def.locator('.dispatch-def-list li').first()).toBeVisible()
   await expect(def).toContainText('Verify') // a step's phase
   // The "Newest from people" issue group is longer than five and folds, expanding in place (V8).
@@ -574,4 +750,298 @@ test(`[scenario:dispatch-folds] Each feature group has a "Steps of this definiti
   await more.click()
   await expect(more).toHaveCount(0)
   await attach(page, testInfo, 'dispatch-folds')
+})
+
+// ---- Desktop fixes carried from the first two stages: watching dot, Sessions table, branch, dock message ------------------
+
+test(`The live chip's watching dot is neutral, not the running blue (${phase})`, async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.goto(runUrl(RUN_FAILED))
+  const chip = page.locator('[data-testid="live-status"][data-state="watching"]')
+  await expect(chip).toBeVisible({ timeout: 30_000 })
+  const colours = await chip.evaluate(element => {
+    const view = element.ownerDocument.defaultView!
+    const dot = element.querySelector('[aria-hidden]')!
+    const probe = element.ownerDocument.createElement('span')
+    probe.style.color = view.getComputedStyle(element.closest('.projects-shell') ?? element.ownerDocument.body).getPropertyValue('--run')
+    element.append(probe)
+    const run = view.getComputedStyle(probe).color
+    probe.remove()
+    return { dot: view.getComputedStyle(dot).color, chip: view.getComputedStyle(element).color, run }
+  })
+  expect(colours.dot, 'the dot takes the chip\'s own neutral colour').toBe(colours.chip)
+  expect(colours.dot, 'and not the running tone').not.toBe(colours.run)
+})
+
+test(`The Sessions table's header columns line up with every row's cells, and an opened resume command is no wider than itself (${phase})`, async ({ page }) => {
+  test.slow()
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.goto(runUrl(RUN_SESSIONS, undefined, UX_SESSIONS_WORKFLOW_ID))
+  await expect(page.getByTestId('sessions-section')).toBeVisible({ timeout: 30_000 })
+  const toggle = page.getByTestId('session-resume-toggle').first()
+  await toggle.click()
+  const tables = page.locator('.ss-rows')
+  const count = await tables.count()
+  expect(count).toBeGreaterThan(1)
+  let rowsChecked = 0
+  for (let index = 0; index < count; index += 1) {
+    const columns = await tables.nth(index).evaluate(table => {
+      const head = [...table.querySelectorAll('.ss-head > *')].map(element => Math.round(element.getBoundingClientRect().x))
+      const rows = [...table.querySelectorAll('.ss-row')].map(row => [...row.children].filter(child => !child.classList.contains('ss-resume-open')).map(element => Math.round(element.getBoundingClientRect().x)))
+      return { head, rows }
+    })
+    expect(columns.head.length).toBe(8)
+    for (const row of columns.rows) {
+      rowsChecked += 1
+      expect(row, 'a row has the header\'s eight columns').toHaveLength(8)
+      row.forEach((x, column) => expect(Math.abs(x - columns.head[column]), `column ${column} of a row starts where its header does`).toBeLessThanOrEqual(1))
+    }
+  }
+  expect(rowsChecked).toBeGreaterThan(2)
+  const command = page.getByTestId('session-resume-command').first()
+  await expect(command).toBeVisible()
+  const fit = await command.evaluate(element => ({ scroll: element.scrollWidth, client: element.clientWidth, container: element.parentElement!.clientWidth }))
+  expect(fit.scroll, 'the command is not cut').toBeLessThanOrEqual(fit.client)
+  expect(fit.client, 'the command box fits its text, not the whole row').toBeLessThan(fit.container - 40)
+})
+
+test(`The run page's branch is not cut, and the dock's Now message keeps a readable width beside its Open link at 1440 (${phase})`, async ({ page }) => {
+  test.slow()
+  await page.setViewportSize({ width: 1440, height: 900 })
+  for (const id of [RUN_REVAMP_BLOCKED, RUN_REVAMP_RUNNING, RUN_REVAMP_DONE]) {
+    await page.goto(runUrl(id, undefined, REVAMP_PAGES_WORKFLOW_ID))
+    await expect(page.getByTestId('run-branch')).toBeVisible({ timeout: 30_000 })
+    const branch = await page.getByTestId('run-branch').evaluate(element => ({ scroll: element.scrollWidth, client: element.clientWidth, overflow: element.ownerDocument.defaultView!.getComputedStyle(element).textOverflow }))
+    expect(branch.scroll, 'the branch is not cut').toBeLessThanOrEqual(branch.client)
+    expect(branch.overflow).not.toBe('ellipsis')
+    const bar = page.getByTestId('live-dock-bar')
+    if ((await bar.getAttribute('aria-expanded')) === 'false') await bar.click()
+    const headline = liveDock(page).getByTestId('now-headline')
+    if (await headline.count() === 0) continue
+    const message = headline.locator('> span:nth-child(2)')
+    const measured = await message.evaluate(element => element.getBoundingClientRect().width)
+    expect(measured, 'the message is not squeezed to a sliver').toBeGreaterThanOrEqual(140)
+  }
+})
+
+// ---- Chart words, run identities, definition folds and landed chips -----------------------------------------------------
+
+const PHASE_NAMES = ['Challenge', 'Launch', 'Freeze', 'Verify', 'Candidate', 'Review', 'Approval', 'Integrate']
+const SHORT_FORMS = ['Ch', 'La', 'Fr', 'Ve', 'Ca', 'Re', 'Ap', 'In']
+
+/** The chart's container width, as the `@container dispatch-chart` query sees it. */
+const chartContainerWidth = (page: Page) => page.locator('#dispatch-runs-section').evaluate(element => element.clientWidth)
+
+test(`[scenario:chart-words] An "ended here" count says what it counts, the axis shows full phase names, and a narrow chart explains every short form in a legend (${phase})`, async ({ page }, testInfo) => {
+  test.slow() // the features are opened on every project page it reads
+  // Wide: the eight full names, the sentence in each non-empty cell, its own name equal to its text, centred under its column.
+  // At 1100px the GitHub column leaves the chart under 640px, where the short forms and their legend show instead.
+  for (const width of [1440, 1100]) {
+    await page.setViewportSize({ width, height: 900 })
+    await gotoProjectOpen(page, projectUrl(DISPATCH_WIDGETS))
+    const wide = (await chartContainerWidth(page)) > 640
+    if (width === 1440) expect(wide, 'the chart is wider than 640px at 1440px').toBe(true)
+    const ends = page.locator('li[data-workflow-id="ui-polish"]').getByTestId('dispatch-ends')
+    await expect(ends.locator('.dispatch-ends-l')).toHaveText('ended here')
+    const cells = ends.locator('.dispatch-en')
+    expect(await cells.count()).toBe(8)
+    if (wide) {
+      await expect(page.locator('.dispatch-ax-full')).toHaveText(PHASE_NAMES)
+      await expect(page.getByTestId('dispatch-axis-legend')).toBeHidden()
+      let nonEmpty = 0
+      for (let column = 0; column < 8; column += 1) {
+        const cell = cells.nth(column)
+        const sentence = await cell.locator('.dispatch-en-full').count() ? await cell.locator('.dispatch-en-full').innerText() : ''
+        if (sentence === '') continue
+        nonEmpty += 1
+        const count = sentence.split(' ')[0]
+        expect(sentence, `column ${column}`).toBe(column === 7 ? `${count} landed` : `${count} ended at ${PHASE_NAMES[column]}`)
+        await expect(cell).toHaveAccessibleName(sentence)
+        expect(await cell.evaluate(element => element.scrollWidth <= element.clientWidth), `"${sentence}" is not cut`).toBe(true)
+      }
+      expect(nonEmpty, 'the seeded feature ended at several steps').toBeGreaterThanOrEqual(2)
+    } else {
+      await expect(page.getByTestId('dispatch-axis-legend')).toBeVisible()
+    }
+    const verifyCell = await box(cells.nth(3))
+    const verifyAxis = await box(page.locator('.dispatch-ax[data-phase="3"]'))
+    expect(Math.abs((verifyCell.x + verifyCell.width / 2) - (verifyAxis.x + verifyAxis.width / 2)), `the Verify count is centred under its column at ${width}px`).toBeLessThanOrEqual(2)
+    expect(await page.evaluate('document.documentElement.scrollWidth - document.documentElement.clientWidth') as number).toBeLessThanOrEqual(0)
+  }
+
+  // Narrow: a run selected beside the chart at 1024px leaves it under 640px (or a narrower window does).
+  await page.setViewportSize({ width: 1024, height: 900 })
+  await gotoProjectOpen(page, projectUrl(DISPATCH_WIDGETS))
+  await run(page, 'ui-polish-002').click()
+  await expect(page.getByTestId('dispatch-pane')).toBeVisible()
+  expect(await chartContainerWidth(page), 'the chart container is under 640px with a run selected').toBeLessThan(640)
+  const axis = page.getByTestId('dispatch-axis')
+  expect(await axis.innerText()).not.toContain('…')
+  await expect(page.locator('.dispatch-ax-short')).toHaveText(SHORT_FORMS)
+  for (const full of await page.locator('.dispatch-ax-full').all()) await expect(full).toBeHidden()
+  // Every short form is explained by a visible legend under the chart, in the chart's container, none clipped.
+  const legend = page.getByTestId('dispatch-axis-legend')
+  await expect(legend).toBeVisible()
+  const containerBox = await box(page.locator('#dispatch-runs-section'))
+  const features = await box(page.getByTestId('dispatch-features'))
+  const legendBox = await box(legend)
+  expect(legendBox.y, 'the legend sits under the chart').toBeGreaterThanOrEqual(features.y + features.height - 1)
+  const items = legend.locator('.dispatch-legend-item')
+  await expect(items).toHaveCount(8)
+  for (let index = 0; index < 8; index += 1) {
+    const item = items.nth(index)
+    await expect(item).toBeVisible()
+    await expect(item).toHaveText(`${SHORT_FORMS[index]} ${PHASE_NAMES[index]}`)
+    expect(await item.evaluate(element => element.scrollWidth <= element.clientWidth), `${PHASE_NAMES[index]} is not clipped`).toBe(true)
+    const itemBox = await box(item)
+    expect(itemBox.x).toBeGreaterThanOrEqual(containerBox.x - 1)
+    expect(itemBox.x + itemBox.width).toBeLessThanOrEqual(containerBox.x + containerBox.width + 1)
+  }
+  expect(await legend.innerText()).not.toContain('…')
+  expect(await legend.evaluate(element => element.scrollWidth <= element.clientWidth), 'the legend does not scroll sideways').toBe(true)
+  // No axis label or count cell is wider than its column or broken inside a word; a count cell is named by its sentence.
+  for (const selector of ['.dispatch-ax', '.dispatch-en']) {
+    const widths = await page.locator(selector).evaluateAll(elements => elements.filter(element => element.getClientRects().length > 0).map(element => ({
+      fits: element.scrollWidth <= element.clientWidth, oneLine: element.getClientRects().length === 1 && element.getBoundingClientRect().height < 2.4 * parseFloat(element.ownerDocument.defaultView!.getComputedStyle(element).fontSize),
+    })))
+    expect(widths.length).toBeGreaterThan(0)
+    for (const measured of widths) { expect(measured.fits, `${selector} fits its column`).toBe(true); expect(measured.oneLine, `${selector} has no break inside a word`).toBe(true) }
+  }
+  const counts = page.locator('li[data-workflow-id="ui-polish"] .dispatch-en:has(.dispatch-en-count)')
+  expect(await counts.count()).toBeGreaterThanOrEqual(2)
+  for (let index = 0; index < await counts.count(); index += 1) {
+    const cell = counts.nth(index)
+    const full = (await cell.getAttribute('aria-label'))!
+    expect(full).toMatch(/^\d+ (ended at (Challenge|Launch|Freeze|Verify|Candidate|Review|Approval)|landed)$/)
+    await expect(cell).toHaveAccessibleName(full)
+    await expect(cell).toHaveAttribute('title', full)
+    expect(await cell.locator('.dispatch-en-count').innerText()).toBe(full.split(' ')[0])
+    expect(await cell.ariaSnapshot()).toContain(full)
+  }
+  expect(await page.evaluate('document.documentElement.scrollWidth - document.documentElement.clientWidth') as number).toBeLessThanOrEqual(0)
+  await attach(page, testInfo, 'chart-words')
+})
+
+test(`A run row is named by its whole run id, the folds by their features, and the landed shas are apart and unique (${phase})`, async ({ page }) => {
+  test.slow()
+  const problems: string[] = []
+  page.on('console', message => { if (message.type() === 'error' && /unique "key"|same key/i.test(message.text())) problems.push(message.text()) })
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await gotoProjectOpen(page, projectUrl(DISPATCH_WIDGETS))
+  const rows = page.locator('.dispatch-run')
+  expect(await rows.count()).toBeGreaterThan(1)
+  const ids = await rows.evaluateAll(elements => elements.map(element => ({ id: element.getAttribute('data-run-id')!, shown: element.querySelector('.dispatch-run-id')!.textContent! })))
+  for (const { id, shown } of ids) { expect(shown, 'the row names its run in full').toBe(id); expect(shown).not.toMatch(/^\d+$/) }
+  // A header chip is the run's number, and its title names the whole run.
+  const chipTitles = await page.locator('.dispatch-chip-run').evaluateAll(elements => elements.map(element => element.getAttribute('title')))
+  for (const title of chipTitles) expect(ids.map(item => item.id)).toContain(title)
+  // Every fold says which features use it, so folds of different revisions are never identical.
+  const summaries = await page.getByTestId('dispatch-def').locator('summary').allInnerTexts()
+  expect(summaries.length).toBeGreaterThan(0)
+  expect(new Set(summaries).size, 'no two folds read the same').toBe(summaries.length)
+  const featureIds = await page.getByTestId('dispatch-features').locator('li[data-workflow-id]').evaluateAll(elements => elements.map(element => element.getAttribute('data-workflow-id')!))
+  for (const summary of summaries) expect(featureIds.some(feature => summary.includes(feature)), `"${summary}" names a feature`).toBe(true)
+  // The landed shas of a feature are separate chips, each once, with room between them.
+  const landed = page.locator('.dispatch-landed')
+  for (let index = 0; index < await landed.count(); index += 1) {
+    const shas = await landed.nth(index).locator('code').allInnerTexts()
+    expect(new Set(shas).size, 'a sha is listed once').toBe(shas.length)
+    const boxes = await landed.nth(index).locator('code').evaluateAll(elements => elements.map(element => { const rect = element.getBoundingClientRect(); return { x: rect.x, right: rect.right, y: rect.y } }))
+    for (let chip = 1; chip < boxes.length; chip += 1) {
+      if (Math.abs(boxes[chip].y - boxes[chip - 1].y) < 4) expect(boxes[chip].x - boxes[chip - 1].right, 'the chips are visibly apart').toBeGreaterThanOrEqual(4)
+    }
+  }
+  expect(problems).toEqual([])
+})
+
+// ---- The type floor, measured in the app ---------------------------------------------------------------------------------
+
+/**
+ * Every visible element that holds its own non-empty text, outside the run stage's zoomed graph, with its computed font size,
+ * uppercase flag and a short name. Evaluated in the page as a string (this config has no DOM types).
+ */
+const READABLE_TEXT = `(() => {
+  const found = []
+  const exempt = [...document.querySelectorAll('[data-testid="run-stage"] .sb-viewport')]
+  for (const element of document.body.querySelectorAll('*')) {
+    if (['SCRIPT', 'STYLE', 'NOSCRIPT', 'defs'].includes(element.tagName)) continue
+    if (exempt.some(zone => zone.contains(element))) continue
+    const own = [...element.childNodes].filter(node => node.nodeType === 3 && node.textContent.trim() !== '').map(node => node.textContent.trim()).join(' ')
+    if (own === '') continue
+    const rect = element.getBoundingClientRect()
+    const style = getComputedStyle(element)
+    if (rect.width < 2 || rect.height < 2 || style.visibility === 'hidden' || style.display === 'none' || Number(style.opacity) === 0) continue
+    found.push({ name: element.tagName.toLowerCase() + (element.className && typeof element.className === 'string' ? '.' + element.className.trim().split(/\\s+/).join('.') : ''), text: own.slice(0, 40), size: parseFloat(style.fontSize), uppercase: style.textTransform === 'uppercase', code: element.tagName === 'CODE' })
+  }
+  return found
+})()`
+
+type Measured = { name: string; text: string; size: number; uppercase: boolean; code: boolean }
+
+/** The elements under the floor for the window's width: 13px from 720px (14px under it), uppercase labels 11px. */
+async function underTheFloor(page: Page, width: number): Promise<string[]> {
+  const measured = await page.evaluate(READABLE_TEXT) as Measured[]
+  expect(measured.length, 'the page holds text').toBeGreaterThan(5)
+  const floor = width >= 720 ? 13 : 14
+  return measured.filter(item => (item.uppercase ? item.size < 11 : item.size < floor - 0.01) || (item.code && width >= 720 && item.size < 13 - 0.01))
+    .map(item => `${item.name} "${item.text}" ${item.size}px`)
+}
+
+test(`[scenario:type-floor] Nothing the operator reads is under 13px (14px under 720px) except uppercase labels at 11px, on every Projects page, at 1440 and 390 (${phase})`, async ({ page }, testInfo) => {
+  test.slow() // twelve page loads
+  const pages: [string, string, ((page: Page) => Promise<void>) | null][] = [
+    ['the Projects cards', PROJECTS, async p => { await expect(p.getByTestId('dispatch-cards')).toBeVisible({ timeout: 30_000 }) }],
+    ['a project page with its step chart', projectUrl(DISPATCH_WIDGETS), async p => { await openAllFeatures(p) }],
+    ['Triage', TRIAGE, async p => { await expect(p.getByTestId('recent-runs')).toBeVisible({ timeout: 30_000 }) }],
+    ['a feature page', workflowUrl(PROJECT.project_id, WORKFLOW_ID), async p => { await expect(p.locator('a.run-row').first()).toBeVisible({ timeout: 30_000 }) }],
+    ['a run page with its dock open and its Sessions table', runUrl(RUN_SESSIONS, undefined, UX_SESSIONS_WORKFLOW_ID), async p => {
+      await expect(p.getByTestId('sessions-section')).toBeVisible({ timeout: 30_000 })
+      const bar = p.getByTestId('live-dock-bar')
+      if ((await bar.count()) > 0 && (await bar.getAttribute('aria-expanded')) === 'false') await bar.click()
+    }],
+    ['a review node page', runUrl(RUN_SESSIONS, 'review', UX_SESSIONS_WORKFLOW_ID), async p => { await expect(p.getByTestId('node-header')).toBeVisible({ timeout: 30_000 }) }],
+  ]
+  for (const width of [1440, 390]) {
+    await page.setViewportSize({ width, height: width === 1440 ? 900 : 844 })
+    for (const [name, url, ready] of pages) {
+      await page.goto(url)
+      if (ready) await ready(page)
+      const under = await underTheFloor(page, width)
+      expect(under, `${name} at ${width}px`).toEqual([])
+      expect(await page.evaluate('document.documentElement.scrollWidth - document.documentElement.clientWidth') as number, `${name} is not wider than the window at ${width}px`).toBeLessThanOrEqual(0)
+    }
+  }
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.goto(projectUrl(DISPATCH_WIDGETS))
+  await openAllFeatures(page)
+  await attach(page, testInfo, 'type-floor')
+})
+
+test(`The current definition's node labels, glyphs and meta lines stay inside their node at the type floor (${phase})`, async ({ page }) => {
+  test.slow()
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.goto(workflowUrl(PROJECT.project_id, WORKFLOW_ID))
+  const definition = page.getByTestId('current-definition')
+  await expect(definition).toBeVisible({ timeout: 30_000 })
+  if ((await definition.getAttribute('open')) === null) await definition.locator('summary').click()
+  const graph = page.getByTestId('workflow-graph')
+  await expect(graph).toBeVisible()
+  const outside = await graph.evaluate(svg => {
+    const view = svg.ownerDocument.defaultView!
+    const found: string[] = []
+    let longest = ''
+    for (const node of svg.querySelectorAll('[data-graph-node]')) {
+      const shape = node.querySelector('.workflow-node-shape')!.getBoundingClientRect()
+      for (const text of node.querySelectorAll('.workflow-node-label, .workflow-node-meta, .workflow-node-glyph')) {
+        const box = text.getBoundingClientRect()
+        if (text.classList.contains('workflow-node-label') && (text.textContent ?? '').length > longest.length) longest = text.textContent ?? ''
+        const size = parseFloat(view.getComputedStyle(text).fontSize)
+        if (size < 13) found.push(`${text.textContent} is ${size}px`)
+        if (box.left < shape.left - 1 || box.right > shape.right + 1 || box.top < shape.top - 1 || box.bottom > shape.bottom + 1) found.push(`${node.getAttribute('data-graph-node')}: "${text.textContent}" ${Math.round(box.left - shape.left)},${Math.round(shape.right - box.right)},${Math.round(box.top - shape.top)},${Math.round(shape.bottom - box.bottom)}`)
+      }
+    }
+    return { found, longest }
+  })
+  expect(outside.longest.length, 'the definition has labels').toBeGreaterThan(5)
+  expect(outside.found).toEqual([])
 })

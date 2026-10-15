@@ -5,7 +5,7 @@
  */
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { assignmentPathname, attemptPathname, parseProjectsPathname, routeToPathname, runPathname, triagePathname, type ProjectsRoute } from '../../src/projects/routes.ts'
+import { assignmentPathname, attemptPathname, canonicalPathname, DEFAULT_LIST_SEARCH, keepsListSearch, listSearchString, parseListSearch, parseProjectsPathname, routeToPathname, runPathname, triagePathname, type ListSearch, type ProjectsRoute } from '../../src/projects/routes.ts'
 
 const RUN = '/projects/alpha/workflows/flow/runs/run-1'
 
@@ -114,5 +114,67 @@ describe('building pathnames', () => {
       { level: 'run', projectId: 'alpha', workflowId: 'flow', runId: 'run-1', nodeId: 'verify_ui', tab: 'run', attempt: 3 },
     ]
     for (const route of routes) assert.deepEqual(parseProjectsPathname(routeToPathname(route)), route)
+  })
+})
+
+describe('a list\'s state in the URL search', () => {
+  const full: ListSearch = { q: 'run 42', status: ['needs', 'failed'], phase: 'Review', date: '7d', sort: 'newest', group: true, older: true, pages: 3 }
+
+  test('every key round-trips, in the fixed order q, status, phase, date, sort, group, older, pages', () => {
+    const search = listSearchString(full)
+    assert.equal(search, '?q=run+42&status=needs%2Cfailed&phase=Review&date=7d&sort=newest&group=project&older=1&pages=3')
+    assert.deepEqual(parseListSearch(search), full)
+    for (const date of ['today', '7d', '30d', 'all'] as const) assert.equal(parseListSearch(listSearchString({ ...DEFAULT_LIST_SEARCH, date })).date, date)
+    for (const sort of ['newest', 'oldest'] as const) assert.equal(parseListSearch(listSearchString({ ...DEFAULT_LIST_SEARCH, sort })).sort, sort)
+    // Status ids are written once each, in the bar's order, whatever order they were pressed in.
+    assert.equal(listSearchString({ ...DEFAULT_LIST_SEARCH, status: ['cancelled', 'running'] }), '?status=running%2Ccancelled')
+  })
+  test('defaults are never written: a list at its defaults has an empty search', () => {
+    assert.equal(listSearchString(DEFAULT_LIST_SEARCH), '')
+    assert.equal(listSearchString({ ...DEFAULT_LIST_SEARCH, sort: 'live', date: 'any', pages: 1 }), '')
+    assert.deepEqual(parseListSearch(''), DEFAULT_LIST_SEARCH)
+  })
+  test('an unknown key is dropped and a malformed status, phase, date, sort or pages reads as its default', () => {
+    assert.deepEqual(parseListSearch('?foo=bar&q=x'), { ...DEFAULT_LIST_SEARCH, q: 'x' })
+    assert.equal(listSearchString(parseListSearch('?foo=bar&q=x')), '?q=x')
+    assert.deepEqual(parseListSearch('?status=failed,bogus').status, [])
+    assert.deepEqual(parseListSearch('?status=').status, [])
+    assert.equal(parseListSearch('?phase=Nowhere').phase, null)
+    assert.equal(parseListSearch('?date=yesterday').date, 'any')
+    assert.equal(parseListSearch('?sort=random').sort, 'live')
+    for (const pages of ['0', '21', '-1', 'two', '1.5', '007', '']) assert.equal(parseListSearch(`?pages=${pages}`).pages, 1, pages)
+    assert.equal(parseListSearch('?pages=20').pages, 20)
+    assert.equal(parseListSearch('?group=day').group, false)
+    assert.equal(parseListSearch('?older=yes').older, false)
+  })
+  test('a Projects pathname with a search parses as its pathname; the keep-search helper is true for Projects pathnames only', () => {
+    assert.deepEqual(parseProjectsPathname(new URL(`http://x${RUN}?q=a&status=failed`).pathname), parseProjectsPathname(RUN))
+    for (const pathname of ['/projects', triagePathname(), '/projects/alpha', '/projects/alpha/workflows/flow', RUN]) assert.equal(keepsListSearch(pathname), true, pathname)
+    for (const pathname of ['/', '/pi', '/claude', '/pi/skills', '/claude/agents/x.md', '/documents/a', '/skills', '/projectsx', '/pi/projects']) assert.equal(keepsListSearch(pathname), false, pathname)
+  })
+  test('a Projects pathname with a trailing slash has the canonical pathname a list writes; any other pathname is unchanged', () => {
+    assert.equal(canonicalPathname(`${triagePathname()}/`), triagePathname())
+    assert.equal(canonicalPathname('/projects/'), '/projects')
+    assert.equal(canonicalPathname('/projects/alpha/workflows/flow/'), '/projects/alpha/workflows/flow')
+    assert.equal(canonicalPathname(RUN), RUN)
+    for (const pathname of ['/', '/pi/', '/claude/agents/x.md', '/projects/alpha/bogus']) assert.equal(canonicalPathname(pathname), pathname, pathname)
+  })
+})
+
+describe('the kind-aware date read (ux-critique-fixes-c)', () => {
+  test('date=all stays "All time" on Triage and reads as "Any date" on the project page, which does not offer it', async () => {
+    const { offeredDate, DATE_CHOICES } = await import('../../src/projects/runFilter.ts')
+    const search = parseListSearch('?date=all')
+    assert.equal(search.date, 'all', 'the shared URL key keeps the value for every list')
+    assert.equal(offeredDate('triage', search.date), 'all')
+    assert.equal(offeredDate('project', search.date), 'any')
+    assert.equal(offeredDate('feature', search.date), 'all')
+    // A date Triage does not offer reads as any there, and every offered date passes unchanged.
+    assert.equal(offeredDate('triage', parseListSearch('?date=30d').date), 'any')
+    for (const kind of ['triage', 'project', 'feature'] as const) for (const date of DATE_CHOICES[kind]) assert.equal(offeredDate(kind, date), date)
+    // Triage writes date=all to its URL, and the URL reads it back after a reload.
+    const written = listSearchString({ ...DEFAULT_LIST_SEARCH, date: 'all' })
+    assert.match(written, /date=all/)
+    assert.equal(parseListSearch(written).date, 'all')
   })
 })

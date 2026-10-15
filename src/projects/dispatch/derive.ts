@@ -7,6 +7,7 @@
  * Every function is pure and names its source: the viewer never claims a comparison the data does not hold. An unknown
  * landing is shown as unknown, never as false ([P9]); git that could not be read says so in words.
  */
+import type { Tone } from '../tone.ts'
 import type { GitState, GithubState, Issue, Landing, Pr } from './types.ts'
 
 // ---- Sync wording (section 5, "Sync wording") -------------------------------------------------------------------------
@@ -141,9 +142,9 @@ export function githubNoHeadText(defaultBranch: string | null): string {
 export type RailInfo = {
   projectId: string
   name: string
-  /** Runs waiting on the operator (a question, a pane or an approval). */
+  /** Runs that need the operator (a question, a pane, an approval, a decision, an interrupted latest run). */
   waits: number
-  /** Paused runs that wait on nobody. */
+  /** Paused runs that need nobody and are not superseded in their own workflow. */
   paused: number
   /** Running runs. */
   running: number
@@ -153,22 +154,48 @@ export type RailInfo = {
   lastActivity: number
   /** Commits ahead of origin on the clone's primary project only, else null (no "N unpushed" badge). */
   unpushed: number | null
+  /** The run read has not settled: no run badge is claimed yet. */
+  loading?: boolean
 }
 
-/** Rail order: needs you, running, readable before unreadable, then by last activity ([D6]). */
+/**
+ * Rail order, the lists' one order for projects ([D6]): runs that need the operator, then running runs, then paused runs
+ * (each by how many), readable before unreadable, then by last activity, then project id. The Projects cards follow it.
+ */
 export function railOrder<T extends RailInfo>(infos: readonly T[]): T[] {
-  const needs = (info: RailInfo) => info.waits + info.paused
   return [...infos].sort((a, b) =>
-    (needs(b) - needs(a)) || (b.running - a.running) || (Number(a.allBad) - Number(b.allBad)) || (b.lastActivity - a.lastActivity) || a.projectId.localeCompare(b.projectId))
+    (b.waits - a.waits) || (b.running - a.running) || (b.paused - a.paused) || (Number(a.allBad) - Number(b.allBad)) || (b.lastActivity - a.lastActivity) || a.projectId.localeCompare(b.projectId))
 }
 
 /** A rail row's badge: "N waits on you", else "N paused", else "N running", else "N unpushed" on the clone's primary; null otherwise. */
 export function railBadge(info: RailInfo): string | null {
+  if (info.loading) return null
   if (info.waits > 0) return `${info.waits} waits on you`
   if (info.paused > 0) return `${info.paused} paused`
   if (info.running > 0) return `${info.running} running`
   if (info.unpushed !== null && info.unpushed > 0) return `${info.unpushed} unpushed`
   return null
+}
+
+/**
+ * A rail badge's own tone, from what it counts and never from the row's latest result: warn for "N waits on you", pause for
+ * "N paused", run for "N running"; an "N unpushed" badge and no badge are neutral (null).
+ */
+export function railBadgeTone(info: RailInfo): Tone | null {
+  if (info.loading) return null
+  if (info.waits > 0) return 'warn'
+  if (info.paused > 0) return 'pause'
+  if (info.running > 0) return 'run'
+  return null
+}
+
+/**
+ * The compact Triage chip's words: the count that needs the operator (the Needs-you count, never summed with paused), then
+ * the paused runs apart under their own word ("3 waits · 2 paused"); "…" until the runs are read.
+ */
+export function compactTriage(counts: { waits: number; paused: number } | null): string {
+  if (counts === null) return '…'
+  return [`${counts.waits} ${counts.waits === 1 ? 'wait' : 'waits'}`, counts.paused > 0 ? `${counts.paused} paused` : ''].filter(Boolean).join(' · ')
 }
 
 // ---- The Projects card state word (section 4.1) ----------------------------------------------------------------------
@@ -182,10 +209,12 @@ const TONE_WORD: Record<string, string> = {
  * The card's state word: for a multi-feature project whose latest results are mixed, "N of M features <result> last" (for
  * example "1 of 3 features failed last"); otherwise the project's own one-word state. `allBad` reads "cannot be read".
  */
-export function cardStateWord(input: { tone: string; waits: number; running: number; allBad: boolean; featureCount: number; worstLatestCount: number }): string {
+export function cardStateWord(input: { tone: string; waits: number; running: number; paused?: number; allBad: boolean; loading?: boolean; featureCount: number; worstLatestCount: number }): string {
+  if (input.loading) return 'reading runs…'
   if (input.allBad) return 'cannot be read'
   if (input.waits > 0) return `${input.waits} waits on you`
   if (input.running > 0) return `${input.running} running`
+  if ((input.paused ?? 0) > 0) return `${input.paused} paused`
   const word = TONE_WORD[input.tone] ?? 'idle'
   if (input.featureCount > 1) return `${input.worstLatestCount} of ${input.featureCount} features ${word} last`
   return word

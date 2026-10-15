@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { definitionSchema, runSummarySchema } from './v1.js'
 
 /**
  * The dispatch API (docs/PRD_PROJECTS_DISPATCH.md Appendix A, contract 1.0.0): the Projects overview and a project's
@@ -90,10 +91,23 @@ export const gitStateSchema = z.strictObject({
   read_at: ts,
 })
 
+/**
+ * A project's Claude spend as its runs' exports record it (`costs.total_usd`, workflow/costs.py), over every run of every
+ * readable workflow: `runs` counts them, `priced_runs` those with a recorded (non-null) total, a recorded 0 included, and
+ * `claude_usd` sums those totals (6 places), null when none is priced. Never a covered estimate nor the sessions totals.
+ */
+export const projectSpendSchema = z.strictObject({
+  claude_usd: z.number().nonnegative().nullable(),
+  priced_runs: z.number().int().nonnegative(),
+  runs: z.number().int().nonnegative(),
+})
+
 export const projectDispatchSchema = z.strictObject({
   project_id: z.string(),
   git: gitStateSchema,
   github: githubStateSchema,
+  /** Null only when the project's workflow list cannot be read; always sent (1.10.0 rule: nullable and optional). */
+  spend: projectSpendSchema.nullable().optional(),
 })
 
 export const dispatchOverviewSchema = z.strictObject({
@@ -129,10 +143,51 @@ export const projectStepsSchema = z.strictObject({
   })),
 })
 
-/** The two routes, for the shared export and contract test (mirrors `schemas` in v1.ts). */
+/** Why a list could not be read: the per-workflow or per-project route's own error, with its HTTP status. */
+export const readErrorSchema = z.strictObject({ status: z.number().int(), code: z.string(), message: z.string() })
+
+/**
+ * `GET /api/dispatch/runs?since=<ISO Z>`: in one response, what the rail, the cards and Triage read per workflow before: each
+ * registered project's workflow list (or its read error) and, per workflow, its first run page and every further page while
+ * the previous page's last run has `updated_at >= since`, with the remaining `next_cursor` (null when every run was read) or
+ * the workflow's read error. The rows are the per-workflow route's summaries, unfiltered and uncounted.
+ */
+export const homeRunsSchema = z.strictObject({
+  contract_version: z.literal(DISPATCH_VERSION),
+  read_at: ts,
+  since: ts,
+  projects: z.array(z.strictObject({
+    project_id: z.string(),
+    workflows: z.array(definitionSchema),
+    error: readErrorSchema.nullable(),
+    runs: z.array(z.strictObject({
+      workflow_id: z.string(),
+      runs: z.array(runSummarySchema),
+      next_cursor: z.string().min(1).nullable(),
+      error: readErrorSchema.nullable(),
+    })),
+  })),
+})
+
+/**
+ * `GET /api/dispatch/runs/all?cursor=&limit=`: every run of every readable workflow of every project, one page at a time in
+ * one total order (`updated_at` newest first, then `project_id`, `workflow_id`, `run_id`), with the registry cursor of the
+ * page's last run (null on the last page) and the workflows that could not be read.
+ */
+export const registryRunsSchema = z.strictObject({
+  contract_version: z.literal(DISPATCH_VERSION),
+  read_at: ts,
+  runs: z.array(runSummarySchema),
+  next_cursor: z.string().min(1).nullable(),
+  unreadable: z.array(z.strictObject({ project_id: z.string(), workflow_id: z.string(), code: z.string() })),
+})
+
+/** The routes, for the shared export and contract test (mirrors `schemas` in v1.ts). */
 export const dispatchSchemas = {
   dispatchOverview: dispatchOverviewSchema,
   projectSteps: projectStepsSchema,
+  homeRuns: homeRunsSchema,
+  registryRuns: registryRunsSchema,
 }
 
 export type Pr = z.infer<typeof prSchema>
@@ -143,3 +198,7 @@ export type GitState = z.infer<typeof gitStateSchema>
 export type ProjectDispatch = z.infer<typeof projectDispatchSchema>
 export type DispatchOverview = z.infer<typeof dispatchOverviewSchema>
 export type ProjectSteps = z.infer<typeof projectStepsSchema>
+export type ProjectSpend = z.infer<typeof projectSpendSchema>
+export type ReadError = z.infer<typeof readErrorSchema>
+export type HomeRuns = z.infer<typeof homeRunsSchema>
+export type RegistryRuns = z.infer<typeof registryRunsSchema>

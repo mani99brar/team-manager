@@ -3,7 +3,9 @@
  * with `CRITIQUE_WEB_PORT` and `CRITIQUE_API_PORT` set. It builds a temporary root, seeds the same registry, runs, git
  * repositories and GitHub fixture as the candidate browser checks (`seedCandidate(..., { dispatch: true })`), with the GitHub
  * cache under the root, and starts the API and the web server. It exits non-zero unless `/api/dispatch/projects` lists every
- * seeded project and every fixture repository reads `status: 'read'` ([P6]); it is ready at `/api/dispatch/projects`. It prints
+ * seeded project and every fixture repository reads `status: 'read'` ([P6]), and every seeded project's run lists have
+ * settled (each answers, read or failed, so no project is still loading when the critique opens the pages); it is ready at
+ * `/api/dispatch/projects`. It prints
  * the Projects, project and Triage URLs. SIGTERM and SIGINT stop both children; the root is removed on exit.
  *
  * Untested in the viewer worktree (the dispatch routes live in the `server` lane): run by hand once the lanes have met.
@@ -84,12 +86,32 @@ async function dispatchReady(): Promise<boolean> {
   }
 }
 
+/** Every seeded project's run lists answer: a workflow list, then each workflow's runs (read, or failed as seeded), never pending. */
+async function runListsSettled(): Promise<boolean> {
+  try {
+    for (const project of [...DISPATCH_PROJECTS, PROJECT]) {
+      const base = `http://127.0.0.1:${webPort}/api/projects/${encodeURIComponent(project.project_id)}/workflows`
+      const response = await fetch(base)
+      if (!response.ok) continue
+      const body = await response.json() as { workflows?: { workflow_id: string }[] }
+      for (const workflow of body.workflows ?? []) {
+        const runs = await fetch(`${base}/${encodeURIComponent(workflow.workflow_id)}/runs`)
+        await runs.arrayBuffer()
+        if (runs.status === 0) return false
+      }
+    }
+    return true
+  } catch {
+    return false
+  }
+}
+
 const apiEnv = prepareRoot()
 launch('start:api', apiEnv)
 launch('dev:web', { MD_MANAGER_API_PORT: String(apiPort), MD_MANAGER_WEB_PORT: String(webPort) })
 
 const deadline = Date.now() + READY_TIMEOUT_MS
-while (!(await dispatchReady())) {
+while (!(await dispatchReady()) || !(await runListsSettled())) {
   if (Date.now() > deadline) {
     process.stderr.write('dispatch-app: /api/dispatch/projects did not list every seeded project with its GitHub read; the server did not start or the dispatch routes are absent.\n')
     stop(1)

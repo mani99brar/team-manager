@@ -11,8 +11,9 @@ import type { WorkflowEvent } from '../../contracts/workflow/v1.ts'
 import {
   approvalLine, blockingFindings, challengeHeadline, challengeSectionEntries, deadlineText, handoffWait, integratedCommit, lastStatusAt,
   reviewerDeadline, reviewerTime, reviewSectionEntries,
-  filterFindings, findingFilterIds, laneFilterId, OPEN_ONLY, orderFindings, reviewerFilterId, reviewFigures,
+  BLOCKING_ONLY, filterFindings, findingFilterIds, laneFilterId, OPEN_ONLY, orderFindings, reviewerFilterId, reviewFigures, severityFilterId,
 } from '../../src/projects/node/panels.ts'
+import { projectIdFromPath } from '../../src/projects/node/errors.ts'
 
 type Challenge = NonNullable<RunInputs['challenge']>
 type Worker = RunInputs['workers'][number]
@@ -63,7 +64,8 @@ test('blocking findings are the unresolved P0 and P1; the index counts them and 
   const findings = [finding('P1', 'open'), finding('P0', 'accepted'), finding('P1', 'resolved'), finding('P2', 'open')]
   assert.deepEqual(blockingFindings({ findings }).map(item => item.message), ['P1 open', 'P0 accepted'])
   const review = { findings } as ReviewResult
-  assert.deepEqual(reviewSectionEntries(review), [{ key: 'blocking', label: 'Blocking', count: 2 }, { key: 'review', label: 'Findings', count: 4 }])
+  // One findings list: no separate Blocking entry; the open P0/P1 are noted on Findings.
+  assert.deepEqual(reviewSectionEntries(review), [{ key: 'review', label: 'Findings', count: 4, note: '2 open P0/P1' }])
   assert.deepEqual(reviewSectionEntries({ findings: [finding('P2', 'open')] } as ReviewResult), [{ key: 'review', label: 'Findings', count: 1 }])
   assert.deepEqual(reviewSectionEntries(null), [])
 })
@@ -177,8 +179,10 @@ test('the four figures count the blocking and open findings and the findings per
   assert.equal(legacy.open, 1)
 })
 
-test('the filter row: one toggle per reviewer and per populated lane and Open only; within a kind they add up, across kinds they narrow', () => {
+test('the filter row: Open P0/P1, a severity each, one toggle per reviewer and per populated lane and Open only; within a kind they add up, across kinds they narrow', () => {
   assert.deepEqual(findingFilterIds({ findings: BLOCKED, reviewers: REVIEWERS.map(reviewer_id => ({ reviewer_id })) }, LANES), {
+    blocking: { id: BLOCKING_ONLY, label: 'Open P0/P1', count: 1 },
+    severities: ['P0', 'P1', 'P2'].map(severity => ({ id: severityFilterId(severity as 'P0'), label: severity, count: BLOCKED.filter(item => item.severity === severity).length })),
     reviewers: [{ id: 'reviewer:general', label: 'general', count: 2 }, { id: 'reviewer:coverage', label: 'coverage', count: 2 }],
     lanes: [{ id: 'lane:ui', label: 'ui', count: 2 }, { id: 'lane:adapter', label: 'adapter', count: 2 }],
     open: { id: OPEN_ONLY, label: 'Open only', count: 3 },
@@ -192,6 +196,22 @@ test('the filter row: one toggle per reviewer and per populated lane and Open on
   assert.deepEqual(pick(laneFilterId('adapter'), OPEN_ONLY), ['c-adapter'])
   assert.deepEqual(pick(OPEN_ONLY), ['g-ui', 'c-ui', 'c-adapter'])
   assert.deepEqual(pick(reviewerFilterId('general'), laneFilterId('adapter'), OPEN_ONLY), [])
+  // Severities add up and narrow the other kinds; Open P0/P1 keeps the unresolved P0 and P1 only.
+  assert.deepEqual(pick(severityFilterId('P1')), ['c-ui'])
+  assert.deepEqual(pick(severityFilterId('P1'), severityFilterId('P2')), messages(BLOCKED))
+  assert.deepEqual(pick(BLOCKING_ONLY), ['c-ui'])
+  assert.deepEqual(pick(BLOCKING_ONLY, severityFilterId('P2')), [])
+  assert.deepEqual(pick(BLOCKING_ONLY, reviewerFilterId('general')), [])
+  assert.deepEqual(messages(filterFindings([finding('P1', 'resolved'), finding('P0', 'accepted'), finding('P2', 'open')], new Set([BLOCKING_ONLY]))), ['P0 accepted'])
   // A legacy `both` matches the `multiple` lane filter, as it groups under it.
   assert.deepEqual(messages(filterFindings([raised('review', 'P2', 'both', 'open', 'x')], new Set([laneFilterId('multiple')]))), ['x'])
+})
+
+test('the project of a failed request is parsed from its path: decoded, query ignored, null outside the project routes', () => {
+  assert.equal(projectIdFromPath('/api/projects/alpha-project/workflows/w/runs'), 'alpha-project')
+  assert.equal(projectIdFromPath('/api/projects/my%20proj/workflows'), 'my proj')
+  assert.equal(projectIdFromPath('/api/projects/p1?page=2'), 'p1')
+  assert.equal(projectIdFromPath('/api/projects'), null)
+  assert.equal(projectIdFromPath('/api/other/p1'), null)
+  assert.equal(projectIdFromPath('/api/projects/%E0%A4%A/workflows'), null)
 })

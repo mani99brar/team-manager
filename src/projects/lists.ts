@@ -13,12 +13,14 @@ import {
 import type { RunActivity, RunDetail, RunSummary } from './api.ts'
 import { ATTACK_NODE_ID, GENERIC_WORKFLOW_NAME, OVERRIDE_LABEL, SIDECAR_NODE_ID, STATUS_LABEL, type RunStatus } from './status.ts'
 import { formatSpan, type Zone } from './time.ts'
-import { statusTone, type Tone } from './tone.ts'
+import { stateTone, statusTone, type Tone } from './tone.ts'
 
 /** Recent lists every run that finished in the last seven days (decisions.md). */
 export const RECENT_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
 /** Runs home and the project page re-read their run lists this often. */
 export const LISTS_POLL_MS = 15_000
+/** The registry home read and the overview re-read this often while no row read runs or needs the operator. */
+export const LISTS_IDLE_POLL_MS = 60_000
 /** How many controller readings a run page keeps; the debounce needs only the latest run of equal values. */
 const READINGS_KEPT = 50
 
@@ -60,51 +62,174 @@ export function waitingKind(run: Pick<RunSummary, 'status' | 'activity' | 'accep
   return (WAITING_KINDS as readonly string[]).includes(kind) ? kind as WaitingKind : null
 }
 
+/** What a run that needs the operator waits on: today's kinds, a decision at the design challenge, or an interrupted run. */
+export type NeedKind = WaitingKind | 'decision' | 'interrupted'
+/**
+ * One run's place in the lists, decided once per served list: what it needs from the operator (null when nothing), and for a
+ * paused run with a later run in its project and workflow, that later run's id (it is superseded and needs nobody).
+ */
+export type RunClass = { needs: NeedKind | null; supersededBy: string | null }
+export type RunClasses = ReadonlyMap<string, RunClass>
+type ClassKey = Pick<RunSummary, 'project_id' | 'workflow_id' | 'run_id'>
+
+const groupKey = (run: Pick<RunSummary, 'project_id' | 'workflow_id'>) => `${run.project_id}\u0000${run.workflow_id}`
+const classKey = (run: ClassKey) => `${groupKey(run)}\u0000${run.run_id}`
+const NO_CLASS: RunClass = { needs: null, supersededBy: null }
+/** Whether `a` was created after `b`: a later `created_at`, a tie going to the greater `run_id`. */
+const createdAfter = (a: Pick<RunSummary, 'created_at' | 'run_id'>, b: Pick<RunSummary, 'created_at' | 'run_id'>) =>
+  ms(a.created_at) > ms(b.created_at) || (ms(a.created_at) === ms(b.created_at) && a.run_id > b.run_id)
+
+/**
+ * Decides, from the served run list only, which runs need the operator and which paused runs are superseded, in this order:
+ * a paused run with a later run (by `created_at`, then `run_id`) in its project and workflow is superseded, whatever its
+ * attention; an unfinished run whose attention is a question, a pane or an approval waits on the operator, whatever its
+ * status; the latest run of its project and workflow needs a decision when it is paused at the design challenge, and needs
+ * the operator when it is interrupted while paused or running. Every other run needs nobody. The feature text is never read:
+ * the project and the workflow are the key. Pass the whole loaded list, in any order.
+ */
+export function classifyRuns(runs: readonly Pick<RunSummary, 'project_id' | 'workflow_id' | 'run_id' | 'created_at' | 'status' | 'activity' | 'accepted'>[]): Map<string, RunClass> {
+  const newest = new Map<string, (typeof runs)[number]>()
+  for (const run of runs) {
+    const best = newest.get(groupKey(run))
+    if (best === undefined || createdAfter(run, best)) newest.set(groupKey(run), run)
+  }
+  const classes = new Map<string, RunClass>()
+  for (const run of runs) {
+    const best = newest.get(groupKey(run))!
+    const latest = best === run || !createdAfter(best, run)
+    const attention = run.activity?.attention ?? null
+    let cls: RunClass = NO_CLASS
+    if (run.status === 'paused' && !latest) cls = { needs: null, supersededBy: best.run_id }
+    else if (waitingKind(run) !== null) cls = { needs: waitingKind(run), supersededBy: null }
+    else if (latest && !isFinished(run) && attention !== null) {
+      if (attention.kind === 'paused' && attention.node_id === 'challenge' && run.status === 'paused') cls = { needs: 'decision', supersededBy: null }
+      else if (attention.kind === 'interrupted' && (run.status === 'paused' || run.status === 'running')) cls = { needs: 'interrupted', supersededBy: null }
+    }
+    classes.set(classKey(run), cls)
+  }
+  return classes
+}
+
+/**
+ * How a row draws a run from its class: warn with a `?` and `data-attention` only while it needs the operator; otherwise its
+ * status's own tone and glyph, so a superseded run served with a question is a plain paused row.
+ */
+export function rowLook(run: Pick<RunSummary, 'status' | 'accepted'>, cls: RunClass): { tone: Tone; glyph: string | null; attention: NeedKind | null } {
+  if (cls.needs !== null) return { tone: 'warn', glyph: '?', attention: cls.needs }
+  return { tone: stateTone({ status: run.status, accepted: run.accepted }), glyph: null, attention: null }
+}
+
+/** A run's class in a classified list; a run the list did not classify needs nobody. */
+export const classOf = (classes: RunClasses, run: ClassKey): RunClass => classes.get(classKey(run)) ?? NO_CLASS
+
 /** When a finished run ended, for the Recent window and its order: the served finish, else (without activity) its last update. */
 export const endedAt = (run: Pick<RunSummary, 'updated_at' | 'activity'>) => run.activity?.finished_at ?? run.updated_at
 /** When a run last moved, for ordering live rows: the served last activity, else its last update. */
 export const movedAt = (run: Pick<RunSummary, 'updated_at' | 'activity'>) => run.activity?.last_activity_at ?? run.updated_at
 
-export type HomeSections<T> = { needsYou: T[]; today: T[]; running: T[]; paused: T[]; recent: T[] }
+export type HomeSections<T> = { needsYou: T[]; today: T[]; running: T[]; paused: T[]; superseded: T[]; recent: T[]; classes: RunClasses }
+
+/** When a run last moved, for every list order: its end once finished, else its last activity. */
+export const lastActivityAt = (run: Pick<RunSummary, 'status' | 'accepted' | 'updated_at' | 'activity'>) => ms(isFinished(run) ? endedAt(run) : movedAt(run))
 
 /**
- * Sorts rows into the four sections of Runs home (PRD_VIEWER_REFINE 5.7); a run appears in one section only. Needs you: a
- * question, a pane or an approval waits (served `activity.attention.kind`), longest waiting first — whatever its status.
- * Paused: a `paused` run that waits on nobody, oldest first (longest-stopped at the top), by its attention `since`, else
- * its last activity. Running: every other run that is not finished, latest activity first. Recent: finished runs that ended
- * within the seven days before `now`, newest first; older ones stay on their project page only.
+ * A run's group in the one list order: 0 needs the operator (its class), 1 running, 2 paused and not superseded, 3 the rest
+ * (finished runs, superseded paused runs, and runs that wait to start). A finished run never ranks above a live one, whatever
+ * attention it is served with; status alone never makes a run need the operator.
  */
+export function liveRank(run: Pick<RunSummary, 'status' | 'accepted'>, cls: RunClass): 0 | 1 | 2 | 3 {
+  if (cls.needs !== null) return 0
+  if (isFinished(run)) return 3
+  if (run.status === 'running') return 1
+  if (run.status === 'paused' && cls.supersededBy === null) return 2
+  return 3
+}
+
+type Ordered = Pick<RunSummary, 'project_id' | 'workflow_id' | 'run_id' | 'status' | 'accepted' | 'updated_at' | 'created_at' | 'activity'>
+
 /**
- * Runs home's sections (docs/PRD_VIEWER_REVAMP.md 5.1, Today first since 2026-10-09): what waits on the operator; every run
- * that moved today (running ones first, then latest activity first), whatever its status; the runs still running since an
- * earlier day; the runs paused since an earlier day, longest paused first; and the runs finished in the last seven days
- * before today. A run sits in exactly one section. `zone` decides where today begins; without it, today is the UTC day.
+ * The one list order ("needs you and running first, then latest activity"): needs the operator, running, paused (not
+ * superseded), the rest; inside each group the latest activity first (`movedAt` unfinished, `endedAt` finished), ties by
+ * `run_id`. `classes` is the list's one classification (`classifyRuns`), computed once per list by the caller.
  */
-export function homeSections<T extends { run: RunSummary }>(rows: readonly T[], now: number, zone: Zone = 'utc'): HomeSections<T> {
+export function compareLive(classes: RunClasses): (a: Ordered, b: Ordered) => number {
+  return (a, b) => liveRank(a, classOf(classes, a)) - liveRank(b, classOf(classes, b))
+    || lastActivityAt(b) - lastActivityAt(a) || a.run_id.localeCompare(b.run_id)
+}
+
+/** The list sorts: the default order above, or by creation time newest or oldest first, ties by `run_id` ascending. */
+export const LIST_SORTS = ['live', 'newest', 'oldest'] as const
+export type ListSort = (typeof LIST_SORTS)[number]
+
+/** Runs by `created_at`, newest (`desc`) or oldest first, ties by `run_id` ascending in both directions. */
+export function compareCreated(direction: 'desc' | 'asc'): (a: Pick<RunSummary, 'created_at' | 'run_id'>, b: Pick<RunSummary, 'created_at' | 'run_id'>) => number {
+  const sign = direction === 'desc' ? -1 : 1
+  return (a, b) => sign * (ms(a.created_at) - ms(b.created_at)) || a.run_id.localeCompare(b.run_id)
+}
+
+/** A list's rows in the chosen sort: the default order, or by creation time. */
+export function sortRuns<T extends { run: Ordered }>(rows: readonly T[], sort: ListSort, classes: RunClasses): T[] {
+  const compare = sort === 'live' ? compareLive(classes) : compareCreated(sort === 'newest' ? 'desc' : 'asc')
+  return [...rows].sort((a, b) => compare(a.run, b.run))
+}
+
+/**
+ * Runs home's sections (Triage): what needs the operator (a question, a pane, an approval, a decision at the design
+ * challenge or an interrupted latest run), longest waiting first; every running run that needs nobody, whatever day it last
+ * moved (with the runs that wait to start); the runs that finished today; the paused runs no later run superseded; the
+ * superseded paused runs, folded apart; and the runs finished in the last seven days before today. A run sits in exactly one
+ * section, and the rows of every section but Needs you follow the list order (`compareLive`). `zone` decides where today
+ * begins; without it, today is the UTC day. `classes` is the list's classification (`classifyRuns`), computed here when not given.
+ */
+export function homeSections<T extends { run: RunSummary }>(rows: readonly T[], now: number, zone: Zone = 'utc', classes: RunClasses = classifyRuns(rows.map(row => row.run))): HomeSections<T> {
   const needsYou: T[] = []
   const today: T[] = []
   const running: T[] = []
   const paused: T[] = []
+  const superseded: T[] = []
   const recent: T[] = []
   const todayKey = dayKey(now, zone)
   for (const row of rows) {
-    const finished = isFinished(row.run)
-    const moved = finished ? endedAt(row.run) : movedAt(row.run)
-    if (waitingKind(row.run) !== null) needsYou.push(row)
-    else if (dayKey(moved, zone) === todayKey && ms(moved) <= now + 60_000) today.push(row)
-    else if (finished) { if (ms(endedAt(row.run)) >= now - RECENT_WINDOW_MS) recent.push(row) }
-    else if (row.run.status === 'paused') paused.push(row)
+    const cls = classOf(classes, row.run)
+    if (cls.supersededBy !== null) superseded.push(row)
+    else if (cls.needs !== null) needsYou.push(row)
+    else if (isFinished(row.run)) {
+      const ended = endedAt(row.run)
+      if (dayKey(ended, zone) === todayKey && ms(ended) <= now + 60_000) today.push(row)
+      else if (ms(ended) >= now - RECENT_WINDOW_MS) recent.push(row)
+    } else if (row.run.status === 'paused') paused.push(row)
     else running.push(row)
   }
   const since = (row: T) => ms(row.run.activity?.attention?.since ?? movedAt(row.run))
-  const moved = (row: T) => ms(isFinished(row.run) ? endedAt(row.run) : movedAt(row.run))
   needsYou.sort((a, b) => since(a) - since(b) || a.run.run_id.localeCompare(b.run.run_id))
-  today.sort((a, b) => Number(b.run.status === 'running') - Number(a.run.status === 'running') || moved(b) - moved(a) || a.run.run_id.localeCompare(b.run.run_id))
-  running.sort((a, b) => ms(movedAt(b.run)) - ms(movedAt(a.run)) || a.run.run_id.localeCompare(b.run.run_id))
-  paused.sort((a, b) => since(a) - since(b) || a.run.run_id.localeCompare(b.run.run_id))
-  recent.sort((a, b) => ms(endedAt(b.run)) - ms(endedAt(a.run)) || a.run.run_id.localeCompare(b.run.run_id))
-  return { needsYou, today, running, paused, recent }
+  const live = compareLive(classes)
+  for (const section of [today, running, paused, superseded, recent]) section.sort((a, b) => live(a.run, b.run))
+  return { needsYou, today, running, paused, superseded, recent, classes }
 }
+
+/**
+ * Triage's sections under a sort: the default keeps `homeSections`' rows; "newest" and "oldest" keep every run in its
+ * section and order the rows inside each section by `created_at`. Section order and placement never move.
+ */
+export function sortHomeSections<T extends { run: RunSummary }>(sections: HomeSections<T>, sort: ListSort): HomeSections<T> {
+  if (sort === 'live') return sections
+  const compare = compareCreated(sort === 'newest' ? 'desc' : 'asc')
+  const by = (rows: T[]) => [...rows].sort((a, b) => compare(a.run, b.run))
+  return {
+    needsYou: by(sections.needsYou), today: by(sections.today), running: by(sections.running), paused: by(sections.paused),
+    superseded: by(sections.superseded), recent: by(sections.recent), classes: sections.classes,
+  }
+}
+
+/** A Triage section's row order in words, under each sort; Needs you keeps its longest-waiting order under the default. */
+export function sectionOrderWords(sort: ListSort, needsYou = false): string {
+  if (sort === 'newest') return 'newest created first'
+  if (sort === 'oldest') return 'oldest created first'
+  return needsYou ? 'longest waiting first' : 'latest activity first'
+}
+
+/** Triage's state sections in page order (Pinned, when shown, comes before them); the jump links follow it. */
+export const HOME_SECTION_ORDER = ['needs-you', 'running-runs', 'today-runs', 'paused-runs', 'recent-runs'] as const
 
 /** How many paused runs the Paused section shows before the rest fold behind "Show all". */
 export const PAUSED_SHOWN = 5
@@ -112,14 +237,24 @@ export const PAUSED_SHOWN = 5
 /** Whole days from an instant to `now`, floored; never negative. */
 const daysSince = (iso: string, now: number) => Math.max(0, Math.floor((now - ms(iso)) / (24 * 60 * 60 * 1000)))
 
+/** A day as the lists write it beside a stop: "Oct 2", with the year when it is not the year of `now` ("Dec 31 2025"). */
+export function monthDay(iso: string, now: number, zone: Zone): string {
+  const [year, month, day] = dayKey(iso, zone).split('-').map(Number)
+  return `${MONTH_NAMES[month - 1]} ${day}${year === Number(dayKey(now, zone).slice(0, 4)) ? '' : ` ${year}`}`
+}
+
+/** How a stopped row reads: "paused 10 d (since Oct 2)", "interrupted today (since Oct 13)"; never "0 d". */
+export function stoppedLabel(how: 'paused' | 'interrupted', since: string, now: number, zone: Zone = 'utc'): string {
+  const n = daysSince(since, now)
+  return `${how} ${n === 0 ? 'today' : `${n} d`} (since ${monthDay(since, now, zone)})`
+}
+
 /**
- * How long a paused run has waited, for its row in the Paused section (PRD_VIEWER_REFINE 5.7): "since <n> days" from its
- * attention `since`, else its last activity; "since today" under a day. Rendered in the paused tone by its caller.
+ * How long a paused run has waited, for its row (PRD_VIEWER_REFINE 5.7, in the stopped rows' words): "paused <n> d (since
+ * <Mon D>)" from its attention `since`, else its last activity; "paused today (since <Mon D>)" under a day.
  */
-export function sincePausedLabel(run: Pick<RunSummary, 'updated_at' | 'activity'>, now: number): string {
-  const n = daysSince(run.activity?.attention?.since ?? movedAt(run), now)
-  if (n === 0) return 'since today'
-  return `since ${n} ${n === 1 ? 'day' : 'days'}`
+export function sincePausedLabel(run: Pick<RunSummary, 'updated_at' | 'activity'>, now: number, zone: Zone = 'utc'): string {
+  return stoppedLabel(run.activity?.attention?.kind === 'interrupted' ? 'interrupted' : 'paused', run.activity?.attention?.since ?? movedAt(run), now, zone)
 }
 
 /**
@@ -144,6 +279,31 @@ export function readsNextPage(runs: readonly Pick<RunSummary, 'updated_at'>[], n
   return nextCursor !== null && last !== undefined && ms(last.updated_at) >= cutoff
 }
 
+/**
+ * The registry home read's cadence: every `LISTS_POLL_MS` while any row read is running or needs the operator (its class in
+ * the one classification), else every `LISTS_IDLE_POLL_MS`. A run that starts running brings the fast cadence back on the
+ * next read.
+ */
+export function listsPollMs(runs: readonly RunSummary[], classes: RunClasses = classifyRuns(runs)): number {
+  return runs.some(run => (!isFinished(run) && run.status === 'running') || classOf(classes, run).needs !== null) ? LISTS_POLL_MS : LISTS_IDLE_POLL_MS
+}
+
+/** A run's identity across the registry: project, workflow and run id. */
+export const registryKey = (run: Pick<RunSummary, 'project_id' | 'workflow_id' | 'run_id'>) => `${run.project_id}/${run.workflow_id}/${run.run_id}`
+
+/** Every run read once, by project, workflow and run id: a run in both lists keeps its row from the first (the home read). */
+export function mergeRunRows<T extends { run: Pick<RunSummary, 'project_id' | 'workflow_id' | 'run_id'> }>(first: readonly T[], second: readonly T[]): T[] {
+  const seen = new Set(first.map(row => registryKey(row.run)))
+  const merged = [...first]
+  for (const row of second) {
+    const key = registryKey(row.run)
+    if (seen.has(key)) continue
+    seen.add(key)
+    merged.push(row)
+  }
+  return merged
+}
+
 // ---- Row wording (4.1, 6.4) --------------------------------------------------------------------------------------------
 
 /** The lane a launch node belongs to (`launch_<lane>`), else the node id itself (a reviewer's `review`). */
@@ -159,14 +319,17 @@ function who(nodeId: string | null): string {
  * message (the served headline, which starts with the focus label). Without activity it is only the status; the row then
  * shows when the run was updated and nothing else.
  */
-export function rowSummary(run: Pick<RunSummary, 'status' | 'activity' | 'accepted'>, labels: ReadonlyMap<string, string> = new Map()): string {
+export function rowSummary(run: Pick<RunSummary, 'status' | 'activity' | 'accepted'>, labels: ReadonlyMap<string, string> = new Map(), needs: NeedKind | null = waitingKind(run)): string {
   // The override (L12) reads as its own outcome, never as the succeeded status it is served under.
   if (run.accepted) return `${OVERRIDE_LABEL} ${run.accepted.candidate.slice(0, 7)}: ${run.accepted.reason}`
   const status = STATUS_LABEL[run.status]
   const activity = run.activity
   if (!activity) return status
-  const kind = waitingKind(run)
+  // A superseded run waits on nobody, whatever attention it is served with: it reads as its status at its step.
+  const kind = needs
   const node = activity.attention?.node_id ?? null
+  if (kind === 'decision') return `${node === null ? 'Design challenge' : labels.get(node) ?? 'Design challenge'} paused · your decision waits`
+  if (kind === 'interrupted') return `Interrupted at ${activity.focus?.label ?? (node === null ? 'a step' : labels.get(node) ?? node)} · the controller stopped`
   if (kind === 'question') return `${who(node)} asked a question · deadline paused`
   if (kind === 'pane') return `${who(node)} needs attention in its pane`
   if (kind === 'approval') return `${node === null ? 'A step' : labels.get(node) ?? node} awaits your decision`
@@ -178,9 +341,14 @@ export function rowSummary(run: Pick<RunSummary, 'status' | 'activity' | 'accept
   return headline ? `${status} · ${headline}` : status
 }
 
-/** A row's time: a finished run's end and its duration, a live run's start and its elapsed time, or (without activity) only its last update. */
+/**
+ * A row's time: a finished run's end and its duration (whatever attention it carries), a stopped run's stop (paused, or
+ * interrupted while paused or running) with no span, a running run's start and its elapsed time, or (without activity, or
+ * while it waits unfinished in another status) only its last update. Only a running run gets a ticking span.
+ */
 export type RowTime =
   | { kind: 'finished'; at: string; ms: number }
+  | { kind: 'stopped'; how: 'paused' | 'interrupted'; since: string }
   | { kind: 'live'; started: string; last: string | null; ms: number }
   | { kind: 'updated'; at: string }
 
@@ -189,24 +357,34 @@ export function rowTime(run: Pick<RunSummary, 'status' | 'created_at' | 'updated
   if (!activity) return { kind: 'updated', at: run.updated_at }
   if (activity.finished_at !== null) return { kind: 'finished', at: activity.finished_at, ms: Math.max(0, ms(activity.finished_at) - ms(run.created_at)) }
   if (isFinished(run)) return { kind: 'updated', at: run.updated_at }
+  const since = activity.attention?.since ?? movedAt(run)
+  if (activity.attention?.kind === 'interrupted' && (run.status === 'paused' || run.status === 'running')) return { kind: 'stopped', how: 'interrupted', since }
+  if (run.status === 'paused') return { kind: 'stopped', how: 'paused', since }
+  // Only a running run ticks; one that waits to start or on an approval says when it last moved.
+  if (run.status !== 'running') return { kind: 'updated', at: movedAt(run) }
   return { kind: 'live', started: run.created_at, last: activity.last_activity_at, ms: Math.max(0, now - ms(run.created_at)) }
 }
 
 /**
- * A Running card's time line (PRD_VIEWER_REVAMP 5.1), from the list clock: a running run says how long it has run; a live
- * run that stopped (paused, interrupted) says how long ago it *started*, never a bare span that reads as how long it has been
- * stopped, and gives the served attention `since` as when it stopped. `started` is the start time a card adds after the line,
- * only for a running run: a stopped run's line already says when it started, so without a served `since` nothing follows it.
- * A finished run has no such line.
+ * A Running card's time line (PRD_VIEWER_REVAMP 5.1), from the list clock: a running run says how long it has run; a run that
+ * stopped (paused, or interrupted) says it in the stopped rows' words ("paused 3 d (since Mar 9)"), never a span that reads
+ * as how long it has been stopped, and gives the served attention `since` as when it stopped. `started` is the start time a
+ * card adds after the line, only for a running run. A finished run has no such line.
  */
 export function cardElapsed(
-  run: Pick<RunSummary, 'status' | 'created_at' | 'accepted'> & { activity?: { attention: { since: string | null } | null } | null },
+  run: Pick<RunSummary, 'status' | 'created_at' | 'accepted'> & { updated_at?: string; activity?: { attention: { kind?: string; since: string | null } | null; last_activity_at?: string | null } | null },
   now: number,
+  zone: Zone = 'utc',
 ): { elapsed: string; since: string | null; started: string | null } | null {
   if (isFinished(run)) return null
-  const span = formatSpan(Math.max(0, now - ms(run.created_at)))
-  if (run.status === 'running') return { elapsed: `running for ${span}`, since: null, started: run.created_at }
-  return { elapsed: `${STATUS_LABEL[run.status].toLowerCase()} · started ${span} ago`, since: run.activity?.attention?.since ?? null, started: null }
+  const attention = run.activity?.attention ?? null
+  const interrupted = attention?.kind === 'interrupted'
+  if (run.status === 'running' && !interrupted) return { elapsed: `running for ${formatSpan(Math.max(0, now - ms(run.created_at)))}`, since: null, started: run.created_at }
+  if (run.status === 'paused' || interrupted) {
+    const stop = attention?.since ?? run.activity?.last_activity_at ?? run.updated_at ?? run.created_at
+    return { elapsed: stoppedLabel(interrupted ? 'interrupted' : 'paused', stop, now, zone), since: attention?.since ?? null, started: null }
+  }
+  return { elapsed: `${STATUS_LABEL[run.status].toLowerCase()} · started ${formatSpan(Math.max(0, now - ms(run.created_at)))} ago`, since: attention?.since ?? null, started: null }
 }
 
 /** A project card's secondary text: how many features it registers and when its latest run last moved. */
@@ -284,7 +462,7 @@ export function servedNow(now: Now, served: ServedRun | null): Now {
 export const RECENT_SHOWN = 10
 /** Projects fold into a rail group when this many or more share the prefix before their last `-` segment. */
 export const PREFIX_GROUP_MIN = 3
-export const RECENT_FILTERS = ['all', 'failed', 'succeeded', 'today'] as const
+export const RECENT_FILTERS = ['all', 'failed', 'succeeded'] as const
 export type RecentFilter = (typeof RECENT_FILTERS)[number]
 
 /** What a mixed list knows about a row beyond its run: its feature title and project, and its workflow's node labels. */
@@ -325,15 +503,13 @@ export function dayLabel(key: string, now: number, zone: Zone): string {
   return `${MONTH_NAMES[month - 1]} ${day}${year === todayYear ? '' : ` ${year}`}`
 }
 
-/** Recent's filters: Failed and Succeeded by status, Today by the day the run ended in the reader's zone. */
+/** Recent's filters: Failed and Succeeded by status. */
 export function filterRecent<T extends { run: RunSummary }>(rows: readonly T[], filter: RecentFilter, now: number, zone: Zone): T[] {
+  void now
+  void zone
   // The override (L12) is not a failure; under Succeeded it appears only with its own marker (the row's chip), never as a reviewed success.
   if (filter === 'failed') return rows.filter(row => !row.run.accepted && row.run.status === 'failed')
   if (filter === 'succeeded') return rows.filter(row => row.run.status === 'succeeded')
-  if (filter === 'today') {
-    const today = dayKey(now, zone)
-    return rows.filter(row => dayKey(endedAt(row.run), zone) === today)
-  }
   return [...rows]
 }
 
@@ -413,13 +589,14 @@ export function railEntries<P extends { project_id: string }>(projects: readonly
  * run failed, else its most pressing live run's own tone (awaiting approval, running, paused), succeeded when its latest
  * finished run did, else idle.
  */
-export function projectTone(runs: readonly Pick<RunSummary, 'status' | 'activity' | 'updated_at' | 'accepted'>[]): Tone {
-  if (runs.some(run => waitingKind(run) !== null)) return 'warn'
-  const latest = runs.filter(run => isFinished(run)).reduce<Pick<RunSummary, 'status' | 'activity' | 'updated_at' | 'accepted'> | null>(
+export function projectTone(runs: readonly RunSummary[], classes: RunClasses = classifyRuns(runs)): Tone {
+  if (runs.some(run => classOf(classes, run).needs !== null)) return 'warn'
+  const latest = runs.filter(run => isFinished(run)).reduce<RunSummary | null>(
     (last, run) => (last === null || ms(endedAt(run)) > ms(endedAt(last)) ? run : last), null)
   if (latest?.status === 'failed') return 'fail'
-  // A live run in its own tone (statusTone): awaiting approval is warn, running is run, paused is pause, never "Running".
-  const live = runs.filter(run => !isFinished(run)).map(run => statusTone(run.status))
+  // A live run in its own tone (statusTone): awaiting approval is warn, running is run, paused is pause, never "Running";
+  // a superseded paused run is no live run.
+  const live = runs.filter(run => !isFinished(run) && classOf(classes, run).supersededBy === null).map(run => statusTone(run.status))
   const order: readonly Tone[] = ['warn', 'run', 'pause']
   const liveTone = order.find(tone => live.includes(tone))
   if (liveTone) return liveTone
@@ -430,10 +607,12 @@ export function projectTone(runs: readonly Pick<RunSummary, 'status' | 'activity
 }
 
 /** A Needs-you card's next step, a label only: the exact command needs the run detail and stays on the run page. */
-export const NEXT_STEP: Record<WaitingKind, string> = {
+export const NEXT_STEP: Record<NeedKind, string> = {
   question: 'answer the question',
   pane: 'attend the pane',
   approval: 'approve the candidate',
+  decision: 'resume or accept the challenge on the run page',
+  interrupted: 'resume the run on the run page',
 }
 
 /** The lanes a workflow definition launches (`launch_<lane>` nodes), in definition order. */

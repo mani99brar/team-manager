@@ -94,6 +94,13 @@ export function spentText(totals: SessionTotals): string | null {
   return `${dollars(totals.metered_usd)} reported by Claude · ${dollars(totals.covered_usd)} covered`
 }
 
+/** The one-line cue under the run stage: "Sessions · 7 · $12.40 reported by Claude · $3.10 covered ↓"; null when the Sessions section lists no session. */
+export function sessionsCueText(sessions: Sessions): string | null {
+  const count = groupSessions(sessions).reduce((sum, group) => sum + group.rows.length, 0)
+  if (count === 0) return null
+  return `Sessions · ${count} · ${spentText(sessions.totals) ?? 'cost not recorded'} ↓`
+}
+
 /** The resume command's parts as the page shows them: the line to copy and the note when it carries no directory. */
 export function resumeText(row: SessionRow): { command: string; note: string | null } | null {
   if (row.resume === null) return null

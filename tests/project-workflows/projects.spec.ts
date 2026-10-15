@@ -2,7 +2,8 @@ import { test, expect, type Page } from '@playwright/test'
 import { rm, writeFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
-import { PI, currentCrumb, fileUrl, node, openGraph, roots } from '../helpers.ts'
+import { PI, currentCrumb, fileUrl, node, nodeBody, openGraph, roots, visibleNodeIds } from '../helpers.ts'
+import { SKILL_LOCATIONS } from './harness.ts'
 import { mockResponse } from './mock.ts'
 import {
   APPROVAL_MESSAGE,
@@ -24,7 +25,7 @@ import {
   WORKFLOW_NAME,
   runDetails,
 } from './fixtures.ts'
-import { apiRun, attach, graphNode, installHooks, nodeDetail, nodeListItem, openStep, phase, projectUrl, projectsUrl, runUrl, stepSheet, workflowUrl, workspace } from './support.ts'
+import { apiRun, attach, executionControlCount, graphNode, installHooks, nodeDetail, nodeListItem, openStep, phase, projectUrl, projectsUrl, runUrl, stepSheet, workflowUrl, workspace } from './support.ts'
 
 installHooks()
 
@@ -42,7 +43,8 @@ async function expectNoExecutionControls(page: Page) {
   // The run stage's cards, the live dock's event rows and its bar are buttons that only select a step or fold the dock (their
   // text names a step, such as "Launch UI worker" or "Integrate candidate"); they act on no run, so they are left out.
   const controls = workspace(page).locator('button:not([data-graph-node]):not([data-go]):not([data-testid="live-dock-bar"]), input, select, textarea, [role="menuitem"]')
-  await expect(controls.filter({ hasText: EXECUTION })).toHaveCount(0)
+  // Exactly the filter bar's "Cancelled" toggle and its "Stopped at" select are exempt (support.ts executionControlCount).
+  await expect.poll(() => executionControlCount(controls.filter({ hasText: EXECUTION }))).toBe(0)
   // The header was actually inspected (its Refresh button is present), so the no-execution count is not vacuous.
   await expect(page.locator('.app-header-projects .button')).toHaveCount(1)
   const header = page.locator('.app-header-projects').locator('button, input, select, textarea, [role="menuitem"]')
@@ -51,11 +53,20 @@ async function expectNoExecutionControls(page: Page) {
 }
 
 test(`[scenario:projects-navigation] Pi and Claude remain usable and Projects opens registered projects (${phase})`, async ({ page }, testInfo) => {
-  // The existing skills graph still loads at Home with only the two sources, and the roots strip offers Projects.
+  // The skills graph loads at Home with both sources opened one level: exactly the two sources and each configured location
+  // (the harness's SKILL_LOCATIONS), no folder or file node. The roots strip offers Projects.
   await openGraph(page)
   await expect(rootsNav(page).getByRole('link')).toHaveText(['Pi', 'Claude', 'Projects'])
-  await expect(page.locator('.graph-canvas .node')).toHaveCount(2)
-  await expect(page.getByRole('toolbar', { name: 'File operations' })).toBeVisible()
+  const landing = ['Pi', 'Claude'].flatMap(source => [source, ...SKILL_LOCATIONS.filter(location => location.source === source).map(location => `${source}/${location.id}`)])
+  expect(await visibleNodeIds(page)).toEqual(landing)
+  // No file operation is offered before something is selected; the Pi source then offers creation, enabled, and nothing disabled.
+  const fileOperations = page.getByRole('toolbar', { name: 'File operations' })
+  await expect(fileOperations).toHaveCount(0)
+  await nodeBody(page, 'Pi').click()
+  await expect(fileOperations.getByRole('button')).toHaveText(['New file…', 'New folder…'])
+  await expect(fileOperations.getByRole('button', { name: 'New file…' })).toBeEnabled()
+  await expect(fileOperations.getByRole('button', { name: 'New folder…' })).toBeEnabled()
+  await expect(fileOperations.locator('button:disabled, button[aria-disabled="true"]')).toHaveCount(0)
 
   // Projects opens the registered project list without disturbing the skills domain.
   await rootsNav(page).getByRole('link', { name: 'Projects' }).click()
@@ -336,6 +347,7 @@ test(`[scenario:failed-and-paused] Show failure and awaiting-approval state with
 })
 
 test(`[scenario:request-errors] Show an actionable API error rather than silently substituting fixtures (${phase})`, async ({ page }, testInfo) => {
+  test.slow() // a dozen loads and retries; under the two lanes' browser load it passes 30 s
   // A server failure on the project list: the error is shown with its code and status, and no project appears.
   let failProjects = true
   await page.route(url => url.pathname === '/api/projects', async route => {

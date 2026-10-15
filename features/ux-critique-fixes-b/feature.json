@@ -1,0 +1,68 @@
+{
+  "version": "2.10.0",
+  "name": "UX critique fixes, stage B (features/ux-critique-fixes-b/prd.md): every run list can be filtered (status, stopped-at phase, date, text, sort) and keeps that state across Back and reload, runs that need the operator and running runs are on top everywhere, the project page folds its features and dates its rows; the run page opens readable (graph at the standard level with the dock in its own column on a run frame 1200 px or wider), says when a stopped run stopped, announces its sessions, opens the page its Open link names and shows branch and base instead of the hash; read-only, no server or contract change",
+  "branch_prefix": "feature/ux-critique-fixes-b",
+  "prd": "features/ux-critique-fixes-b/prd.md",
+  "policy": "policy.json",
+  "workers": [
+    {
+      "node_id": "lists",
+      "task": "lists-task.md",
+      "model": "claude-opus-5-5",
+      "effort": "medium",
+      "lane_review": {
+        "reviewers": [
+          {
+            "transport": "pi",
+            "model": "openai-codex/gpt-6.1-sol"
+          }
+        ],
+        "rounds": 1,
+        "timeout_minutes": 15
+      }
+    },
+    {
+      "node_id": "run",
+      "task": "run-task.md",
+      "model": "claude-sonnet-5-5",
+      "effort": "medium",
+      "skills": [
+        "impeccable"
+      ],
+      "lane_review": {
+        "reviewers": [
+          {
+            "transport": "pi",
+            "model": "openai-codex/gpt-6.1-sol"
+          }
+        ],
+        "rounds": 1,
+        "timeout_minutes": 15
+      }
+    }
+  ],
+  "reviewers": [
+    {
+      "reviewer_id": "general",
+      "prompt": "builtin:general"
+    },
+    {
+      "reviewer_id": "coverage",
+      "prompt": "builtin:coverage"
+    }
+  ],
+  "challenge": true,
+  "critique": {
+    "lanes": [
+      "lists",
+      "run"
+    ],
+    "skills": [
+      "impeccable"
+    ],
+    "max_budget_usd": 20,
+    "timeout_minutes": 60
+  },
+  "critical": false,
+  "tryout": false
+}

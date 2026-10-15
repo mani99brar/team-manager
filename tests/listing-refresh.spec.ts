@@ -2,7 +2,7 @@ import { test, expect } from '@playwright/test'
 import { mkdir, rm, symlink, writeFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
-import { CLAUDE, LABELS, PI, browseUrl, currentCrumb, expandButton, fit, folderInfo, node, nodeBody, openGraph, roots, waitForApi } from './helpers.ts'
+import { CLAUDE, LABELS, PI, browseUrl, currentCrumb, expandButton, fit, folderInfo, node, nodeBody, openCollapsedGraph, openGraph, roots, waitForApi } from './helpers.ts'
 
 /**
  * These tests add uniquely named scratch artifacts under the temporary location roots and remove them again in
@@ -24,7 +24,7 @@ test.afterEach(async () => {
 })
 
 test('refresh adds and removes entries, handles awkward names and only shows children of expanded parents', async ({ page }) => {
-  await openGraph(page)
+  await openCollapsedGraph(page)
   await expandButton(page, 'Claude').click()
   await fit(page)
   await nodeBody(page, `Claude/${CLAUDE}`).click()

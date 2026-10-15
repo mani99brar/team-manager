@@ -9,14 +9,14 @@
 
 .assignment-setup code {
   font-family: ui-monospace, Menlo, Consolas, monospace;
-  font-size: 0.8rem;
+  font-size: var(--type-floor);
 }
 
 .assignment-lanes-table {
   width: 100%;
   border-collapse: collapse;
   margin: 0 0 16px;
-  font-size: 0.85rem;
+  font-size: max(0.85rem, var(--type-floor));
 }
 
 .assignment-lanes-table th,
@@ -28,7 +28,7 @@
 }
 
 .assignment-lanes-table thead th {
-  font-size: 13px;
+  font-size: var(--type-floor);
   font-weight: 600;
   letter-spacing: 0.04em;
   color: var(--muted);
@@ -43,4 +43,21 @@
 .assignment-lanes-table .assignment-num {
   font-variant-numeric: tabular-nums;
   text-align: right;
+}
+
+/* Long documents fold: the summary says how long each is; opened, the prose reads at a measure. */
+.assignment-fold { margin: 8px 0; }
+.assignment-fold > summary { cursor: pointer; font-weight: 600; }
+.assignment-fold > .projects-muted { max-width: 70ch; }
+.assignment-worker > h4:focus { outline: none; }
+.assignment-worker > h4:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
+
+/* Below 600 px each lane is a card with its labels, not a table to scroll sideways. */
+@media (max-width: 599px) {
+  .assignment-lanes-table, .assignment-lanes-table tbody, .assignment-lanes-table tr, .assignment-lanes-table th, .assignment-lanes-table td { display: block; }
+  .assignment-lanes-table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+  .assignment-lanes-table tr { border: 1px solid var(--border); border-radius: var(--radius); padding: 6px 10px; margin: 0 0 8px; background: var(--surface); }
+  .assignment-lanes-table th, .assignment-lanes-table td { border-bottom: 0; padding: 2px 0; text-align: left; }
+  .assignment-lanes-table td { display: flex; gap: 8px; justify-content: space-between; overflow-wrap: anywhere; }
+  .assignment-lanes-table td[data-label]::before { content: attr(data-label); flex: none; color: var(--muted); }
 }

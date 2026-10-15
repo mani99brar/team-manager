@@ -12,11 +12,11 @@
 
 .projects-shell .dispatch-glyph { color: var(--tone, var(--idle)); font-weight: 700; display: inline-flex; align-items: center; justify-content: center; }
 @media (prefers-reduced-motion: no-preference) { .projects-shell .dispatch-glyph.live { animation: dispatch-breathe 1.8s ease-in-out infinite; } @keyframes dispatch-breathe { 50% { opacity: .45; } } }
-.projects-shell .dispatch-mono { font-family: var(--font-mono); font-size: 13px; }
-.projects-shell .dispatch-muted { color: var(--muted); font-size: 12.5px; }
+.projects-shell .dispatch-mono { font-family: var(--font-mono); font-size: var(--type-floor); }
+.projects-shell .dispatch-muted { color: var(--muted); font-size: var(--type-floor); }
 .projects-shell .dispatch-nr { color: var(--muted); font-style: italic; font-weight: 400; }
-.projects-shell .dispatch-word { font-size: 12px; font-weight: 700; color: var(--tone, var(--muted)); white-space: nowrap; }
-.projects-shell .dispatch-vis { display: inline-flex; align-items: center; height: 20px; padding: 0 8px; border-radius: 999px; background: var(--surface-2); color: var(--muted); font-size: 11.5px; font-weight: 700; }
+.projects-shell .dispatch-word { font-size: var(--type-floor); font-weight: 700; color: var(--tone, var(--muted)); white-space: nowrap; }
+.projects-shell .dispatch-vis { display: inline-flex; align-items: center; height: 20px; padding: 0 8px; border-radius: 999px; background: var(--surface-2); color: var(--muted); font-size: var(--type-floor); font-weight: 700; }
 
 /* shell: rail + main */
 .projects-shell .dispatch-shell { display: grid; grid-template-columns: 280px minmax(0, 1fr); gap: 0; align-items: start; }
@@ -30,8 +30,9 @@
 .projects-shell .dispatch-rail-home { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 44px; padding: 0 12px; border-radius: 10px; font-weight: 700; font-size: 15px; }
 .projects-shell .dispatch-rail-home:hover { background: var(--surface); }
 .projects-shell .dispatch-rail-home[aria-current="page"] { background: var(--accent-soft); box-shadow: inset 0 0 0 1px var(--accent); }
-.projects-shell .dispatch-rail-home-n { font-size: 12.5px; font-weight: 600; color: var(--muted); }
+.projects-shell .dispatch-rail-home-n { font-size: var(--type-floor); font-weight: 600; color: var(--muted); }
 .projects-shell .dispatch-rail-home-n.tone-warn { color: var(--warn); }
+.projects-shell .dispatch-rail-home-n.tone-pause { color: var(--pause); }
 .projects-shell .dispatch-rail-h { display: flex; gap: 6px; margin: 18px 12px 8px; font-size: 12px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
 .projects-shell .dispatch-rail-h span { color: var(--fg); }
 .projects-shell .dispatch-rail-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
@@ -42,13 +43,14 @@
 .projects-shell .dispatch-rail-m { display: grid; gap: 1px; min-width: 0; }
 .projects-shell .dispatch-rail-top { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 2px 8px; }
 .projects-shell .dispatch-rail-name { font-size: 15px; font-weight: 600; overflow-wrap: anywhere; }
-.projects-shell .dispatch-rail-badge { font-size: 12px; font-weight: 700; color: var(--tone, var(--muted)); background: var(--tone-soft, var(--surface)); border-radius: 999px; padding: 2px 8px; white-space: nowrap; }
-.projects-shell .dispatch-rail-sub { font-size: 12.5px; color: var(--muted); overflow-wrap: anywhere; }
-.projects-shell .dispatch-rail-foot { margin: 18px 12px 0; font-size: 12.5px; color: var(--muted); line-height: 1.5; }
+.projects-shell .dispatch-rail-badge.badge-neutral { --tone: var(--muted); --tone-soft: var(--surface); }
+.projects-shell .dispatch-rail-badge { font-size: var(--type-floor); font-weight: 700; color: var(--tone, var(--muted)); background: var(--tone-soft, var(--surface)); border-radius: 999px; padding: 2px 8px; white-space: nowrap; }
+.projects-shell .dispatch-rail-sub { font-size: var(--type-floor); color: var(--muted); overflow-wrap: anywhere; }
+.projects-shell .dispatch-rail-foot { margin: 18px 12px 0; font-size: var(--type-floor); color: var(--muted); line-height: 1.5; }
 
 /* page heads */
 .projects-shell .dispatch-page-head h1 { font-size: 20px; font-weight: 700; margin: 6px 0 4px; }
-.projects-shell .dispatch-meta { font-size: 12.5px; color: var(--muted); display: flex; flex-wrap: wrap; gap: 2px 8px; align-items: center; }
+.projects-shell .dispatch-meta { font-size: var(--type-floor); color: var(--muted); display: flex; flex-wrap: wrap; gap: 2px 8px; align-items: center; }
 
 /* projects cards */
 .projects-shell .dispatch-cards { list-style: none; margin: 14px 0 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); gap: 12px; }
@@ -56,11 +58,11 @@
 .projects-shell .dispatch-card:hover { background: var(--surface-2); }
 .projects-shell .dispatch-card-top { display: flex; align-items: baseline; gap: 8px; }
 .projects-shell .dispatch-card-name { font-size: 16px; font-weight: 700; }
-.projects-shell .dispatch-card-word { margin-left: auto; font-size: 12px; font-weight: 700; color: var(--tone, var(--muted)); }
+.projects-shell .dispatch-card-word { margin-left: auto; font-size: var(--type-floor); font-weight: 700; color: var(--tone, var(--muted)); }
 .projects-shell .dispatch-card-repo { display: flex; align-items: center; gap: 8px; }
-.projects-shell .dispatch-card-line { font-size: 12.5px; color: var(--muted); }
+.projects-shell .dispatch-card-line { font-size: var(--type-floor); color: var(--muted); }
 .projects-shell .dispatch-card-line code { color: var(--fg); }
-.projects-shell .dispatch-card-foot { display: flex; align-items: center; gap: 12px; font-size: 12.5px; color: var(--muted); margin-top: 2px; }
+.projects-shell .dispatch-card-foot { display: flex; align-items: center; gap: 12px; font-size: var(--type-floor); color: var(--muted); margin-top: 2px; }
 .projects-shell .dispatch-card-open { margin-left: auto; color: var(--accent); font-weight: 600; }
 
 /* project page layout. With no run selected the body is main + a 380px GitHub column (PRD 4.3); it stacks below 980px. */
@@ -70,54 +72,102 @@
    V23). The column count is decided from the body's own width with a container query, not a viewport media query, so it is
    right whatever the shell around it (the workspace border and padding the media-query arithmetic used to leave out). A
    container query cannot style its own container, so `.dispatch-body-container` wraps the body and carries the container;
-   `.dispatch-project-body` (the grid it styles) is the child. 876px = a 480px chart + 16px gap + the 380px GitHub column. */
+   `.dispatch-project-body` (the grid it styles) is the child. 876px = a 480px chart + 16px gap + the 380px GitHub column.
+   A project without a GitHub remote (`-wide`) has no GitHub column in the body, so it keeps one track at any width. */
 .projects-shell .dispatch-project.has-pane { display: grid; grid-template-columns: minmax(0, 1fr) minmax(380px, 420px); column-gap: 16px; align-items: start; }
-.projects-shell .dispatch-project.has-pane > .dispatch-project-head { grid-column: 1 / -1; }
+.projects-shell .dispatch-project.has-pane > .dispatch-project-head,
+.projects-shell .dispatch-project.has-pane > .dispatch-gh-line { grid-column: 1 / -1; }
 .projects-shell .dispatch-body-container { min-width: 0; }
 .projects-shell .dispatch-project.has-pane .dispatch-body-container { container-type: inline-size; container-name: dispatch-body; }
 .projects-shell .dispatch-project.has-pane .dispatch-project-body { grid-template-columns: minmax(0, 1fr); }
-@container dispatch-body (min-width: 876px) { .projects-shell .dispatch-project.has-pane .dispatch-project-body { grid-template-columns: minmax(0, 1fr) 380px; } }
+@container dispatch-body (min-width: 876px) { .projects-shell .dispatch-project.has-pane .dispatch-project-body:not(.dispatch-project-body-wide) { grid-template-columns: minmax(0, 1fr) 380px; } }
 .projects-shell .dispatch-project-main { min-width: 0; }
-.projects-shell .dispatch-crumbs { font-size: 12.5px; color: var(--muted); }
+.projects-shell .dispatch-crumbs { font-size: var(--type-floor); color: var(--muted); }
 .projects-shell .dispatch-crumbs a { color: var(--muted); }
 .projects-shell .dispatch-project-title { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
 .projects-shell .dispatch-ext { color: var(--accent); text-decoration: none; }
-.projects-shell .dispatch-figs { display: flex; flex-wrap: wrap; gap: 6px 14px; margin: 10px 0; font-size: 13px; }
+.projects-shell .dispatch-figs { display: flex; flex-wrap: wrap; gap: 6px 14px; margin: 10px 0; font-size: var(--type-floor); }
 .projects-shell .dispatch-fig { display: inline-flex; align-items: baseline; gap: 5px; color: var(--muted); }
 .projects-shell .dispatch-fig b { color: var(--fg); font-size: 15px; }
 .projects-shell .dispatch-jump { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
-.projects-shell .dispatch-jump button { font: inherit; font-size: 13px; font-weight: 600; min-height: 36px; padding: 0 12px; border: 1px solid var(--border-strong); border-radius: 10px; background: var(--surface); color: var(--fg); cursor: pointer; }
-.projects-shell .dispatch-filter input { width: 100%; max-width: 420px; height: 40px; padding: 0 12px; border: 1px solid var(--border-strong); border-radius: 10px; background: var(--surface); color: var(--fg); font: inherit; }
+.projects-shell .dispatch-jump button { font: inherit; font-size: var(--type-floor); font-weight: 600; min-height: 36px; padding: 0 12px; border: 1px solid var(--border-strong); border-radius: 10px; background: var(--surface); color: var(--fg); cursor: pointer; }
+.projects-shell .dispatch-filter .run-filter { margin: 4px 0 0; }
+@media (min-width: 761px) {
+  .projects-shell .dispatch-filter .run-filter-status button { padding: 2px 10px; }
+  .projects-shell .dispatch-filter .run-filter-search, .projects-shell .dispatch-filter .run-filter-field select { min-height: 28px; }
+}
+/* A project without a GitHub remote: its GitHub column is one line under the header, and the chart takes the width. */
+.projects-shell .dispatch-gh-line { margin-top: 10px; }
+.projects-shell .dispatch-gh-line .dispatch-gline { margin: 0; font-size: var(--type-floor); color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.projects-shell .dispatch-gh-line .dispatch-gh-title { font-weight: 700; color: var(--fg); }
+.projects-shell .dispatch-project-body.dispatch-project-body-wide { grid-template-columns: minmax(0, 1fr); }
+.projects-shell .dispatch-order { margin: 4px 0; font-size: var(--type-floor); }
+/* Each feature is one header row (its link, then the Show runs disclosure beside it); its runs open below on demand. */
+.projects-shell .dispatch-feature-row { display: flex; align-items: stretch; gap: 8px; min-width: 0; }
+.projects-shell .dispatch-feature-row > .lists-group-head { flex: 1 1 auto; min-width: 0; flex-direction: row; flex-wrap: wrap; align-items: baseline; gap: 2px 12px; padding: 4px 12px; }
+.projects-shell .dispatch-feature-word { font-weight: 700; color: var(--tone, var(--fg)); }
+.projects-shell .dispatch-feature-last { margin-left: auto; color: var(--muted); font-size: var(--type-floor); }
+.projects-shell .dispatch-feature-toggle { flex: none; font: inherit; font-size: var(--type-floor); font-weight: 600; min-height: 26px; padding: 0 12px; border: 1px solid var(--border-strong); border-radius: 10px; background: var(--surface); color: var(--fg); cursor: pointer; align-self: center; }
+.projects-shell .dispatch-feature-toggle[aria-expanded="true"] { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+.projects-shell .dispatch-feature-body { margin-top: 2px; }
+.projects-shell .dispatch-chart > .lists-groups { gap: 6px; }
+.projects-shell .dispatch-feature-row > .lists-group-head { min-height: 0; line-height: 1.35; }
+/* Above 760 px the figures and the jump buttons share one row, so the features start inside the first screen. */
+@media (min-width: 761px) {
+  .projects-shell .dispatch-project-head { display: flex; flex-wrap: wrap; align-items: center; column-gap: 16px; }
+  .projects-shell .dispatch-project-head > .dispatch-figs, .projects-shell .dispatch-project-head > .dispatch-filter { flex-basis: 100%; }
+  .projects-shell .dispatch-project-head > .dispatch-figs, .projects-shell .dispatch-project-head > .dispatch-jump { margin: 4px 0; }
+  .projects-shell .dispatch-project-head > .dispatch-meta { flex: 1 1 320px; min-width: 0; }
+  .projects-shell .dispatch-project-head > .dispatch-jump button { min-height: 28px; }
+  .projects-shell .dispatch-project-head > .dispatch-filter .run-filter { margin: 0; }
+  .projects-shell .dispatch-project-body { margin-top: 6px; }
+}
+.projects-shell .lists-group.dispatch-feature { margin-top: 0; gap: 0; }
+.projects-shell .dispatch-run-when { color: var(--muted); font-size: var(--type-floor); white-space: nowrap; }
+.projects-shell .dispatch-defs { display: flex; flex-wrap: wrap; gap: 0 18px; margin-bottom: 2px; }
+.projects-shell .dispatch-defs > .dispatch-def { margin: 0; }
+.projects-shell .dispatch-defs > .dispatch-order { margin: 0; flex-basis: 100%; }
+.projects-shell .dispatch-defs > .dispatch-def[open] { flex-basis: 100%; }
+.projects-shell .dispatch-def-users { margin: 4px 0 0; font-size: var(--type-floor); }
 
 /* step chart */
-.projects-shell .dispatch-chart { margin-top: 8px; }
+.projects-shell .dispatch-chart { margin-top: 4px; }
 /* The axis, the run tracks and the "ended here" row share one 8-column template (set inline from CHART_COLUMNS) and the same
    12px side padding, so column i of the axis spans column i of every track at every width (V3). The "phase" and "ended here"
    captions sit above/below the track as block labels, never as a grid column, so they do not shift the columns. */
-.projects-shell .dispatch-axis { position: sticky; top: 0; z-index: 2; background: var(--bg); padding: 6px 12px; border-bottom: 1px solid var(--border); }
+.projects-shell .dispatch-axis { position: sticky; top: 0; z-index: 2; background: var(--bg); padding: 2px 12px; border-bottom: 1px solid var(--border); }
 .projects-shell .dispatch-axis-l { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin-bottom: 3px; }
 .projects-shell .dispatch-axis-track, .projects-shell .dispatch-track, .projects-shell .dispatch-ends-track { display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); align-items: center; }
-.projects-shell .dispatch-ax { font-size: 11px; color: var(--muted); text-align: center; white-space: nowrap; min-width: 0; padding: 0 2px; }
+.projects-shell .dispatch-ax { font-size: var(--type-floor); color: var(--muted); text-align: center; white-space: nowrap; min-width: 0; padding: 0 2px; }
 .projects-shell .dispatch-ax-short { display: none; }
+.projects-shell .dispatch-en-count { display: none; }
+.projects-shell .dispatch-legend { display: none; flex-wrap: wrap; gap: 2px 14px; margin: 6px 12px 0; color: var(--muted); font-size: var(--type-floor); }
 /* Where a phase column is narrower than its full name, use the fixed short form so a label is never cut with an ellipsis. */
 @container dispatch-chart (max-width: 640px) {
   .projects-shell .dispatch-ax-full { display: none; }
   .projects-shell .dispatch-ax-short { display: inline; }
+  /* A narrow "ended here" cell shows its count only (its name and title hold the sentence); the legend explains the short forms. */
+  .projects-shell .dispatch-en-full { display: none; }
+  .projects-shell .dispatch-en-count { display: inline; }
+  .projects-shell .dispatch-legend { display: flex; }
 }
+.projects-shell .dispatch-legend-item { white-space: nowrap; }
+.projects-shell .dispatch-legend-item b { font-family: var(--font-mono); color: var(--fg); }
+/* The shas a feature landed sit apart, one chip each. */
+.projects-shell .dispatch-landed { display: inline-flex; flex-wrap: wrap; gap: 4px 8px; margin-left: 4px; vertical-align: baseline; }
 /* Steps of this definition fold (V7). */
-.projects-shell .dispatch-def { margin: 6px 12px 0; font-size: 12.5px; }
-.projects-shell .dispatch-def summary { cursor: pointer; color: var(--muted); display: flex; gap: 8px; align-items: baseline; min-height: 28px; }
+.projects-shell .dispatch-def { margin: 6px 12px 0; font-size: var(--type-floor); }
+.projects-shell .dispatch-def summary { cursor: pointer; color: var(--muted); display: flex; gap: 8px; align-items: baseline; min-height: 24px; }
 .projects-shell .dispatch-def-list { list-style: none; margin: 6px 0 0; padding: 0; display: grid; gap: 2px; }
 .projects-shell .dispatch-def-list li { display: flex; gap: 10px; align-items: baseline; }
 .projects-shell .dispatch-def-phase { min-width: 72px; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
 .projects-shell .dispatch-def-label { color: var(--fg); }
 .projects-shell .dispatch-feature { list-style: none; }
-.projects-shell .lists-group.dispatch-feature { margin-top: 14px; }
 .projects-shell .dispatch-feature-id { font-family: var(--font-mono); font-weight: 700; }
 .projects-shell .dispatch-chain { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
-.projects-shell .dispatch-chip-run { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: var(--tone, var(--muted)); background: var(--tone-soft, var(--surface-2)); border-radius: 999px; padding: 1px 8px; }
+.projects-shell .dispatch-chip-run { display: inline-flex; align-items: center; gap: 4px; font-size: var(--type-floor); color: var(--tone, var(--muted)); background: var(--tone-soft, var(--surface-2)); border-radius: 999px; padding: 1px 8px; }
 .projects-shell .dispatch-runs { margin-top: 6px; display: grid; gap: 2px; }
-.projects-shell .dispatch-run { display: grid; grid-template-columns: minmax(0, 1fr); gap: 3px; width: 100%; padding: 10px 12px; border: 0; border-top: 1px solid var(--border); background: none; text-align: left; cursor: pointer; color: var(--fg); }
+.projects-shell .dispatch-run { font-size: max(13.3333px, var(--type-floor)); display: grid; grid-template-columns: minmax(0, 1fr); gap: 1px; width: 100%; padding: 4px 12px; border: 0; border-top: 1px solid var(--border); background: none; text-align: left; cursor: pointer; color: var(--fg); }
 .projects-shell .dispatch-run:hover { background: var(--surface-2); }
 .projects-shell .dispatch-run[aria-selected="true"] { background: var(--accent-soft); box-shadow: inset 0 0 0 1px var(--accent); }
 .projects-shell .dispatch-run-1 { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
@@ -126,11 +176,11 @@
 .projects-shell .dispatch-res { display: inline-flex; align-items: center; gap: 6px; }
 /* A landed sha never breaks mid-sha, even in a squeezed run row at 1100px (V29). */
 .projects-shell .dispatch-res code, .projects-shell .dispatch-run-2 code { white-space: nowrap; }
-.projects-shell .dispatch-off { font-size: 11px; color: var(--warn); }
-.projects-shell .dispatch-run-2 { font-size: 12.5px; color: var(--muted); }
+.projects-shell .dispatch-off { font-size: var(--type-floor); color: var(--warn); }
+.projects-shell .dispatch-run-2 { font-size: var(--type-floor); color: var(--muted); }
 .projects-shell .dispatch-run-2 b { color: var(--fg); }
-.projects-shell .dispatch-tag { font-size: 11px; color: var(--muted); border: 1px solid var(--border); border-radius: 999px; padding: 0 6px; }
-.projects-shell .dispatch-track { margin-top: 4px; }
+.projects-shell .dispatch-tag { font-size: var(--type-floor); color: var(--muted); border: 1px solid var(--border); border-radius: 999px; padding: 0 6px; }
+.projects-shell .dispatch-track { margin-top: 0; }
 .projects-shell .dispatch-cell { display: flex; align-items: center; justify-content: center; gap: 3px; min-height: 22px; position: relative; }
 .projects-shell .dispatch-cell::before { content: ""; position: absolute; left: 0; right: 0; top: 50%; height: 2px; background: var(--edge-soft, var(--border)); }
 .projects-shell .dispatch-cell.ahead::before { background: repeating-linear-gradient(90deg, var(--border) 0 4px, transparent 4px 8px); }
@@ -138,36 +188,37 @@
 .projects-shell .dispatch-dot { width: 9px; height: 9px; border-radius: 50%; border: 1.5px solid var(--idle); background: var(--surface); box-shadow: 0 0 0 3px var(--surface); display: inline-block; }
 .projects-shell .dispatch-dot.reached { background: var(--tone, var(--idle)); border-color: var(--tone, var(--idle)); }
 .projects-shell .dispatch-stop-glyph { background: var(--surface); box-shadow: 0 0 0 3px var(--surface); border-radius: 50%; }
-.projects-shell .dispatch-att { font-size: 10px; font-weight: 700; color: var(--muted); }
-.projects-shell .dispatch-ends { padding: 2px 12px 6px; font-size: 11px; color: var(--muted); }
+.projects-shell .dispatch-att { font-size: var(--type-floor); font-weight: 700; color: var(--muted); }
+.projects-shell .dispatch-ends { padding: 2px 12px 6px; font-size: var(--type-floor); color: var(--muted); }
 .projects-shell .dispatch-ends-l { display: block; text-transform: uppercase; letter-spacing: .06em; margin-bottom: 2px; }
-.projects-shell .dispatch-en { text-align: center; }
+.projects-shell .dispatch-en { text-align: center; min-width: 0; overflow-wrap: break-word; }
 .projects-shell .dispatch-en.land { color: var(--ok); font-weight: 700; }
-.projects-shell .dispatch-badrow { padding: 10px 12px; font-size: 12.5px; color: var(--muted); }
+.projects-shell .dispatch-badrow { padding: 10px 12px; font-size: var(--type-floor); color: var(--muted); }
 .projects-shell .dispatch-badrow code { color: var(--fg); }
 /* at a chart width of 440px or less, a multi-lane phase collapses to one mark */
 @container dispatch-chart (max-width: 440px) { .projects-shell .dispatch-cell.multi .dispatch-lane:not(:first-child) { display: none; } }
 .projects-shell #dispatch-runs-section { container-type: inline-size; container-name: dispatch-chart; }
 
 /* Needs you and running (V5) */
-.projects-shell .dispatch-needs { margin-bottom: 12px; }
-.projects-shell .dispatch-needs-h { font-size: 13px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); margin: 0 0 6px; }
-.projects-shell .dispatch-needs-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+.projects-shell .dispatch-needs { margin-bottom: 0; display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 16px; }
+.projects-shell .dispatch-needs > p { margin: 0; }
+.projects-shell .dispatch-needs-h { font-size: 13px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); margin: 0; }
+.projects-shell .dispatch-needs-list { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 0 18px; }
 .projects-shell .dispatch-needs-list li { display: flex; align-items: baseline; gap: 8px; }
 .projects-shell .dispatch-needs-list a { color: var(--accent); text-decoration: none; }
 .projects-shell .dispatch-needs-list code { font-family: var(--font-mono); }
 
 /* commits-ahead button + the ahead pane (V6) */
-.projects-shell .dispatch-gh-ahead-btn { margin-top: 8px; font: inherit; font-size: 12.5px; font-weight: 600; min-height: 32px; padding: 0 10px; border: 1px solid var(--border-strong); border-radius: 8px; background: var(--surface-2); color: var(--fg); cursor: pointer; }
+.projects-shell .dispatch-gh-ahead-btn { margin-top: 8px; font: inherit; font-size: var(--type-floor); font-weight: 600; min-height: 32px; padding: 0 10px; border: 1px solid var(--border-strong); border-radius: 8px; background: var(--surface-2); color: var(--fg); cursor: pointer; }
 .projects-shell .dispatch-gh-ahead-btn[aria-pressed="true"] { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
 .projects-shell .dispatch-ahead-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
-.projects-shell .dispatch-ahead-list li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; font-size: 12.5px; }
+.projects-shell .dispatch-ahead-list li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; font-size: var(--type-floor); }
 .projects-shell .dispatch-ahead-subj { color: var(--fg); overflow-wrap: anywhere; }
-.projects-shell .dispatch-ahead-run { color: var(--accent); text-decoration: none; font-family: var(--font-mono); font-size: 12px; }
+.projects-shell .dispatch-ahead-run { color: var(--accent); text-decoration: none; font-family: var(--font-mono); font-size: var(--type-floor); }
 
 /* "Show N more" fold (V8) and the merged-group scope note (V9) */
-.projects-shell .dispatch-show-more { font: inherit; font-size: 12px; font-weight: 600; min-height: 28px; padding: 2px 8px; margin-top: 4px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-2); color: var(--accent); cursor: pointer; }
-.projects-shell .dispatch-gh-note { margin-left: 6px; color: var(--muted); font-weight: 400; font-size: 11.5px; }
+.projects-shell .dispatch-show-more { font: inherit; font-size: var(--type-floor); font-weight: 600; min-height: 28px; padding: 2px 8px; margin-top: 4px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-2); color: var(--accent); cursor: pointer; }
+.projects-shell .dispatch-gh-note { margin-left: 6px; color: var(--muted); font-weight: 400; font-size: var(--type-floor); }
 
 /* github column */
 .projects-shell .dispatch-gh { display: grid; gap: 12px; align-content: start; }
@@ -175,25 +226,25 @@
 .projects-shell .dispatch-gcard h3 { margin: 0 0 8px; font-size: 13px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; }
 /* The card title stays on one line; only the aside count wraps below it, so "PULL REQUESTS" never splits across two lines (V29). */
 .projects-shell .dispatch-gh-title { white-space: nowrap; }
-.projects-shell .dispatch-aside { margin-left: auto; text-transform: none; letter-spacing: 0; font-weight: 400; font-size: 12px; }
+.projects-shell .dispatch-aside { margin-left: auto; text-transform: none; letter-spacing: 0; font-weight: 400; font-size: var(--type-floor); }
 .projects-shell .dispatch-gline { font-weight: 600; margin: 0 0 6px; }
-.projects-shell .dispatch-gsub { font-size: 12.5px; color: var(--muted); margin: 4px 0; }
+.projects-shell .dispatch-gsub { font-size: var(--type-floor); color: var(--muted); margin: 4px 0; }
 .projects-shell .dispatch-gsub code, .projects-shell .dispatch-gline code { color: var(--fg); }
 .projects-shell .dispatch-stale { color: var(--warn); }
-.projects-shell .dispatch-gh-group h4 { margin: 8px 0 4px; font-size: 12.5px; }
+.projects-shell .dispatch-gh-group h4 { margin: 8px 0 4px; font-size: var(--type-floor); }
 .projects-shell .dispatch-gh-group h4 span { color: var(--muted); font-weight: 400; margin-left: 4px; }
 .projects-shell .dispatch-gh-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
 .projects-shell .dispatch-gh-item a { color: var(--accent); text-decoration: none; }
 .projects-shell .dispatch-num { font-family: var(--font-mono); color: var(--muted); }
-.projects-shell .dispatch-gh-meta { display: flex; flex-wrap: wrap; gap: 2px 10px; font-size: 12px; color: var(--muted); }
+.projects-shell .dispatch-gh-meta { display: flex; flex-wrap: wrap; gap: 2px 10px; font-size: var(--type-floor); color: var(--muted); }
 .projects-shell .dispatch-rv { font-weight: 700; color: var(--tone, var(--muted)); }
 .projects-shell .dispatch-checks { display: inline-flex; gap: 8px; }
 .projects-shell .dispatch-checks .tone-ok { color: var(--ok); }
 .projects-shell .dispatch-checks .tone-fail { color: var(--fail); }
 .projects-shell .dispatch-checks .tone-run { color: var(--run); }
 .projects-shell .dispatch-draft { color: var(--muted); border: 1px solid var(--border); border-radius: 999px; padding: 0 6px; }
-.projects-shell .dispatch-gh-why { display: block; font-size: 11.5px; color: var(--muted); font-style: italic; }
-.projects-shell .dispatch-note { font-size: 11.5px; color: var(--muted); margin: 8px 0 0; }
+.projects-shell .dispatch-gh-why { display: block; font-size: var(--type-floor); color: var(--muted); font-style: italic; }
+.projects-shell .dispatch-note { font-size: var(--type-floor); color: var(--muted); margin: 8px 0 0; }
 .projects-shell .dispatch-more { display: inline-block; margin-top: 8px; color: var(--accent); }
 .projects-shell .dispatch-co { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
 .projects-shell .dispatch-co a { color: var(--accent); text-decoration: none; }
@@ -211,14 +262,14 @@
 .projects-shell .dispatch-pane-sec h3 { margin: 0 0 8px; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
 .projects-shell .dispatch-lead { font-size: 15px; font-weight: 600; margin: 0; }
 .projects-shell .dispatch-facts { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 16px; margin: 0; }
-.projects-shell .dispatch-fact dt { font-size: 12px; color: var(--muted); }
-.projects-shell .dispatch-fact dd { margin: 0; font-size: 13px; font-weight: 600; }
+.projects-shell .dispatch-fact dt { font-size: var(--type-floor); color: var(--muted); }
+.projects-shell .dispatch-fact dd { margin: 0; font-size: var(--type-floor); font-weight: 600; }
 .projects-shell .dispatch-pane-steps { list-style: none; margin: 0; padding: 0; display: grid; gap: 3px; }
-.projects-shell .dispatch-pane-steps li { display: flex; align-items: baseline; gap: 8px; font-size: 12.5px; }
+.projects-shell .dispatch-pane-steps li { display: flex; align-items: baseline; gap: 8px; font-size: var(--type-floor); }
 .projects-shell .dispatch-pane-phase { color: var(--muted); min-width: 64px; }
 .projects-shell .dispatch-pane-step-label { flex: 1; }
 .projects-shell .dispatch-cmd { display: flex; align-items: center; gap: 8px; }
-.projects-shell .dispatch-cmd code { font-family: var(--font-mono); font-size: 12.5px; background: var(--surface-2); padding: 2px 6px; border-radius: 4px; overflow-wrap: anywhere; }
+.projects-shell .dispatch-cmd code { font-family: var(--font-mono); font-size: var(--type-floor); background: var(--surface-2); padding: 2px 6px; border-radius: 4px; overflow-wrap: anywhere; }
 .projects-shell .dispatch-pane-actions { display: flex; align-items: center; gap: 10px; }
 .projects-shell .dispatch-pane-open { text-decoration: none; }
 .projects-shell .dispatch-pane-nav { margin-left: auto; display: flex; gap: 6px; }
@@ -228,7 +279,7 @@
   .projects-shell .dispatch-shell { grid-template-columns: minmax(0, 1fr); }
   .projects-shell .dispatch-rail { display: none; }
   .projects-shell .dispatch-chips { display: flex; gap: 8px; overflow-x: auto; padding: 8px 4px; }
-  .projects-shell .dispatch-chip { display: inline-flex; align-items: center; gap: 6px; min-height: 44px; padding: 0 12px; border-radius: 999px; border: 1px solid var(--border); background: var(--surface); color: var(--fg); text-decoration: none; font-size: 13px; font-weight: 600; white-space: nowrap; flex: none; }
+  .projects-shell .dispatch-chip { display: inline-flex; align-items: center; gap: 6px; min-height: 44px; padding: 0 12px; border-radius: 999px; border: 1px solid var(--border); background: var(--surface); color: var(--fg); text-decoration: none; font-size: var(--type-floor); font-weight: 600; white-space: nowrap; flex: none; }
   .projects-shell .dispatch-chip[aria-current="page"] { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
   .projects-shell .dispatch-project-body, .projects-shell .dispatch-project.has-pane { grid-template-columns: minmax(0, 1fr); }
 }
@@ -237,9 +288,11 @@
    so its Copy/Run buttons and legend/all-steps disclosures are sized here, scoped to the pane. */
 @media (max-width: 480px) {
   .projects-shell .dispatch-cards { grid-template-columns: minmax(0, 1fr); }
+  .projects-shell .dispatch-run-1, .projects-shell .dispatch-feature-row { flex-wrap: wrap; }
+  .projects-shell .dispatch-run-when { white-space: normal; }
   .projects-shell .dispatch-jump button,
   .projects-shell .dispatch-pane-open, .projects-shell .dispatch-pane-close, .projects-shell .dispatch-pane-nav button,
-  .projects-shell .dispatch-filter input,
+  .projects-shell .dispatch-feature-toggle, .projects-shell .dispatch-def summary,
   .projects-shell .dispatch-gh-ahead-btn, .projects-shell .dispatch-show-more,
   .projects-shell .dispatch-pane .command-copy, .projects-shell .dispatch-pane .command-run-button, .projects-shell .dispatch-pane .command-step > summary,
   .projects-shell .dispatch-pane .command-legend > summary, .projects-shell .dispatch-pane .command-all-steps > summary { min-height: 44px; }

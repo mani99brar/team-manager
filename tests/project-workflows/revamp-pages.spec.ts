@@ -7,6 +7,7 @@
  */
 import { test, expect, type Locator, type Page } from '@playwright/test'
 import { UI_CHANGED_FILES } from './fixtures.ts'
+import { RUN_SESSIONS, UX_SESSIONS_WORKFLOW_ID } from './fixtures/sessions.ts'
 import { RUN_REPAIRED, UX_RUN_WORKFLOW_ID } from './fixtures/ux-run.ts'
 import { RUN_REJECTED_CHECKS, UX_VERIFY_WORKFLOW_ID } from './fixtures/ux-verify.ts'
 import {
@@ -25,6 +26,8 @@ const findings = (page: Page) => page.getByTestId('review-findings')
 const cards = (page: Page) => findings(page).getByTestId('finding')
 const filters = (page: Page) => findings(page).getByTestId('findings-filters')
 const toggle = (page: Page, id: string) => filters(page).locator(`button[data-filter="${id}"]`)
+/** The findings list opens on the open P0/P1; All shows every finding. */
+const showAll = (page: Page) => toggle(page, 'all').click()
 
 type Style = Record<string, string>
 type Box = { x: number; y: number; width: number; height: number }
@@ -90,8 +93,12 @@ test(`[scenario:revamp-run] The run page shows the run's tone on the identity li
   await expect(stage).toHaveAttribute('data-direction', 'LR')
   const fit = await stage.evaluate(element => ({ scroll: (element as unknown as { scrollWidth: number }).scrollWidth, client: (element as unknown as { clientWidth: number }).clientWidth }))
   expect(fit.scroll, 'the stage does not scroll sideways').toBeLessThanOrEqual(fit.client)
-  await expect(graphNode(page, 'integrate')).toBeInViewport()
   expect(await pageWidth(page)).toBeLessThanOrEqual(1440)
+  // The first view opens readable (60 % or more) and pans; "Fit the graph" puts the last step in the viewport.
+  expect(Number.parseInt((await page.getByTestId('stage-level').locator('span').first().innerText()).replace('%', ''), 10)).toBeGreaterThanOrEqual(60)
+  await page.getByRole('button', { name: 'Fit the graph' }).click()
+  await expect(graphNode(page, 'integrate')).toBeInViewport()
+  await expect(graphNode(page, 'challenge')).toBeInViewport()
 
   // Cards toned by status: the band in the tone, the status word on the tone's soft colour, the glyph repeats it; the legend.
   for (const id of ['challenge', 'verify_ui', 'integrate', 'review']) {
@@ -121,9 +128,13 @@ test(`[scenario:revamp-run] The run page shows the run's tone on the identity li
   await stepSheet(page).getByRole('button', { name: 'Close step details' }).click()
   await attach(page, testInfo, 'revamp-run')
 
-  // Narrower, the graph is fitted again: still left to right, the last step in view, the page never wider than the window.
+  // Narrower, the graph is placed again: still left to right, the page never wider than the window, and after "Fit the graph"
+  // the last step and the first are both in the viewport.
   await page.setViewportSize({ width: 1024, height: 900 })
   await expect(stage).toHaveAttribute('data-direction', 'LR')
+  const narrowFit = await stage.evaluate(element => ({ scroll: (element as unknown as { scrollWidth: number }).scrollWidth, client: (element as unknown as { clientWidth: number }).clientWidth }))
+  expect(narrowFit.scroll, 'the stage does not scroll sideways at 1024 px').toBeLessThanOrEqual(narrowFit.client)
+  await page.getByRole('button', { name: 'Fit the graph' }).click()
   await expect(graphNode(page, 'integrate')).toBeInViewport()
   await expect(graphNode(page, 'challenge')).toBeInViewport()
   expect(await pageWidth(page)).toBeLessThanOrEqual(1024)
@@ -190,6 +201,13 @@ test(`[scenario:revamp-review] The review node opens on four figures, findings a
   await page.setViewportSize({ width: 1440, height: 900 })
   await page.goto(revampUrl(RUN_REVAMP_BLOCKED, 'review'))
   await expect(nodeDetail(page)).toHaveAttribute('data-node-id', 'review')
+  // One findings list that opens on what blocks: the open P0/P1, with Open P0/P1 pressed; All shows the four findings.
+  await expect(cards(page)).toHaveCount(1)
+  await expect(toggle(page, 'blocking')).toHaveAttribute('aria-pressed', 'true')
+  await expect(toggle(page, 'all')).toHaveAttribute('aria-pressed', 'false')
+  await expect(findings(page)).toHaveAttribute('data-filters', 'blocking')
+  const blocking = cards(page).first()
+  await showAll(page)
   await expect(cards(page)).toHaveCount(4)
 
   // Four figures: blocking, open, per reviewer, per lane.
@@ -206,13 +224,14 @@ test(`[scenario:revamp-review] The review node opens on four figures, findings a
   expect(await attributes(perLane, 'data-lane')).toEqual(['ui', 'adapter'])
   expect(await attributes(perLane, 'data-count')).toEqual(['2', '2'])
 
-  // The figures open the page, then the blocking card (outside the findings), then the cards.
-  const blocking = page.getByTestId('blocking-finding')
-  await expect(blocking).toHaveCount(1)
+  // The figures open the page, then the findings list with the blocking card first, marked in place: there is no second list.
+  await expect(page.getByTestId('blocking-finding')).toHaveCount(0)
+  await expect(page.getByTestId('blocking-findings')).toHaveCount(0)
+  await expect(page.locator('[data-testid="finding"][data-blocking="true"]')).toHaveCount(1)
   await expect(blocking).toContainText(BLOCKED_FINDINGS.coverageUi)
-  await expect(findings(page).getByTestId('blocking-finding')).toHaveCount(0)
+  await expect(blocking.getByTestId('finding-blocks')).toHaveText('blocks integration')
   expect(await precedes(figures, blocking)).toBe(true)
-  expect(await precedes(blocking, cards(page).first())).toBe(true)
+  expect(await precedes(blocking, cards(page).nth(1))).toBe(true)
   expect((await box(blocking)).y).toBeLessThan(900)
 
   // Findings as cards: P1 first, then the P2s by lane (ui, adapter) and by declared reviewer, with every data attribute.
@@ -231,12 +250,12 @@ test(`[scenario:revamp-review] The review node opens on four figures, findings a
   await expect(cards(page).first().getByTestId('finding-worker')).toHaveText('ui')
   await expect(cards(page).first().getByTestId('finding-task-link')).toHaveAttribute('data-lane', 'ui')
 
-  // One filter row (no Reviewer and Group-by rows): each reviewer, each lane, Open only, with their counts.
+  // One filter row (no Reviewer and Group-by rows): All, Open P0/P1, a severity each, each reviewer, each lane, Open only, with their counts.
   await expect(page.getByTestId('group-by-disposition')).toHaveCount(0)
   await expect(page.getByTestId('filter-reviewer')).toHaveCount(0)
   await expect(findings(page).getByRole('group')).toHaveCount(1)
-  await expect(filters(page).locator('button')).toHaveText(['general 2', 'coverage 2', 'ui 2', 'adapter 2', 'Open only 3'])
-  for (const button of await filters(page).locator('button').all()) await expect(button).toHaveAttribute('aria-pressed', 'false')
+  await expect(filters(page).locator('button')).toHaveText(['All 4', 'Open P0/P1 1', 'P0 0', 'P1 1', 'P2 3', 'general 2', 'coverage 2', 'ui 2', 'adapter 2', 'Open only 3'])
+  for (const button of await filters(page).locator('button').all()) await expect(button).toHaveAttribute('aria-pressed', (await button.getAttribute('data-filter')) === 'all' ? 'true' : 'false')
   await expect(findings(page)).toHaveAttribute('data-filters', 'all')
 
   // A reviewer narrows; a second reviewer adds its own; a lane and Open only narrow further; together they can leave nothing.
@@ -262,8 +281,22 @@ test(`[scenario:revamp-review] The review node opens on four figures, findings a
   for (const id of ['reviewer:general', 'lane:adapter', 'open']) await toggle(page, id).click()
   await expect(cards(page)).toHaveCount(4)
   await expect(findings(page)).toHaveAttribute('data-filters', 'all')
-  // The blocking card does not move with the filters.
-  await expect(blocking).toHaveCount(1)
+  // Severities add up and narrow the other kinds; Open P0/P1 keeps the blocking finding wherever it is.
+  await toggle(page, 'severity:P2').click()
+  await expect(cards(page)).toHaveCount(3)
+  await toggle(page, 'severity:P1').click()
+  await expect(cards(page)).toHaveCount(4)
+  await toggle(page, 'severity:P1').click()
+  await toggle(page, 'severity:P2').click()
+  await toggle(page, 'blocking').click()
+  await expect(cards(page)).toHaveCount(1)
+  await expect(cards(page).first()).toHaveAttribute('data-blocking', 'true')
+  await toggle(page, 'reviewer:general').click()
+  await expect(cards(page)).toHaveCount(0)
+  await toggle(page, 'reviewer:general').click()
+  await toggle(page, 'blocking').click()
+  await expect(cards(page)).toHaveCount(4)
+  await expect(page.locator('[data-testid="finding"][data-blocking="true"]')).toHaveCount(1)
 
   // Reviewer cards follow the findings, one per reviewer in declared order, each with its verdict and counts.
   const reviewers = page.getByTestId('reviewer-entry')
@@ -283,7 +316,7 @@ test(`[scenario:revamp-review] The review node opens on four figures, findings a
   await expect(page.getByTestId('figure-blocking').locator('.ui-figure-value')).toHaveText('0')
   await expect(page.getByTestId('figure-blocking')).toHaveClass(/tone-ok/)
   await expect(page.getByTestId('figure-open').locator('.ui-figure-value')).toHaveText('1')
-  await expect(page.getByTestId('blocking-finding')).toHaveCount(0)
+  await expect(page.locator('[data-testid="finding"][data-blocking="true"]')).toHaveCount(0)
   await expect(cards(page)).toContainText([DONE_FINDINGS.coverageUi, DONE_FINDINGS.generalUi, DONE_FINDINGS.coverageAdapter])
   expect(await attributes(cards(page), 'data-disposition')).toEqual(['resolved', 'open', 'accepted'])
 
@@ -333,20 +366,24 @@ test(`[scenario:revamp-review] The review node opens on four figures, findings a
   }
   await expect(page.getByTestId('run-node-list').getByRole('link', { name: /^Verify .*, succeeded$/ }).first()).toBeVisible()
 
-  // The worker's figures: Files from its freeze (as many as its file rows), its completion and its questions.
+  // The worker's figures: Files from its freeze (as many as its file rows) and its questions.
   await page.goto(revampUrl(RUN_REVAMP_DONE, 'launch_ui'))
   const doneWorker = page.getByTestId('worker-figures')
   // ui froze three changed files (UI_CHANGED_FILES): the figure counts them, as the file rows list them.
   await expect(page.getByTestId('created-file')).toHaveCount(UI_CHANGED_FILES.length)
   await expect(doneWorker.getByTestId('figure-files').locator('.ui-figure-value')).toHaveText(String(UI_CHANGED_FILES.length))
   await expect(doneWorker.getByTestId('figure-files').locator('.ui-figure-label')).toHaveText('Files changed')
-  await expect(doneWorker.getByTestId('figure-completion').locator('.ui-figure-value')).toHaveText('completed')
-  await expect(doneWorker.getByTestId('figure-completion')).toHaveClass(/tone-ok/)
+  // Figures are numbers: the completion is a chip on the worker report's heading, not a tile.
+  await expect(doneWorker.getByTestId('figure-completion')).toHaveCount(0)
+  await expect(page.getByTestId('worker-completion').locator('.worker-report-head').getByTestId('report-completion')).toHaveText('completed')
+  await expect(page.getByTestId('report-completion')).toHaveClass(/tone-ok/)
   await page.goto(revampUrl(RUN_REVAMP_RUNNING, 'launch_adapter'))
   const worker = page.getByTestId('worker-figures')
   await expect(worker.getByTestId('figure-questions').locator('.ui-figure-value')).toHaveText('1 waiting')
   await expect(worker.getByTestId('figure-questions')).toHaveClass(/tone-warn/)
-  await expect(worker.getByTestId('figure-completion').locator('.ui-figure-value')).toHaveText('none yet')
+  await expect(worker.getByTestId('figure-completion')).toHaveCount(0)
+  await expect(page.getByTestId('report-completion')).toHaveText('none yet')
+  await expect(page.getByTestId('report-completion')).toHaveClass(/tone-idle/)
   // Nothing frozen yet: the Files figure says so instead of a count.
   await expect(worker.getByTestId('figure-files').locator('.ui-figure-value')).toHaveText('—')
   await expect(worker.getByTestId('figure-files').locator('.ui-figure-label')).toHaveText('Files (not frozen yet)')
@@ -375,6 +412,7 @@ test(`[scenario:revamp-review] The review node opens on four figures, findings a
   // At 390 px the cards stack, full width, and nothing scrolls sideways.
   await page.setViewportSize({ width: 390, height: 844 })
   await page.goto(revampUrl(RUN_REVAMP_BLOCKED, 'review'))
+  await showAll(page)
   await expect(cards(page)).toHaveCount(4)
   const first = await box(cards(page).first())
   const second = await box(cards(page).nth(1))
@@ -382,6 +420,170 @@ test(`[scenario:revamp-review] The review node opens on four figures, findings a
   expect(first.width).toBeGreaterThan(300)
   await expect.poll(() => pageWidth(page)).toBeLessThanOrEqual(390)
   await expectNoExecutionControls(page)
+})
+
+/** The sentences a seeded finding lacks, added in the browser to the recorded review so a card has a rest to fold (both phases). */
+const SECOND_SENTENCES = ' Anyone who guesses the room name can join as the owner. Require the code before the join succeeds.'
+
+test(`[scenario:review-one-list] The blocked review is one findings list that opens on the open P0/P1, with severity toggles, the blocking finding marked in place and said once, a card's head a sentence and the rest behind More, at normal weight and a readable measure (${phase})`, async ({ page }, testInfo) => {
+  await page.addInitScript(`(() => {
+    const original = window.fetch.bind(window)
+    const message = ${JSON.stringify(BLOCKED_FINDINGS.coverageUi)}
+    const extra = ${JSON.stringify(SECOND_SENTENCES)}
+    window.fetch = async (input, init) => {
+      const response = await original(input, init)
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+      if (!/\\/reviews\\/\\d+$/.test(new URL(url, window.location.href).pathname)) return response
+      const body = await response.clone().json()
+      const tweak = finding => (finding.message === message ? { ...finding, message: finding.message + extra } : finding)
+      body.findings = body.findings.map(tweak)
+      body.reviewers = body.reviewers.map(reviewer => ({ ...reviewer, findings: reviewer.findings.map(tweak) }))
+      return new Response(JSON.stringify(body), { status: response.status, headers: response.headers })
+    }
+  })()`)
+  await page.clock.install({ time: new Date(REVAMP_NOW) })
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.goto(revampUrl(RUN_REVAMP_BLOCKED, 'review'))
+  await expect(nodeDetail(page)).toHaveAttribute('data-node-id', 'review')
+
+  // One list: no separate "Blocks integration" list, no Blocking entry in the section index.
+  await expect(page.getByTestId('blocking-findings')).toHaveCount(0)
+  await expect(page.getByTestId('blocking-finding')).toHaveCount(0)
+  await expect(page.getByTestId('section-index').locator('a[data-section="blocking"]')).toHaveCount(0)
+  await expect(page.getByTestId('section-index').locator('a[data-section="review"]')).toContainText('1 open P0/P1')
+  await expect(findings(page).getByRole('heading', { name: 'Findings' })).toHaveCount(1)
+
+  // It opens filtered to the open P0/P1 with the toggle on; the filter row has the severity toggles beside the reviewer and lane toggles.
+  await expect(cards(page)).toHaveCount(1)
+  await expect(toggle(page, 'blocking')).toHaveText('Open P0/P1 1')
+  await expect(toggle(page, 'blocking')).toHaveAttribute('aria-pressed', 'true')
+  await expect(filters(page).locator('button')).toHaveText(['All 4', 'Open P0/P1 1', 'P0 0', 'P1 1', 'P2 3', 'general 2', 'coverage 2', 'ui 2', 'adapter 2', 'Open only 3'])
+  // The toggles combine: severities add up, a reviewer narrows; All shows every finding.
+  await showAll(page)
+  await expect(cards(page)).toHaveCount(4)
+  await toggle(page, 'severity:P2').click()
+  await expect(cards(page)).toHaveCount(3)
+  await toggle(page, 'reviewer:general').click()
+  await expect(cards(page)).toHaveCount(2)
+  await toggle(page, 'severity:P1').click()
+  await expect(cards(page)).toHaveCount(2)
+  await toggle(page, 'severity:P2').click()
+  await expect(cards(page)).toHaveCount(0)
+  await showAll(page)
+  await expect(cards(page)).toHaveCount(4)
+  await toggle(page, 'blocking').click()
+  await expect(cards(page)).toHaveCount(1)
+
+  // The blocking finding carries its chip in place, its message occurs once on the page, and the first sentence leads the head.
+  const card = cards(page).first()
+  await expect(card).toHaveAttribute('data-blocking', 'true')
+  await expect(card.getByTestId('finding-blocks')).toHaveText('blocks integration')
+  const occurrences = await page.evaluate(`(document.body.textContent ?? '').split(${JSON.stringify(BLOCKED_FINDINGS.coverageUi)}).length - 1`) as number
+  expect(occurrences).toBe(1)
+  const message = card.getByTestId('finding-message')
+  await expect(card.locator('.finding-card-head')).toContainText('P1 coverage ui open blocks integration')
+  await expect(message.locator('.finding-rest')).toBeHidden()
+  await expect(message).toContainText(BLOCKED_FINDINGS.coverageUi)
+  const top = (await box(card)).y
+  testInfo.annotations.push({ type: 'first-finding-top', description: String(top) })
+  expect(top).toBeLessThan(900)
+
+  // More expands the rest, the requirement and the fields; Less folds them again.
+  const more = card.getByTestId('finding-more')
+  await expect(more).toHaveText('More')
+  await expect(more).toHaveAttribute('aria-expanded', 'false')
+  await more.click()
+  await expect(more).toHaveText('Less')
+  await expect(more).toHaveAttribute('aria-expanded', 'true')
+  await expect(message.locator('.finding-rest')).toBeVisible()
+  await expect(message).toContainText('Require the code before the join succeeds.')
+  await expect(card.getByTestId('finding-requirement')).toBeVisible()
+  await expect(card.getByTestId('finding-task-link')).toBeVisible()
+  await more.click()
+  await expect(message.locator('.finding-rest')).toBeHidden()
+  await expect(card.getByTestId('finding-requirement')).toBeHidden()
+
+  // Normal weight everywhere in a card, and every message (its rest opened) at a readable measure at 1920 px.
+  await showAll(page)
+  await page.setViewportSize({ width: 1920, height: 1080 })
+  for (const button of await page.getByTestId('finding-more').all()) await button.click()
+  const zero = await page.evaluate(`(() => {
+    const first = document.querySelector('.finding-message')
+    const probe = document.createElement('span')
+    probe.textContent = '0'
+    probe.style.cssText = 'position:absolute;visibility:hidden;white-space:pre'
+    first.appendChild(probe)
+    const width = probe.getBoundingClientRect().width
+    probe.remove()
+    return width
+  })()`) as number
+  expect(zero).toBeGreaterThan(0)
+  expect(await page.locator('.finding-message').count()).toBe(4)
+  for (const message of await page.locator('.finding-message').all()) {
+    expect((await style(message, 'fontWeight')).fontWeight).toBe('400')
+    expect((await box(message)).width).toBeLessThanOrEqual(zero * 70 + 1)
+  }
+  await expectNoExecutionControls(page)
+  await page.evaluate('window.scrollTo(0, 0)')
+  await attach(page, testInfo, 'review-one-list')
+})
+
+test(`[scenario:node-compact] Node pages reach their content: no tabs (an Assignment link in the one-line run bar), the step strip the only sticky band, the first finding in the first screen at 1440x900, the worker's figures on one row with the completion as a chip on the report (${phase})`, async ({ page }, testInfo) => {
+  test.slow()
+  await page.clock.install({ time: new Date(REVAMP_NOW) })
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.goto(revampUrl(RUN_REVAMP_BLOCKED, 'review'))
+  await expect(nodeDetail(page)).toHaveAttribute('data-node-id', 'review')
+  await expect(cards(page)).toHaveCount(1)
+
+  // No tabs on a node page; the run bar carries an Assignment link and stays one line with its status, chip and switch.
+  await expect(page.getByRole('tablist')).toHaveCount(0)
+  await expect(page.getByTestId('tab-run')).toHaveCount(0)
+  const bar = page.locator('.run-bar')
+  expect((await box(bar)).height).toBeLessThanOrEqual(48)
+  for (const id of ['run-status', 'run-status-meaning', 'live-status', 'time-zone-toggle']) await expect(bar.getByTestId(id)).toBeVisible()
+  const assignment = bar.getByTestId('tab-assignment')
+  await expect(assignment).toHaveText('Assignment')
+  await expect(assignment).toHaveAttribute('href', `${revampUrl(RUN_REVAMP_BLOCKED)}/assignment`)
+
+  // Exactly one sticky band: the step strip; the section index scrolls with the page.
+  const sticky = await page.locator('[data-testid="run-view"] *').evaluateAll(elements => elements
+    .filter(element => (globalThis as unknown as { getComputedStyle: (node: unknown) => { position: string } }).getComputedStyle(element).position === 'sticky')
+    .map(element => (element as unknown as { className: string }).className))
+  expect(sticky).toHaveLength(1)
+  expect(sticky[0]).toContain('step-strip')
+  await expect(page.getByTestId('run-node-list')).toBeVisible()
+
+  // The first finding is in the first screen.
+  const first = await box(cards(page).first())
+  expect(first.y).toBeGreaterThan(0)
+  expect(first.y).toBeLessThan(900)
+  await attach(page, testInfo, 'node-compact')
+
+  // A worker: its figure tiles share one row, there is no completion tile, and the report's heading carries the completion chip.
+  await page.goto(revampUrl(RUN_REVAMP_DONE, 'launch_ui'))
+  const tiles = page.getByTestId('worker-figures').locator('.ui-figure')
+  await expect(tiles.first()).toBeVisible()
+  expect(await tiles.count()).toBeGreaterThanOrEqual(2)
+  const tops = (await tiles.all()).map(async tile => Math.round((await box(tile)).y))
+  expect(new Set(await Promise.all(tops)).size).toBe(1)
+  await expect(page.getByTestId('figure-completion')).toHaveCount(0)
+  await expect(page.getByTestId('worker-completion').locator('.worker-report-head').getByTestId('report-completion')).toHaveText('completed')
+  await expect(page.getByTestId('report-completion')).toHaveClass(/\btone-ok\b/)
+
+  // The Assignment link opens the Assignment view, which keeps its tablist.
+  await bar.getByTestId('tab-assignment').click()
+  await expect(page).toHaveURL(new RegExp('/assignment$'))
+  await expect(page.getByRole('tablist', { name: 'Run views' })).toHaveCount(1)
+
+  // At 390 px a node page has no tabs and does not scroll sideways.
+  await page.setViewportSize({ width: 390, height: 844 })
+  for (const [runId, nodeId] of [[RUN_REVAMP_BLOCKED, 'review'], [RUN_REVAMP_DONE, 'launch_ui']] as const) {
+    await page.goto(revampUrl(runId, nodeId))
+    await expect(nodeDetail(page)).toHaveAttribute('data-node-id', nodeId)
+    await expect(page.getByRole('tablist')).toHaveCount(0)
+    await expect.poll(() => pageWidth(page)).toBeLessThanOrEqual(390)
+  }
 })
 
 /**
@@ -494,7 +696,7 @@ test(`The run and node pages' identity line, live dock, step cards, step sheet, 
     { url: revampUrl(RUN_REVAMP_RUNNING), ready: async page => { await expect(now(page)).toHaveAttribute('data-situation', 'question') }, roots: ['[data-testid="run-now"] .run-now-headline', '[data-testid="live-dock-bar"]', '[data-testid="live-dock-events"]', '[data-testid="workflow-graph"] [data-graph-node]'] },
     // The step sheet of the blocked review: its facts, reviewers, findings with their severity chips, and events.
     { url: revampUrl(RUN_REVAMP_BLOCKED), ready: async page => { await expect(now(page)).toHaveAttribute('data-situation', 'review_blocked'); await openStepSheet(page, 'review') }, roots: ['[data-testid="node-sheet"] .sh-head', '[data-testid="sheet-facts"]', '[data-testid="sheet-reviewers"]', '[data-testid="sheet-findings"]', '[data-testid="sheet-events"]'] },
-    { url: revampUrl(RUN_REVAMP_BLOCKED, 'review'), ready: async page => { await expect(cards(page)).toHaveCount(4) }, roots: ['[data-testid="review-figures"] .ui-figure', '[data-testid="finding"] .finding-card-head', '[data-testid="findings-filters"] button', '[data-testid="reviewer-entry"]', '[data-testid="run-node-list"] .step-chip', '[data-testid="blocking-finding"]'] },
+    { url: revampUrl(RUN_REVAMP_BLOCKED, 'review'), ready: async page => { await showAll(page); await expect(cards(page)).toHaveCount(4) }, roots: ['[data-testid="review-figures"] .ui-figure', '[data-testid="finding"] .finding-card-head', '[data-testid="finding"] .finding-message', '[data-testid="finding-more"]', '[data-testid="findings-filters"] button', '[data-testid="reviewer-entry"]', '[data-testid="run-node-list"] .step-chip', '[data-testid="finding-blocks"]'] },
     { url: revampUrl(RUN_REVAMP_DONE, 'verify_ui'), ready: async page => { await expect(page.getByTestId('checks-list').locator('.check-exit')).toHaveCount(3) }, roots: ['[data-testid="verify-figures"] .ui-figure', '.gate-line', '[data-testid="checks-list"] .check-exit', '[data-testid="run-node-list"] .step-chip'] },
     // A failed gate (ux-verify's rejected checks): the fail-toned gate line, rejected rows on --fail-soft with their reasons.
     { url: `${runUrl(RUN_REJECTED_CHECKS, 'verify_ui', UX_VERIFY_WORKFLOW_ID)}/attempts/1`, ready: async page => { await expect(page.getByTestId('checks-list').locator('.check-reasons')).toHaveCount(2) }, roots: ['[data-testid="worker-error"] .gate-line', '[data-testid="checks-list"] .check-exit', '[data-testid="checks-list"] .check-reasons', '[data-testid="checks-list"] .check-rejected .check-head'] },
@@ -542,7 +744,7 @@ test(`Every button on the run and node pages is on the read-only allow-list and 
   await page.clock.install({ time: new Date(REVAMP_NOW) })
   await page.setViewportSize({ width: 1440, height: 900 })
   const ids = ['general', 'coverage', 'ui', 'adapter']
-  const allowed = new RegExp(`^(Copy|Show contents|Hide contents|Show lines|More|Less|Run|Assignment|Local|UTC|Rendered|Source|Close|All \\d+|Show all \\d+|#\\d+|message|Open only \\d+|Legend|Zoom out|Zoom in|Fit the graph|Close step details|(?:${ids.join('|')}) \\d+)$`)
+  const allowed = new RegExp(`^(Copy|Show contents|Hide contents|Show lines|More|Less|Run|Assignment|Local|UTC|Rendered|Source|Close|All \\d+|Show all \\d+|#\\d+|message|Open only \\d+|Open P0\\/P1 \\d+|P[012] \\d+|Legend|Zoom out|Zoom in|Fit the graph|Show in graph|Show command|Hide command|Close step details|(?:${ids.join('|')}) \\d+)$`)
   const command = /[/\\$`]|\b(npm|npx|git|workflow|node|python|bash)\b/
   const seen = new Set<string>()
   const check = async (where: string) => {
@@ -559,7 +761,8 @@ test(`Every button on the run and node pages is on the read-only allow-list and 
       if (text === '' && image) continue
       seen.add(text)
       expect(text, `${where}: button "${text}"`).toMatch(allowed)
-      expect(text, `${where}: button "${text}" holds no path or command`).not.toMatch(command)
+      // The open P0/P1 toggle's label names a severity range, not a path; its count is the only variable part.
+      expect(text.replace(/^Open P0\/P1 (\d+)$/, 'Open blocking $1'), `${where}: button "${text}" holds no path or command`).not.toMatch(command)
     }
     await expectNoExecutionControls(page)
   }
@@ -590,6 +793,18 @@ test(`Every button on the run and node pages is on the read-only allow-list and 
     await openStepSheet(page, nodeId!)
     expect(page.url()).toBe(runPage)
   }
+  // "Show in graph" only centres the step and opens its sheet; "Open <step> ›" is the link that leaves the page.
+  await stepSheet(page).getByRole('button', { name: 'Close step details' }).click()
+  await liveDock(page).getByRole('button', { name: 'Show in graph' }).click()
+  await expect(stepSheet(page)).toBeVisible()
+  expect(page.url()).toBe(runPage)
+  await check(`${RUN_REVAMP_BLOCKED} (Show in graph, the sheet open)`)
+  // The Sessions table's toggle on the run page of a run with sessions: "Show command" then "Hide command", both on the list.
+  await page.goto(runUrl(RUN_SESSIONS, undefined, UX_SESSIONS_WORKFLOW_ID))
+  await expect(page.getByTestId('sessions-section')).toBeVisible()
+  await check(`${RUN_SESSIONS} (Sessions table)`)
+  await page.getByTestId('session-resume-toggle').first().click()
+  await check(`${RUN_SESSIONS} (a command shown)`)
   // Every step of the finished run, the blocked review and the waiting worker.
   await openRun(page, revampUrl(RUN_REVAMP_DONE), 'succeeded')
   const steps = await attributes(page.getByTestId('workflow-graph').locator('[data-graph-node]'), 'data-graph-node')
@@ -600,13 +815,16 @@ test(`Every button on the run and node pages is on the read-only allow-list and 
     await check(`${RUN_REVAMP_DONE}/${nodeId}`)
   }
   await page.goto(revampUrl(RUN_REVAMP_BLOCKED, 'review'))
-  await expect(cards(page)).toHaveCount(4)
   // The lane toggles and counts follow the run's inputs: wait for the whole row as revamp-review reads it.
-  await expect(filters(page).locator('button')).toHaveText(['general 2', 'coverage 2', 'ui 2', 'adapter 2', 'Open only 3'])
+  await expect(filters(page).locator('button')).toHaveText(['All 4', 'Open P0/P1 1', 'P0 0', 'P1 1', 'P2 3', 'general 2', 'coverage 2', 'ui 2', 'adapter 2', 'Open only 3'])
+  await expect(cards(page)).toHaveCount(1)
+  await check(`${RUN_REVAMP_BLOCKED}/review (opening on the open P0/P1, a finding's rest folded)`)
+  await showAll(page)
+  await expect(cards(page)).toHaveCount(4)
   await check(`${RUN_REVAMP_BLOCKED}/review`)
   await page.goto(revampUrl(RUN_REVAMP_RUNNING, 'launch_adapter'))
   await expect(page.getByTestId('worker-figures')).toBeVisible()
   await check(`${RUN_REVAMP_RUNNING}/launch_adapter`)
   // The new run-page tools and the filter row were among the buttons read.
-  for (const text of ['Legend', 'Zoom in', 'Fit the graph', 'Zoom out', 'Close step details', 'Open only 3', 'general 2', 'coverage 2', 'ui 2', 'adapter 2']) expect(seen.has(text), text).toBe(true)
+  for (const text of ['Legend', 'Zoom in', 'Fit the graph', 'Zoom out', 'Close step details', 'Show in graph', 'Show command', 'Hide command', 'All 4', 'Open P0/P1 1', 'P0 0', 'P1 1', 'P2 3', 'Open only 3', 'general 2', 'coverage 2', 'ui 2', 'adapter 2', 'More']) expect(seen.has(text), text).toBe(true)
 })

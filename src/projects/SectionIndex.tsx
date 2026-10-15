@@ -25,7 +25,7 @@ export function NodeSection({ sectionKey, title, labelledBy, className, testId, 
 /**
  * The section index of a node page (docs/PRD_VIEWER_UX.md 4.4): in-page links to its sections with their counts. Only
  * sections with something in them are listed, History last; `children` follow the index on its row (the link to the
- * worker's report). It sticks under the step strip once the page scrolls, and a link scrolls its section into view and
+ * worker's report). It scrolls with the page, and a link scrolls its section into view and
  * moves the focus to its heading without touching the path.
  */
 export function SectionIndex({ label, sections, children }: { label: string; sections: SectionEntry[]; children?: ReactNode }) {
@@ -45,8 +45,8 @@ export function SectionIndex({ label, sections, children }: { label: string; sec
   const open = (key: string) => {
     const target = document.getElementById(sectionId(key))
     if (!target) return
-    // Below the sticky strip and index, which would otherwise cover the section's heading.
-    const covered = top + (row.current?.offsetHeight ?? 0) + 8
+    // Below the sticky strip, which would otherwise cover the section's heading.
+    const covered = top + 8
     window.scrollTo(0, Math.max(0, target.getBoundingClientRect().top + window.scrollY - covered))
     const heading = target.querySelector<HTMLElement>('h4, h5')
     if (heading) {
@@ -55,7 +55,7 @@ export function SectionIndex({ label, sections, children }: { label: string; sec
     }
   }
   return (
-    <div ref={row} className="section-index" style={{ top }}>
+    <div ref={row} className="section-index">
       <nav aria-label={`Sections of ${label}`} data-testid="section-index">
         <ul className="section-index-list">
           {sections.map(section => (
@@ -73,6 +73,7 @@ export function SectionIndex({ label, sections, children }: { label: string; sec
               >
                 {section.label}
                 {section.count !== undefined && <>{' '}<span className="section-index-count">{section.count}</span></>}
+                {section.note !== undefined && <>{' '}<span className="section-index-note">· {section.note}</span></>}
               </a>
             </li>
           ))}

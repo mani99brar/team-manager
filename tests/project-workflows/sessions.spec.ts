@@ -10,7 +10,8 @@
 import { test, expect, type Page } from '@playwright/test'
 import type { SessionRow } from '../../contracts/projects/sessions.ts'
 import { costText, durationText, groupSessions, totalsText } from '../../src/projects/sessions/model.ts'
-import { UNEXPOSED_PROJECT } from './fixtures.ts'
+import { RUN_SUCCEEDED, UNEXPOSED_PROJECT } from './fixtures.ts'
+import { RUN_IDENTICAL, UX_RUN_WORKFLOW_ID } from './fixtures/ux-run.ts'
 import {
   LANE_FINDINGS, NIGHT, NO_FIX_REASON, ROUND2_FINDINGS, RUN_SESSIONS, RUN_SESSIONS_HIDDEN, RUN_SESSIONS_OLDER, SESSION, sessionsPayload,
   UX_SESSIONS_HIDDEN_WORKFLOW_ID, UX_SESSIONS_WORKFLOW_ID,
@@ -178,13 +179,14 @@ test(`[scenario:sessions-reviewer] The 'Reviewer · general' page shows its sess
   await renderedText(nodeDetail(page))
 })
 
-test(`[scenario:sessions-list] The run page's Sessions section lists every seeded session in start order grouped by role, each row with label, linked node, model, status, started, duration, cost and session id, and the totals by value; Claude rows offer the resume command and pi rows do not; no absolute path is rendered (${phase})`, async ({ page }, testInfo) => {
-  await page.goto(runPage(RUN_SESSIONS))
+/** The Sessions table by value: every session of the payload in its order, grouped by role, one line each; Claude rows offer the command, others do not. */
+async function expectSessionsTable(page: Page, rowHeightMax: number | null) {
   const section = page.getByTestId('sessions-section')
   await expect(section).toBeVisible()
   await expect(section.getByTestId('sessions-totals')).toHaveText(totalsText(PAYLOAD.totals))
   const groups = groupSessions(PAYLOAD)
   await expect(section.locator('[data-testid^="session-group-"]')).toHaveCount(groups.length)
+  let claudeRows = 0
   for (const group of groups) {
     const rows = section.getByTestId(`session-group-${group.role}`).getByTestId('session-row')
     // Every session of the role, in the payload's start order.
@@ -201,16 +203,179 @@ test(`[scenario:sessions-list] The run page's Sessions section lists every seede
       await expect(line.locator('[data-fact="duration"]')).toHaveText(durationText(row.duration_seconds) ?? 'duration not recorded')
       await expect(line.locator('[data-fact="cost"]')).toHaveText(costText(row.cost_usd, row.cost_kind))
       await expect(line.locator('[data-fact="session"]')).toHaveText(row.session_id ?? 'no session id')
-      // Claude Code sessions offer the resume command; pi and night-shift rows never do.
+      if (rowHeightMax !== null) expect((await line.boundingBox())!.height, `${row.label} is one line`).toBeLessThanOrEqual(rowHeightMax)
+      // Claude Code sessions offer one Copy and a Show command toggle; pi and night-shift rows never do.
       await expect(line.getByTestId('session-resume')).toHaveCount(row.resume ? 1 : 0)
-      if (row.resume) await expect(line.getByTestId('session-resume-command')).toHaveText(row.resume.command)
+      await expect(line.getByRole('button')).toHaveCount(row.resume ? 2 : 0)
+      if (row.resume) {
+        claudeRows += 1
+        await expect(line.getByRole('button', { name: /^Copy/ })).toHaveCount(1)
+        await expect(line.getByTestId('session-resume-command')).toHaveCount(0)
+        const toggle = line.getByTestId('session-resume-toggle')
+        await expect(toggle).toHaveText('Show command')
+        await expect(toggle).toHaveAttribute('aria-expanded', 'false')
+        await toggle.click()
+        await expect(toggle).toHaveText('Hide command')
+        await expect(line.getByTestId('session-resume-command')).toHaveText(row.resume.command)
+        if (row.resume.dir === null) await expect(line.getByTestId('session-resume-note')).toHaveText("run it in the session's worktree")
+        await toggle.click()
+        await expect(line.getByTestId('session-resume-command')).toHaveCount(0)
+      }
     }
   }
+  expect(claudeRows, 'the payload has Claude rows').toBeGreaterThan(0)
   await expect(section.getByTestId('session-group-lane_reviewer').getByTestId('session-resume')).toHaveCount(0)
+  return section
+}
+
+test(`[scenario:sessions-list] The run page's Sessions table lists every seeded session in start order grouped by role, each row with label, linked node, model, status, started, duration, cost and session id, and the totals by value; Claude rows offer Copy and a Show command toggle and pi rows do not; no absolute path is rendered (${phase})`, async ({ page }, testInfo) => {
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.goto(runPage(RUN_SESSIONS))
+  const section = await expectSessionsTable(page, 56)
   // The live dock's Spent reads the same totals, never "not recorded" beside them.
   await expect(page.getByTestId('run-spent')).toContainText('reported by Claude')
   await renderedText(section)
   await attach(page, testInfo, 'sessions-list')
+})
+
+const stageBottom = async (page: Page) => { const stage = (await page.getByTestId('run-stage').boundingBox())!; return stage.y + stage.height }
+
+test(`[scenario:sessions-cue] A one-line cue directly under the stage reads "Sessions · <n> · <Spent> ↓" and is a link that scrolls to the Sessions heading and focuses it; the Sessions table is by value, one line a row; a run without sessions has no cue and a full-height stage (${phase})`, async ({ page }, testInfo) => {
+  test.slow()
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.goto(runPage(RUN_SESSIONS))
+  const cue = page.getByTestId('sessions-cue')
+  await expect(cue).toBeVisible()
+  const count = groupSessions(PAYLOAD).reduce((sum, group) => sum + group.rows.length, 0)
+  const spent = (await page.getByTestId('run-spent').innerText()).trim()
+  await expect(cue).toHaveText(`Sessions · ${count} · ${spent} ↓`)
+  expect(spent, 'metered and covered apart, never one summed figure').toMatch(/reported by Claude · .* covered$/)
+  // A link, not a button; a sibling right under the stage, neither inside the stage nor the dock.
+  expect(await cue.evaluate(element => element.tagName)).toBe('A')
+  await expect(page.getByRole('button', { name: /^Sessions ·/ })).toHaveCount(0)
+  expect(await page.getByTestId('run-stage').evaluate(stage => stage.nextElementSibling?.getAttribute('data-testid'))).toBe('sessions-cue')
+  expect(await cue.evaluate(element => element.closest('[data-testid=run-stage], [data-testid=live-dock]') === null)).toBe(true)
+  // One line, in the first screen; the stage ends above it.
+  const cueBox = (await cue.boundingBox())!
+  expect(cueBox.height).toBeLessThanOrEqual(40)
+  expect(cueBox.y + cueBox.height).toBeLessThanOrEqual(900)
+  expect(await stageBottom(page)).toBeLessThanOrEqual(cueBox.y + 0.5)
+  expect((await page.getByTestId('run-stage').boundingBox())!.height).toBeGreaterThanOrEqual(420)
+  await attach(page, testInfo, 'sessions-cue')
+
+  // Activating it from the keyboard scrolls the Sessions heading into view and focuses it; the address and the history stay.
+  const [url, length] = [page.url(), await page.evaluate('history.length') as number]
+  await cue.focus()
+  await page.keyboard.press('Enter')
+  const heading = page.getByRole('heading', { name: 'Sessions', exact: true })
+  await expect(heading).toBeFocused()
+  await expect(heading).toBeInViewport()
+  expect(page.url()).toBe(url)
+  expect(await page.evaluate('history.length')).toBe(length)
+
+  // The table, by value, each row at most 56 px tall.
+  await expectSessionsTable(page, 56)
+
+  // A run without sessions has no cue and its stage keeps the whole window.
+  await page.goto(runUrl(RUN_IDENTICAL, undefined, UX_RUN_WORKFLOW_ID))
+  await expect(page.getByTestId('run-stage')).toBeVisible()
+  await expect(page.getByTestId('run-now')).toHaveAttribute('data-situation', /.+/)
+  await expect(page.getByTestId('sessions-cue')).toHaveCount(0)
+  await expect(page.getByTestId('sessions-section')).toHaveCount(0)
+  await expect.poll(() => stageBottom(page)).toBeGreaterThanOrEqual(892)
+  expect(await stageBottom(page)).toBeLessThanOrEqual(900)
+})
+
+test(`The Sessions cue follows the payload: absent while it is unread, present once it lists sessions with the stage giving up its line, and re-measured on a resize; on a phone it is a tall target (${phase})`, async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 })
+  let release: () => void = () => {}
+  const gate = new Promise<void>(resolve => { release = resolve })
+  await page.route(url => url.pathname.endsWith(`/runs/${RUN_SESSIONS}/sessions`), async route => {
+    await gate
+    await route.fallback()
+  })
+  await page.goto(runPage(RUN_SESSIONS))
+  await expect(page.getByTestId('run-stage')).toBeVisible()
+  await expect(page.getByTestId('sessions-cue')).toHaveCount(0)
+  await expect.poll(() => stageBottom(page)).toBeGreaterThanOrEqual(892)
+  release()
+  const cue = page.getByTestId('sessions-cue')
+  await expect(cue).toBeVisible()
+  await expect.poll(async () => (await stageBottom(page)) <= (await cue.boundingBox())!.y + 0.5).toBe(true)
+  // A resize re-measures the stage under the cue.
+  await page.setViewportSize({ width: 1440, height: 700 })
+  await expect.poll(async () => { const box = (await cue.boundingBox())!; return box.y + box.height }).toBeLessThanOrEqual(700)
+  expect(await stageBottom(page)).toBeLessThanOrEqual((await cue.boundingBox())!.y + 0.5)
+  expect((await cue.boundingBox())!.height).toBeLessThanOrEqual(40)
+  // At 1024 px the cue is still one line.
+  await page.setViewportSize({ width: 1024, height: 900 })
+  await expect.poll(async () => (await cue.boundingBox())!.height).toBeLessThanOrEqual(40)
+  // On a phone the cue is a tall target.
+  await page.setViewportSize({ width: 390, height: 844 })
+  await expect.poll(async () => (await cue.boundingBox())!.height).toBeGreaterThanOrEqual(44)
+})
+
+test(`An operator's Fit or zoom is kept when the sessions arrive and when a scrollbar-sized width change follows; a width change of 24 px or more re-fits it (${phase})`, async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 })
+  let release: () => void = () => {}
+  const gate = new Promise<void>(resolve => { release = resolve })
+  await page.route(url => url.pathname.endsWith(`/runs/${RUN_SESSIONS}/sessions`), async route => {
+    await gate
+    await route.fallback()
+  })
+  await page.goto(runPage(RUN_SESSIONS))
+  await expect(card(page, 'lane-review-server-1')).toHaveCount(1)
+  await expect(page.getByTestId('sessions-cue')).toHaveCount(0)
+  const world = page.getByTestId('run-stage').locator('.sb-world')
+  await page.getByRole('button', { name: 'Fit the graph' }).click()
+  for (let step = 0; step < 6 && (await world.getAttribute('data-level')) !== '0'; step++) {
+    await page.getByRole('button', { name: 'Zoom out' }).click()
+  }
+  await expect(world).toHaveAttribute('data-level', '0')
+  const transform = await world.evaluate(element => element.getAttribute('style'))
+  release()
+  await expect(page.getByTestId('sessions-cue')).toBeVisible()
+  const kept = async () => {
+    const start = Date.now()
+    while (Date.now() - start < 1000) {
+      expect(await world.getAttribute('data-level')).toBe('0')
+      expect(await world.evaluate(element => element.getAttribute('style'))).toBe(transform)
+      await page.waitForTimeout(100)
+    }
+  }
+  await kept()
+  // A scrollbar appearing is about 15 px: the operator's view stays, narrowing and widening back.
+  await page.setViewportSize({ width: 1425, height: 900 })
+  await kept()
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await kept()
+  // A real width change re-fits it.
+  await page.setViewportSize({ width: 1380, height: 900 })
+  await expect.poll(() => world.evaluate(element => element.getAttribute('style'))).not.toBe(transform)
+})
+
+test(`At the overview of the sessions run, every chip label, the projected reviewer, panel and lane-review cards included, is whole on at most two lines (${phase})`, async ({ page }) => {
+  for (const width of [1440, 1024]) {
+    await page.setViewportSize({ width, height: 900 })
+    await page.goto(runPage(RUN_SESSIONS))
+    await expect(card(page, 'lane-review-server-1')).toHaveCount(1)
+    await page.getByRole('button', { name: 'Fit the graph' }).click()
+    // The fit may land at the standard level on a graph this size: zoom out until the stage is at the overview.
+    for (let step = 0; step < 6 && (await page.getByTestId('stage-level').getAttribute('data-level')) !== '0'; step++) {
+      await page.getByRole('button', { name: 'Zoom out' }).click()
+    }
+    await expect(page.getByTestId('run-stage').locator('.sb-world')).toHaveAttribute('data-level', '0')
+    const chips = await page.locator('[data-chip-label]').evaluateAll(labels => labels.map(label => {
+      const style = (globalThis as unknown as { getComputedStyle: (node: unknown) => { lineHeight: string; fontSize: string } }).getComputedStyle(label.parentElement!)
+      const lineHeight = Number.parseFloat(style.lineHeight) || Number.parseFloat(style.fontSize) * 1.15
+      return { text: label.textContent ?? '', cut: label.scrollWidth > label.clientWidth, lines: label.clientHeight / lineHeight }
+    }))
+    expect(chips.length).toBeGreaterThan(8)
+    for (const chip of chips) {
+      expect(chip.cut, `${width} px: "${chip.text}" is not cut`).toBe(false)
+      expect(chip.lines, `${width} px: "${chip.text}" is on at most two lines`).toBeLessThanOrEqual(2.2)
+    }
+  }
 })
 
 test(`[scenario:sessions-panel] The Panel page shows the providers with model, status, cost and findings; the approval page the held night-shift decision (kind, each provider's option, text, confidence word and needs-the-operator, agreement, 'Jev not called', 'Held: <reason>'); the challenge page the executed one with its redacted command; another run's record never shows; the run page's count links to them (${phase})`, async ({ page }, testInfo) => {
@@ -324,4 +489,53 @@ test(`[scenario:sessions-phone] At 390 px the reviewer, panel and lane-review ca
   await page.goto(nodePage(RUN_SESSIONS, 'challenge'))
   await minHeight(page.getByTestId('session-section'))
   await noSideways()
+})
+
+test(`[scenario:reviewer-verdict] A reviewer's page leads with its verdict ('Blocked · round 2 · 2 open P1') and shows the session's outcome as neutral metadata; an approving reviewer leads with 'Approved · round 2'; the step strip tones each reviewer chip by its verdict and agrees with the graph; a worker still reads 'not workflow completion' (${phase})`, async ({ page }, testInfo) => {
+  test.slow()
+  await page.setViewportSize({ width: 1440, height: 900 })
+  const lead = page.getByTestId('node-verdict')
+  const chip = (id: string) => page.getByTestId('run-node-list').locator(`li[data-node-id="${id}"]`)
+
+  await page.goto(nodePage(RUN_SESSIONS, 'reviewer-general'))
+  await expect(nodeDetail(page)).toHaveAttribute('data-node-id', 'reviewer-general')
+  await expect(lead).toHaveText('Blocked · round 2 · 2 open P1')
+  await expect(lead).toHaveAttribute('data-verdict', 'blocked')
+  await expect(page.getByTestId('node-status-meaning')).toHaveText('Blocked · round 2 · 2 open P1 · session succeeded')
+  await expect(page.getByTestId('node-verdict-outcome')).toHaveText('· session succeeded')
+  await expect(page.getByTestId('node-verdict-outcome')).toHaveClass(/projects-muted/)
+  await expect(page.getByTestId('node-header')).not.toContainText('This step completed.')
+  // The step strip: each reviewer chip carries the verdict and its tone; the li keeps the step's own status.
+  await expect(chip('reviewer-general')).toHaveAttribute('data-status', 'succeeded')
+  await expect(chip('reviewer-general').locator('.step-chip')).toHaveAttribute('data-verdict', 'blocked')
+  await expect(chip('reviewer-general').locator('.step-chip')).toHaveClass(/\btone-fail\b/)
+  await expect(chip('reviewer-coverage').locator('.step-chip')).toHaveAttribute('data-verdict', 'blocked')
+  await expect(chip('reviewer-coverage').locator('.step-chip')).toHaveClass(/\btone-fail\b/)
+  await expect(chip('reviewer-critique')).toHaveAttribute('data-status', 'succeeded')
+  await expect(chip('reviewer-critique').locator('.step-chip')).toHaveAttribute('data-verdict', 'approved')
+  await expect(chip('reviewer-critique').locator('.step-chip')).toHaveClass(/\btone-ok\b/)
+  await attach(page, testInfo, 'reviewer-verdict')
+
+  await page.goto(nodePage(RUN_SESSIONS, 'reviewer-coverage'))
+  await expect(lead).toHaveText('Late, blocked · round 2 · 1 open P1')
+  await page.goto(nodePage(RUN_SESSIONS, 'reviewer-critique'))
+  await expect(lead).toHaveText('Approved · round 2')
+  await expect(lead).toHaveAttribute('data-verdict', 'approved')
+  await expect(page.getByTestId('node-verdict-outcome')).toHaveText('· session succeeded')
+  await expect(page.getByTestId('node-header')).not.toContainText('This step completed.')
+
+  // The combined review leads with its verdict as well.
+  await page.goto(nodePage(RUN_SESSIONS, 'review'))
+  await expect(lead).toHaveText('Blocked · round 2 · 3 open P1')
+  await expect(page.getByTestId('node-header')).not.toContainText('This step completed.')
+
+  // The graph agrees with the strip on each reviewer's tone.
+  await page.goto(runPage(RUN_SESSIONS))
+  for (const id of ['reviewer-general', 'reviewer-coverage']) await expect(card(page, id)).toHaveClass(/\btone-fail\b/)
+  await expect(card(page, 'reviewer-critique')).toHaveClass(/\btone-ok\b/)
+
+  // A worker keeps its wording.
+  await page.goto(runUrl(RUN_SUCCEEDED, 'launch_adapter'))
+  await expect(page.getByTestId('node-status-meaning')).toContainText('not workflow completion')
+  await expect(page.getByTestId('node-verdict')).toHaveCount(0)
 })

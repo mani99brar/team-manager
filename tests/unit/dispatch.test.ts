@@ -5,16 +5,21 @@
  * origin state.
  */
 import { describe, test } from 'node:test'
+import { classifyRuns } from '../../src/projects/lists.ts'
+import { featureOpen, orderFeatureRuns, orderFeatures } from '../../src/projects/dispatch/projectModel.ts'
+import { runWhen } from '../../src/projects/dispatch/stops.ts'
 import assert from 'node:assert/strict'
-import { CHART_COLUMNS, PHASE_SHORT, PHASES, phaseOf } from '../../src/projects/dispatch/phases.ts'
+import { CHART_COLUMNS, endedText, PHASE_SHORT, PHASES, phaseLegend, phaseOf } from '../../src/projects/dispatch/phases.ts'
 import {
   cardStateWord, commitsAheadMore, everyRunListFailed, githubHeadState, githubNoHeadText, issueGroups, landingWording,
-  OLDER_THAN_LISTED, prGroups, prRelation, railBadge, railOrder, relatedWhy, relTime, resolveRunWorkflow, sameRepoText,
+  compactTriage, OLDER_THAN_LISTED, prGroups, prRelation, railBadge, railBadgeTone, railOrder, relatedWhy, relTime, resolveRunWorkflow, sameRepoText,
   showMoreText, syncAsOf, syncPhrase, UPDATE_TIME_NOT_RECORDED, type RailInfo,
 } from '../../src/projects/dispatch/derive.ts'
-import { projectRunInfo } from '../../src/projects/dispatch/projectModel.ts'
+import { FAILED_RUN_INFO, projectRunInfo } from '../../src/projects/dispatch/projectModel.ts'
 import type { ProjectRuns, RunSummary, WorkflowDefinition, Project } from '../../src/projects/api.ts'
-import type { GithubState, GitState, Issue, Pr } from '../../src/projects/dispatch/types.ts'
+import type { GithubState, GitState, Issue, Pr, ProjectStepsRun } from '../../src/projects/dispatch/types.ts'
+import { endedCounts, landingKnown, noStopWording, runStepsRead, stopOf } from '../../src/projects/dispatch/stops.ts'
+import type { RunClass } from '../../src/projects/lists.ts'
 
 const phaseName = (nodeId: string, kind: string) => PHASES[phaseOf(nodeId, kind)]
 
@@ -83,6 +88,29 @@ describe('rail order and badge words', () => {
     assert.deepEqual(order, ['needs', 'running', 'a', 'bad'])
   })
 
+  test('waits, then running, then paused: a running-only project ranks above a paused-only one, whatever their last activity', () => {
+    const runningOnly = info({ projectId: 'running-only', running: 1, lastActivity: 1 })
+    const pausedOnly = info({ projectId: 'paused-only', paused: 3, lastActivity: 999 })
+    const waits = info({ projectId: 'waits', waits: 1, lastActivity: 0 })
+    const idle = info({ projectId: 'idle', lastActivity: 5000 })
+    const bad = info({ projectId: 'bad', allBad: true, lastActivity: 9999 })
+    assert.deepEqual(railOrder([idle, pausedOnly, bad, runningOnly, waits]).map(x => x.projectId), ['waits', 'running-only', 'paused-only', 'idle', 'bad'])
+    // Ties fall to the last activity, then the project id; any input order gives the same result.
+    const twins = [info({ projectId: 'b', lastActivity: 5 }), info({ projectId: 'a', lastActivity: 5 }), info({ projectId: 'c', lastActivity: 6 })]
+    assert.deepEqual(railOrder(twins).map(x => x.projectId), ['c', 'a', 'b'])
+    assert.deepEqual(railOrder([...twins].reverse()).map(x => x.projectId), ['c', 'a', 'b'])
+  })
+
+  test('the compact Triage chip counts what needs the operator only, the paused runs apart under their own word', () => {
+    assert.equal(compactTriage(null), '…')
+    assert.equal(compactTriage({ waits: 3, paused: 0 }), '3 waits')
+    assert.equal(compactTriage({ waits: 1, paused: 0 }), '1 wait')
+    assert.equal(compactTriage({ waits: 3, paused: 2 }), '3 waits · 2 paused')
+    // A paused-only run never moves the chip's number.
+    assert.equal(compactTriage({ waits: 3, paused: 5 }).split(' ')[0], compactTriage({ waits: 3, paused: 0 }).split(' ')[0])
+    assert.equal(compactTriage({ waits: 0, paused: 2 }), '0 waits · 2 paused')
+  })
+
   test('the badge word is the most pressing state, and unpushed only on the primary', () => {
     assert.equal(railBadge(info({ waits: 2 })), '2 waits on you')
     assert.equal(railBadge(info({ paused: 3 })), '3 paused')
@@ -112,13 +140,27 @@ const pr = (over: Partial<Pr>): Pr => ({
 })
 
 describe('the axis column template and short labels (V3)', () => {
-  test('the axis and the tracks share one column template; every phase has an un-elided short form', () => {
+  test('the axis and the tracks share one column template; every phase has a unique, un-elided two-letter short form', () => {
     assert.equal(CHART_COLUMNS, 'repeat(8, minmax(0, 1fr))')
-    assert.equal(PHASE_SHORT.Challenge, 'Chal.')
-    assert.equal(PHASE_SHORT.Candidate, 'Cand.')
-    assert.equal(PHASE_SHORT.Approval, 'Appr.')
-    assert.equal(PHASE_SHORT.Integrate, 'Integ.')
-    for (const phase of PHASES) { assert.ok(PHASE_SHORT[phase].length > 0); assert.doesNotMatch(PHASE_SHORT[phase], /…/) }
+    assert.equal(PHASE_SHORT.Challenge, 'Ch')
+    assert.equal(PHASE_SHORT.Candidate, 'Ca')
+    assert.equal(PHASE_SHORT.Approval, 'Ap')
+    assert.equal(PHASE_SHORT.Integrate, 'In')
+    for (const phase of PHASES) { assert.equal(PHASE_SHORT[phase].length, 2); assert.doesNotMatch(PHASE_SHORT[phase], /…/) }
+    assert.equal(new Set(PHASES.map(phase => PHASE_SHORT[phase])).size, PHASES.length)
+  })
+
+  test('the legend names every short form with its full phase name, in axis order', () => {
+    assert.deepEqual(phaseLegend().map(entry => entry.phase), [...PHASES])
+    assert.deepEqual(phaseLegend().map(entry => `${entry.short} ${entry.phase}`), ['Ch Challenge', 'La Launch', 'Fr Freeze', 'Ve Verify', 'Ca Candidate', 'Re Review', 'Ap Approval', 'In Integrate'])
+    for (const { phase, short } of phaseLegend()) assert.ok(phase.startsWith(short))
+  })
+
+  test('an "ended here" count says what it counts: ended at the full phase name, or landed under Integrate', () => {
+    assert.equal(endedText(2, 0), '2 ended at Challenge')
+    assert.equal(endedText(1, 3), '1 ended at Verify')
+    assert.equal(endedText(3, 5), '3 ended at Review')
+    assert.equal(endedText(4, 7), '4 landed')
   })
 })
 
@@ -308,5 +350,173 @@ describe('sync wording', () => {
     assert.deepEqual(syncAsOf(git({ origin: origin({ ahead: 1, updated_at: '2026-10-09T11:54:00Z' }) })), { ref: 'origin/main', updatedAt: '2026-10-09T11:54:00Z' })
     assert.deepEqual(syncAsOf(git({ origin: origin({ ahead: 1, updated_at: null }) })), { ref: 'origin/main', updatedAt: null })
     assert.equal(syncAsOf(git({ origin: null })), null)
+  })
+})
+
+describe('a project\'s run state while it loads, when it failed, once read (M1)', () => {
+  test('a read that has not settled is loading: nothing failed, nothing counted, no badge', () => {
+    const info = projectRunInfo(null)
+    assert.equal(info.state, 'loading')
+    assert.equal(info.allBad, false)
+    assert.equal(railBadge({ ...info, projectId: 'p', name: 'p', unpushed: 3, loading: true }), null)
+    assert.equal(cardStateWord({ tone: info.tone, waits: 0, running: 0, allBad: info.allBad, loading: true, featureCount: 0, worstLatestCount: 0 }), 'reading runs…')
+  })
+  test('an errored entry, or one whose every workflow failed, is failed and reads "cannot be read"', () => {
+    const errored = projectRunInfo({ project: { project_id: 't', name: 'T' } as unknown as Project, error: new Error('down'), workflows: [] })
+    assert.equal(errored.state, 'failed')
+    assert.equal(errored.allBad, true)
+    assert.equal(FAILED_RUN_INFO.state, 'failed')
+    const allFailed = projectRunInfo({ project: { project_id: 't', name: 'T' } as unknown as Project, error: null, workflows: [{ workflow: { workflow_id: 'w' } as unknown as WorkflowDefinition, runs: [], more: false, error: new Error('x') }] })
+    assert.equal(allFailed.state, 'failed')
+    assert.equal(cardStateWord({ tone: allFailed.tone, waits: 0, running: 0, allBad: allFailed.allBad, featureCount: 0, worstLatestCount: 0 }), 'cannot be read')
+  })
+})
+
+describe('badges carry their own state tone (M19)', () => {
+  const run = (runId: string, workflowId: string, status: string, created: string, attention: object | null = null): RunSummary => ({
+    contract_version: '1.5.0', project_id: 'q', workflow_id: workflowId, definition_revision: 'r', run_id: runId, status, created_at: created, updated_at: created,
+    activity: { feature: 'F', last_activity_at: created, finished_at: ['succeeded', 'failed', 'cancelled'].includes(status) ? created : null, focus: null, attention, waiting_questions: 0, headline: null, controller: null },
+  } as unknown as RunSummary)
+  const entry = (runs: RunSummary[]): ProjectRuns => ({
+    project: { project_id: 'q', name: 'Q' } as unknown as Project, error: null,
+    workflows: [...new Set(runs.map(item => item.workflow_id))].map(id => ({ workflow: { workflow_id: id } as unknown as WorkflowDefinition, runs: runs.filter(item => item.workflow_id === id), more: false, error: null })),
+  })
+  const rail = (info: ReturnType<typeof projectRunInfo>): RailInfo => ({ projectId: 'q', name: 'Q', waits: info.waits, paused: info.paused, running: info.running, allBad: info.allBad, lastActivity: info.lastActivity, unpushed: null })
+  test('each badge is toned by what it counts: warn for waits, pause for paused, run for running, neutral otherwise', () => {
+    assert.equal(railBadgeTone(info({ waits: 1, paused: 2, running: 3 })), 'warn')
+    assert.equal(railBadgeTone(info({ paused: 2, running: 3 })), 'pause')
+    assert.equal(railBadgeTone(info({ running: 3 })), 'run')
+    assert.equal(railBadgeTone(info({ unpushed: 2 })), null)
+    assert.equal(railBadgeTone(info({ waits: 1, loading: true })), null)
+  })
+  test('a live paused run sets the pause glyph when nothing waits or runs, even when a newer run of another feature was cancelled or failed', () => {
+    const paused = run('parked-1', 'parked', 'paused', '2024-11-01T08:00:00Z', { kind: 'paused', node_id: 'review', since: '2024-11-01T09:00:00Z' })
+    for (const status of ['cancelled', 'failed', 'succeeded']) {
+      const info = projectRunInfo(entry([paused, run('dropped-1', 'dropped', status, '2025-02-01T08:00:00Z')]))
+      assert.equal(info.paused, 1, status)
+      assert.equal(info.tone, 'pause', status)
+      assert.equal(railBadge(rail(info)), '1 paused')
+      assert.equal(railBadgeTone(rail(info)), 'pause')
+    }
+  })
+  test('a paused run superseded in its own workflow adds no paused badge', () => {
+    const old = run('redo-1', 'redo', 'paused', '2024-12-02T08:00:00Z', { kind: 'paused', node_id: 'handoff', since: '2024-12-02T09:00:00Z' })
+    const info = projectRunInfo(entry([old, run('redo-2', 'redo', 'succeeded', '2024-12-03T08:00:00Z')]))
+    assert.equal(info.paused, 0)
+    assert.equal(railBadge(rail(info)), null)
+    assert.notEqual(info.tone, 'pause')
+  })
+  test('a decision-waiting or interrupted running run counts as a wait, never running; a plain running run is running', () => {
+    const decide = run('decide-1', 'decide', 'paused', '2024-12-01T08:00:00Z', { kind: 'paused', node_id: 'challenge', since: '2024-12-01T08:04:00Z' })
+    const halted = run('halt-1', 'halt', 'running', '2024-12-04T10:00:00Z', { kind: 'interrupted', node_id: 'launch_ui', since: '2024-12-04T10:30:00Z' })
+    const info = projectRunInfo(entry([decide, halted]))
+    assert.equal(info.waits, 2)
+    assert.equal(info.running, 0)
+    assert.equal(railBadge(rail(info)), '2 waits on you')
+    assert.equal(railBadgeTone(rail(info)), 'warn')
+    const live = projectRunInfo(entry([run('live-1', 'live', 'running', '2024-12-04T10:00:00Z')]))
+    assert.equal(railBadge(rail(live)), '1 running')
+    assert.equal(railBadgeTone(rail(live)), 'run')
+    assert.equal(live.tone, 'run')
+  })
+  test('the card says the paused count when nothing waits or runs', () => {
+    assert.equal(cardStateWord({ tone: 'pause', waits: 0, running: 0, paused: 2, allBad: false, featureCount: 3, worstLatestCount: 1 }), '2 paused')
+  })
+})
+
+describe('the step chart claims no stop while a run\'s steps are not read (M1)', () => {
+  const run = (status: string): RunSummary => ({
+    contract_version: '1.5.0', project_id: 'q', workflow_id: 'w', definition_revision: 'r', run_id: `w-${status}`, status, created_at: '2026-03-19T09:00:00Z', updated_at: '2026-03-19T09:00:00Z',
+    activity: { feature: 'F', last_activity_at: '2026-03-19T09:00:00Z', finished_at: '2026-03-19T09:00:00Z', focus: null, attention: null, waiting_questions: 0, headline: null, controller: null },
+  } as unknown as RunSummary)
+  const cls = { needs: null, supersededBy: null } as unknown as RunClass
+  const steps: ProjectStepsRun = {
+    run_id: 'w-failed', source_branch: null, base_commit: null, integrated_commit: null, lanes: [],
+    steps: [
+      { node_id: 'challenge', label: 'Challenge', kind: 'agent', status: 'succeeded', attempt: 1 },
+      { node_id: 'verify_ui', label: 'Verify ui', kind: 'command', status: 'failed', attempt: 1 },
+    ],
+  }
+  test('a failed run without its steps has no stop and counts in no phase; with them it ends at its failed step', () => {
+    assert.equal(stopOf({ run: run('failed'), cls, steps: null }), null)
+    assert.deepEqual(endedCounts([{ run: run('failed'), cls, steps: null }, { run: run('cancelled'), cls, steps: null }]), PHASES.map(() => 0))
+    const counts = endedCounts([{ run: run('failed'), cls, steps }])
+    assert.equal(counts[phaseOf('verify_ui', 'command')], 1)
+    assert.equal(counts.reduce((a: number, b: number) => a + b, 0), 1)
+  })
+  test('a row with no stop says its steps are reading while they load, "not read" only for a failed read, and "no steps recorded" for a read without them', () => {
+    assert.deepEqual(noStopWording('loading'), { text: 'reading steps…', aria: 'Reading its steps.' })
+    assert.deepEqual(noStopWording('failed'), { text: 'steps not read', aria: 'Steps not read.' })
+    assert.deepEqual(noStopWording('read'), { text: 'no steps recorded', aria: 'No steps recorded.' })
+    for (const state of ['loading', 'read'] as const) assert.doesNotMatch(`${noStopWording(state).text} ${noStopWording(state).aria}`, /not read|cannot/i)
+  })
+  test('a run whose own steps entry failed reads "failed", and a feature\'s landing is unknown until every run\'s steps are read (M1)', () => {
+    const failedEntry = { run: run('failed'), cls, steps: null, stepsError: { code: 'unreadable', message: 'state.json is corrupt' } }
+    const absentEntry = { run: run('failed'), cls, steps: null }
+    assert.equal(runStepsRead(failedEntry, 'read'), 'failed')
+    assert.equal(runStepsRead(absentEntry, 'read'), 'read')
+    assert.equal(runStepsRead(absentEntry, 'loading'), 'loading')
+    assert.equal(landingKnown([absentEntry], 'loading'), false)
+    assert.equal(landingKnown([absentEntry], 'failed'), false)
+    assert.equal(landingKnown([absentEntry, failedEntry], 'read'), false)
+    assert.equal(landingKnown([absentEntry, { run: run('failed'), cls, steps }], 'read'), true)
+  })
+})
+
+describe('the project page order and folds', () => {
+  const T = (iso: string) => Date.parse(iso)
+  const summaryOf = (runId: string, status: RunSummary['status'], created: string, moved: string, extra: Partial<RunSummary> = {}): RunSummary => ({
+    contract_version: '1.5.0', project_id: 'p', workflow_id: 'w', definition_revision: 'r', run_id: runId, status, created_at: created, updated_at: moved,
+    activity: { feature: null, last_activity_at: moved, finished_at: ['succeeded', 'failed', 'cancelled'].includes(status) ? moved : null, focus: null, attention: null, waiting_questions: 0, headline: null, controller: null },
+    ...extra,
+  })
+  const group = (id: string, rank: number, lastActivity: number | null) => ({ workflow: { workflow_id: id }, rank, lastActivity })
+  // Default, newest and oldest orders all differ.
+  const groups = [group('f-done-new', 3, T('2026-10-13T10:00:00Z')), group('f-running-old', 1, T('2026-10-01T10:00:00Z')), group('f-needs-mid', 0, T('2026-10-05T10:00:00Z')), group('f-none', 3, null), group('f-done-tie', 3, T('2026-10-13T10:00:00Z'))]
+  const ids = (list: { workflow: { workflow_id: string } }[]) => list.map(item => item.workflow.workflow_id)
+
+  test('by default the most urgent run first (needs you, running, paused, none), then latest activity, then workflow id; no read run last', () => {
+    assert.deepEqual(ids(orderFeatures(groups, 'live')), ['f-needs-mid', 'f-running-old', 'f-done-new', 'f-done-tie', 'f-none'])
+    assert.deepEqual(ids(orderFeatures([...groups].reverse(), 'live')), ids(orderFeatures(groups, 'live')))
+  })
+  test('"Latest activity first" and "Earliest activity first" order by last activity with workflow id ties, ignoring urgency', () => {
+    assert.deepEqual(ids(orderFeatures(groups, 'newest')), ['f-done-new', 'f-done-tie', 'f-needs-mid', 'f-running-old', 'f-none'])
+    assert.deepEqual(ids(orderFeatures(groups, 'oldest')), ['f-running-old', 'f-needs-mid', 'f-done-new', 'f-done-tie', 'f-none'])
+  })
+  test('an open feature\'s rows: the list order by default, by created_at under the other sorts, ties by run_id', () => {
+    const rows = [
+      { run: summaryOf('r-a', 'succeeded', '2026-10-10T00:00:00Z', '2026-10-13T00:00:00Z') },
+      { run: summaryOf('r-b', 'running', '2026-10-01T00:00:00Z', '2026-10-02T00:00:00Z') },
+      { run: summaryOf('r-c', 'failed', '2026-10-12T00:00:00Z', '2026-10-12T05:00:00Z') },
+      { run: summaryOf('r-d', 'failed', '2026-10-12T00:00:00Z', '2026-10-12T01:00:00Z') },
+    ]
+    const classes = classifyRuns(rows.map(row => row.run))
+    const runIds = (list: { run: RunSummary }[]) => list.map(item => item.run.run_id)
+    assert.deepEqual(runIds(orderFeatureRuns(rows, 'live', classes)), ['r-b', 'r-a', 'r-c', 'r-d'])
+    assert.deepEqual(runIds(orderFeatureRuns(rows, 'newest', classes)), ['r-c', 'r-d', 'r-a', 'r-b'])
+    assert.deepEqual(runIds(orderFeatureRuns(rows, 'oldest', classes)), ['r-b', 'r-a', 'r-c', 'r-d'])
+  })
+  test('open by default with a needs-you or running run or when unreadable; under a filter only with a match; an unreadable feature stays open', () => {
+    assert.equal(featureOpen({ rank: 0, unreadable: false, matches: 1 }, false, undefined), true)
+    assert.equal(featureOpen({ rank: 1, unreadable: false, matches: 1 }, false, undefined), true)
+    assert.equal(featureOpen({ rank: 2, unreadable: false, matches: 1 }, false, undefined), false)
+    assert.equal(featureOpen({ rank: 3, unreadable: false, matches: 1 }, false, undefined), false)
+    assert.equal(featureOpen({ rank: 3, unreadable: true, matches: 0 }, false, undefined), true)
+    assert.equal(featureOpen({ rank: 3, unreadable: false, matches: 2 }, true, undefined), true)
+    assert.equal(featureOpen({ rank: 0, unreadable: false, matches: 0 }, true, undefined), false)
+    // An unreadable feature never closes behind a "0 of 0 runs match" under a filter.
+    assert.equal(featureOpen({ rank: 3, unreadable: true, matches: 0 }, true, undefined), true)
+    // The operator's own toggle wins.
+    assert.equal(featureOpen({ rank: 0, unreadable: false, matches: 1 }, false, false), false)
+    assert.equal(featureOpen({ rank: 3, unreadable: false, matches: 1 }, false, true), true)
+  })
+  test('a run row is dated: started and ran once finished, running from the list clock, the stopped words while paused', () => {
+    const now = T('2026-10-13T12:00:00Z')
+    const entry = (run: RunSummary) => ({ run, cls: { needs: null, supersededBy: null }, steps: null })
+    assert.equal(runWhen(entry(summaryOf('x', 'failed', '2026-10-09T10:00:00Z', '2026-10-09T11:05:00Z')), now, 'utc'), 'started Oct 9 · ran 1h05m')
+    assert.equal(runWhen(entry(summaryOf('x', 'running', '2026-10-13T11:19:00Z', '2026-10-13T11:50:00Z')), now, 'utc'), 'started Oct 13 · running 41m00s')
+    const paused = summaryOf('x', 'paused', '2026-10-01T10:00:00Z', '2026-10-03T10:00:00Z')
+    paused.activity = { ...paused.activity!, attention: { kind: 'paused', node_id: 'review', since: '2026-10-03T10:00:00Z' } }
+    assert.equal(runWhen(entry(paused), now, 'utc'), 'paused 10 d (since Oct 3)')
   })
 })

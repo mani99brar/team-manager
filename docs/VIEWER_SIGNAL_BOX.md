@@ -14,8 +14,11 @@ The run page (`/projects/<p>/workflows/<w>/runs/<r>`) is now **the graph as the 
    mono), the status (`p[data-testid="run-status"]` with `.status-badge[data-status]` and `span[data-testid="run-status-meaning"]`,
    which says `needs you: a question waits` / `… a pane needs attention` / `… an approval waits` when the run waits, else the
    old short status wording), the `Untried` chip (`untried-chip`), the feature title (`p[data-testid="run-title"]`, ellipsized,
-   full text in `title`), the pinned definition (`span[data-testid="definition-current" | "definition-changed" | "pinned-definition"]`,
-   text `definition <short sha> · current|changed since`; on a phone only a changed definition stays visible), the live chip (`live-status`) and the Local/UTC toggle, a pill link to
+   full text in `title`), the pinned definition's state (`span[data-testid="definition-current" | "definition-changed" | "pinned-definition"]`,
+   text `definition current` / `definition changed since` / `pinned definition`, no revision: that is in Details and the chip's
+   `title`; on a phone only a changed definition stays visible), the run's source branch and base commit
+   (`span[data-testid="run-branch"]`, mono, ellipsized: `<branch> @ <base commit, 7 characters>`, `no branch recorded @ <sha>`
+   when the inputs record none, nothing while they load or without inputs; the full values in `title`; hidden under 720 px), the live chip (`live-status`) and the Local/UTC toggle, a pill link to
    the other view (`a[data-testid="tab-assignment"]` "Assignment" on the run page; `a[data-testid="run-graph-link"]` "Run graph" on the
    Assignment page), and a closed `<details data-testid="run-details">` holding everything else: `inputs-none`, the facts
    `dl[data-testid="run-inputs-facts"]` (Feature, Source branch, Base commit, Mode, Deadlines `dd[data-testid="run-deadlines"]`,
@@ -37,12 +40,20 @@ The run page (`/projects/<p>/workflows/<w>/runs/<r>`) is now **the graph as the 
    `graphNode(page, id)` in `support.ts` still resolves a card. Keyboard: arrows walk, Enter opens, +/−/0 zoom/fit, Escape closes.
    Controls bottom right: `button "Legend"` (toggles `ul[data-testid="graph-legend"]`), `span[data-testid="stage-level"]`,
    `button[aria-label="Zoom out" | "Fit the graph" | "Zoom in"]`. The stage fills the window under the identity line (the frame
-   is sized to the viewport); the page itself does not scroll on a desk.
-4. **The live dock** `section[data-testid="live-dock"][data-open]` top left on the stage (`LiveDock.tsx`): its bar
-   `button[data-testid="live-dock-bar"]` (aria-expanded; the step the run is at, its word, "for <span>") folds the body. The body
+   is sized to the viewport less the Sessions cue when the run has sessions, never under 420 px); the page itself does not
+   scroll sideways. The first view on a desk is fitted at no less than 60 % and at most 140 %, placed on the step the run is at
+   when the whole graph does not fit; `Fit the graph` shows the whole graph down to 15 %, where chip labels wrap on two lines.
+   `run-board[data-dock="column"|"overlay"]` follows the frame's measured `clientWidth`: from 1200 px the dock is a 312 px
+   column left of the stage (the fit reserves nothing); narrower it overlays the stage and the fit keeps 336 px clear.
+   Directly under the stage, only when the sessions payload lists a session, `a[data-testid="sessions-cue"]` reads `Sessions · <n> ·
+   <Spent> ↓` and moves focus to the Sessions heading.
+4. **The live dock** `section[data-testid="live-dock"][data-open]` (`LiveDock.tsx`), a child of the run frame: a column left of the
+   stage from a 1200 px frame, else top left over the stage. Its bar
+   `button[data-testid="live-dock-bar"]` (aria-expanded; the step the run is at, its word, then "for <span>" while it runs,
+   "paused 10 d (since Oct 2)" when it stopped, "failed 4 d ago · ran 1h05m" when it finished; `signal/dockWords.ts`) folds the body. The body
    holds, in order: the **Now banner exactly as before** (`section[data-testid="run-now"][data-situation]`, `now-headline`,
-   `now-reason`, the More button, the "Open <step> ›" link `a[data-testid="now-open"]` which now centres the step on the stage
-   and opens its sheet instead of leaving the page, and the command block: `now-next[data-action]`, `command-run`,
+   `now-reason`, the More button, the "Open <step> ›" link `a[data-testid="now-open"]` to the step's page and, beside it in the dock,
+   `button[data-testid="now-show-in-graph"]` "Show in graph", which centres the step on the stage and opens its sheet, and the command block: `now-next[data-action]`, `command-run`,
    `run-dir-command`, `copy-run-dir`, `now-step[data-kind]`, `now-command`, `copy-command`, `now-all-steps`, `command-legend`,
    the caption); **Latest events** `ul[data-testid="live-dock-events"] > li > button.lv-row[data-go=<node>]` (newest first, at
    most five; a controller row is a span, not a button); **figures** `dl[data-testid="live-dock-figures"]` with `Ran`
@@ -114,8 +125,10 @@ The run-sessions feature (docs/PRD_RUN_SESSIONS.md) makes every session of a run
   titled by the session's label: model, transport, status, verdict, started, ended, duration, cost, findings, session id, and
   for a Claude Code session the copyable resume command with a 44 px Copy button that says "Copied" (the `cd ~/'…'` form only
   for an exposed project whose directory exists under HOME; else the bare form and "run it in the session's worktree").
-- **Sessions section** below the stage: every session grouped by role in start order, each row one column of facts joined by
-  middle dots (one per line at 390 px), its label linking to its node, and the totals line ("Metered $X reported by Claude ·
+- **Sessions table** below the stage (`session-row` per session, grouped by role in start order, one line at 1440 px): label
+  (linked node), model, status, started, duration, cost, session id (`data-fact` per cell); a Claude row has one Copy button
+  and a `Show command` / `Hide command` toggle revealing `session-resume-command` with its note; one column per session at
+  390 px. The Sessions heading `h3#sessions-title` takes focus from the cue. Above it, the totals line ("Metered $X reported by Claude ·
   subscription-covered estimates $Y · N costs not recorded"). The live dock's Spent reads the same totals.
 - **Night shift**: each decision on the node it decided (each provider's option, text, confidence word, needs-the-operator, the
   agreement, Jev's pick, error or "Jev not called", executed with the redacted command or "Held: <reason>"); above the Sessions

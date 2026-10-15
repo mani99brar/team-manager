@@ -38,6 +38,7 @@ import {
   type WorkflowDefinition,
 } from '../../contracts/projects/v1.ts'
 import { eventSchema, validateWorkerResult, type WorkerResult, type WorkflowEvent } from '../../contracts/workflow/v1.ts'
+import { homeRunsSchema, registryRunsSchema, type ReadError, type RegistryRuns } from '../../contracts/projects/dispatch.ts'
 import { validateSessions, type LaneReview, type LaneReviewFinding, type LaneReviewReviewer, type NightShiftDecision, type NightShiftProvider, type SessionRow, type Sessions, type SessionTotals } from '../../contracts/projects/sessions.ts'
 
 export type { AttackAttacker, AttackFinding, AttackResult, PanelEntry, PanelFinding, PanelProvider, PanelResults, Project, ReviewFinding, ReviewResult, RunAccepted, RunActivity, RunDetail, RunInputs, RunInputWorker, RunSummary, SidecarFinding, SidecarLedger, SidecarMessage, SidecarPass, WorkflowDefinition, WorkerResult, WorkflowEvent }
@@ -209,6 +210,46 @@ export async function fetchRegistryRuns(projects: readonly Project[], more: Read
     }
     return { project, workflows: await fetchWorkflowRuns(project.project_id, workflows, more, signal), error: null }
   }))
+}
+
+/** A list the server could not read, as the per-workflow or per-project route would have failed: the same error a direct read raises. */
+function servedError(error: ReadError, path: string): ProjectsApiError {
+  return new ProjectsApiError('http', error.message, path, { status: error.status, code: error.code })
+}
+
+/**
+ * The registry home read (`GET /api/dispatch/runs?since=`): in one request, what `fetchRegistryRuns(projects, readsNextPage)`
+ * assembles from the per-workflow routes, the same rows in the same `ProjectRuns` shape, for the given projects in their order.
+ */
+export function fetchHomeRuns(projects: readonly Project[], since: number, signal?: AbortSignal): Promise<ProjectRuns[]> {
+  const path = `/api/dispatch/runs?since=${encodeURIComponent(new Date(since).toISOString())}`
+  return requestJson(path, input => {
+    const body = homeRunsSchema.parse(input)
+    const byId = new Map(body.projects.map(entry => [entry.project_id, entry]))
+    return projects.map((project): ProjectRuns => {
+      const entry = byId.get(project.project_id)
+      if (!entry) return { project, workflows: [], error: new ProjectsApiError('malformed', `the registry read does not list project ${project.project_id}.`, path) }
+      if (entry.error !== null) return { project, workflows: [], error: servedError(entry.error, paths.workflows(project.project_id)) }
+      const runsById = new Map(entry.runs.map(item => [item.workflow_id, item]))
+      return {
+        project, error: null,
+        workflows: entry.workflows.map((workflow): WorkflowRuns => {
+          const item = runsById.get(workflow.workflow_id)
+          const runsPath = paths.runs(project.project_id, workflow.workflow_id)
+          if (!item) return { workflow, runs: [], more: false, error: new ProjectsApiError('malformed', `the registry read does not list workflow ${workflow.workflow_id}.`, runsPath) }
+          for (const run of item.runs) {
+            if (run.project_id !== project.project_id || run.workflow_id !== workflow.workflow_id) throw new Error(`run ${run.run_id} belongs to another scope.`)
+          }
+          return { workflow, runs: item.runs, more: item.next_cursor !== null, error: item.error === null ? null : servedError(item.error, runsPath) }
+        }),
+      }
+    })
+  }, signal)
+}
+
+/** One page of every project's runs in the registry order (`GET /api/dispatch/runs/all`), for Triage's "All time". */
+export function fetchRegistryPage(cursor: string | null, signal?: AbortSignal): Promise<RegistryRuns> {
+  return requestJson(`/api/dispatch/runs/all${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''}`, input => registryRunsSchema.parse(input), signal)
 }
 
 export function fetchRunDetail(scope: RunScope, signal?: AbortSignal): Promise<RunDetail> {

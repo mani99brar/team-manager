@@ -75,13 +75,21 @@ export function formatAgo(at: string | number, now: number): string {
   return `${Math.floor(hours / 24)} d ago`
 }
 
-/** A duration rounded to the second: "46s", "2m29s", "28m21s", "1h05m". */
+/** From this raw duration `formatSpan` reads days and hours. */
+const SPAN_DAYS_FROM_MS = 48 * 3_600_000
+
+/**
+ * A duration rounded to the second: "46s", "2m29s", "28m21s", "1h05m", "25h03m"; from 48 h in days and hours, "2 d 0 h",
+ * "10 d 12 h". The 48 h threshold reads the raw duration, so a span that only rounds up to 48 h still reads "48h00m".
+ */
 export function formatSpan(ms: number): string {
   const total = Math.max(0, Math.round(ms / 1000))
   if (total < 60) return `${total}s`
   const minutes = Math.floor(total / 60)
   if (minutes < 60) return `${minutes}m${pad(total % 60)}s`
-  return `${Math.floor(minutes / 60)}h${pad(minutes % 60)}m`
+  const hours = Math.floor(minutes / 60)
+  if (ms >= SPAN_DAYS_FROM_MS) return `${Math.floor(hours / 24)} d ${hours % 24} h`
+  return `${hours}h${pad(minutes % 60)}m`
 }
 
 /** Milliseconds from `start` to `end`, or null when either is missing or unreadable or the end precedes the start: never a guess. */
@@ -101,6 +109,20 @@ export type FreshnessState = 'live' | 'watching' | 'stale' | 'finished' | 'hidde
 
 export const STALE_AFTER_FAILURES = 2
 export const STALE_AFTER_MS = 15_000
+
+/** The stale threshold of a resource polled every `pollMs`: three polls, so an on-time poll never reads stale (15 s at 5 s). */
+export const staleAfterMs = (pollMs: number) => Math.max(STALE_AFTER_MS, 3 * pollMs)
+
+/**
+ * `freshnessState` for a resource polled every `pollMs` (a failed run and the lists at 15 s, a live run at 5 s): stale after
+ * two failed polls in a row, or after `staleAfterMs(pollMs)` without a success while the tab is visible.
+ */
+export function freshnessStateAt(input: Parameters<typeof freshnessState>[0], pollMs: number): FreshnessState {
+  const state = freshnessState({ ...input, settledAt: null })
+  if (state !== 'live' && state !== 'watching') return state
+  if (input.settledAt !== null && input.now - Math.max(input.settledAt, input.visibleSince) > staleAfterMs(pollMs)) return 'stale'
+  return state
+}
 
 export function freshnessState({ status, settledAt, failures, visible, visibleSince, now }: {
   status: RunStatus

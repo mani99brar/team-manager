@@ -3,9 +3,9 @@ import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import { z } from 'zod'
 import * as examples from './examples.js'
-import { dispatchSchemas, gitStateSchema, githubStateSchema } from './dispatch.js'
+import { dispatchSchemas, gitStateSchema, githubStateSchema, homeRunsSchema, projectDispatchSchema, projectSpendSchema, registryRunsSchema } from './dispatch.js'
 import {
-  CONTROL_IDS, RECORD_STATUSES, cleanPreviewRequestSchema, cleanPreviewResponseSchema, controlErrorSchema, controlRecordSchema, controlRequestSchema, controlsStatusSchema, runControlsSchema,
+  CONTROL_IDS, CONTROLS_VERSION, RECORD_STATUSES, cleanPreviewRequestSchema, cleanPreviewResponseSchema, relaunchPreviewRequestSchema, relaunchPreviewResponseSchema, controlErrorSchema, controlRecordSchema, controlRequestSchema, controlsStatusSchema, runControlsSchema,
 } from './controls.js'
 import type { RunInputs } from './v1.js'
 import { validateWorkerResult } from '../workflow/v1.js'
@@ -892,7 +892,7 @@ test('run controls (Appendix A): every example validates, one RunControls per of
   const states = Object.entries(examples.runControlsStates)
   assert.deepEqual(states.map(([name]) => name), [
     'stoppedAutomatic', 'runningSupervisor', 'failedVerify', 'needsReconciliation', 'challengePaused', 'challengeHeld', 'questionWithPane', 'questionWithoutPane',
-    'awaitingApproval', 'blockedAfterFreeze', 'abandoned', 'finished',
+    'awaitingApproval', 'blockedAfterFreeze', 'abandoned', 'finished', 'recovery',
   ])
   for (const [name, controls] of states) {
     runControlsSchema.parse(controls)
@@ -905,7 +905,29 @@ test('run controls (Appendix A): every example validates, one RunControls per of
   controlRequestSchema.parse(examples.controlRequest)
   cleanPreviewRequestSchema.parse(examples.cleanPreviewRequest)
   cleanPreviewResponseSchema.parse(examples.cleanPreviewResponse)
+  relaunchPreviewRequestSchema.parse(examples.relaunchPreviewRequest)
+  relaunchPreviewResponseSchema.parse(examples.relaunchPreviewResponse)
+  relaunchPreviewResponseSchema.parse(examples.relaunchPreviewRefused)
   controlErrorSchema.parse({ error: { code: 'NOT_AVAILABLE', message: 'The run is not finished or abandoned' } })
+})
+
+test('run controls 1.1.0: fourteen ids, the first twelve in their order, retry_all and relaunch after clean', () => {
+  assert.equal(CONTROLS_VERSION, '1.1.0')
+  assert.deepEqual([...CONTROL_IDS], ['restart', 'pause', 'retry', 'reconcile', 'resume', 'accept_challenge', 'release_hold', 'answer', 'approve', 'repair_session', 'abandon', 'clean', 'retry_all', 'relaunch'])
+  const controls = structuredClone(examples.runControlsStates.recovery)
+  runControlsSchema.parse(controls)
+  assert.throws(() => runControlsSchema.parse({ ...controls, controls: controls.controls.slice(0, 12) }), 'twelve controls are refused')
+  assert.throws(() => runControlsSchema.parse({ ...controls, controls: [...controls.controls, controls.controls[0]] }), 'fifteen controls are refused')
+  const swapped = [...controls.controls]; [swapped[12], swapped[13]] = [swapped[13], swapped[12]]
+  assert.throws(() => runControlsSchema.parse({ ...controls, controls: swapped }), 'a changed order is refused')
+  assert.throws(() => runControlsSchema.parse({ ...controls, version: '1.0.0' }), 'the 1.0.0 version is refused')
+  const byId = Object.fromEntries(controls.controls.map(control => [control.id, control]))
+  assert.equal(byId.retry_all.command, '$PY -m workflow retry "$RUN" --phase worker --all-failed --by operator')
+  assert.match(byId.retry_all.effect, /Restart supervisor/)
+  assert.match(byId.relaunch.effect, /Reconcile launches and then Restart supervisor/)
+  assert.throws(() => relaunchPreviewRequestSchema.parse({ run_state_token: 't' }), 'the lane is required')
+  assert.throws(() => relaunchPreviewRequestSchema.parse({ run_state_token: 't', lane: 'ui', request_id: examples.controlRequest.request_id }), 'no request_id')
+  assert.throws(() => relaunchPreviewResponseSchema.parse({ exitCode: 0, output: 'x' }))
 })
 
 test('run controls (Appendix A): the schemas refuse what the API never sends', () => {
@@ -947,4 +969,24 @@ test('dispatch (Appendix A): the schemas refuse what the routes never send', () 
   // GitHub: only the five states, and no extra keys.
   assert.throws(() => githubStateSchema.parse({ ...overview.projects[0].github, status: 'loading' }))
   assert.throws(() => githubStateSchema.parse({ ...overview.projects[0].github, extra: true }))
+})
+
+test('dispatch: the registry home read, the registry pages and the project spend examples validate; the schemas refuse what the routes never send', () => {
+  homeRunsSchema.parse(examples.homeRuns)
+  registryRunsSchema.parse(examples.registryRuns)
+  assert.ok(examples.homeRuns.projects.some(project => project.error !== null), 'a project whose workflow list was not read')
+  assert.ok(examples.homeRuns.projects.some(project => project.runs.some(entry => entry.error !== null)), 'a workflow whose runs were not read')
+  assert.ok(examples.registryRuns.unreadable.length >= 1)
+  // spend: always sent, null only for an unread workflow list; a recorded 0 is priced.
+  assert.ok(examples.dispatchOverview.projects.every(project => project.spend !== undefined))
+  assert.ok(examples.dispatchOverview.projects.some(project => project.spend === null))
+  assert.ok(examples.dispatchOverview.projects.some(project => project.spend?.claude_usd === 0 && project.spend.priced_runs > 0))
+  const withoutSpend: Record<string, unknown> = { ...examples.dispatchOverview.projects[0] }
+  delete withoutSpend.spend
+  projectDispatchSchema.parse(withoutSpend)
+  assert.throws(() => projectSpendSchema.parse({ claude_usd: 1, priced_runs: 1, runs: 1, covered_usd: 2 }), 'no covered estimate')
+  assert.throws(() => projectSpendSchema.parse({ claude_usd: -1, priced_runs: 1, runs: 1 }))
+  assert.throws(() => homeRunsSchema.parse({ ...examples.homeRuns, since: '2026-10-04T03:40:00+02:00' }), 'since is a Z time')
+  assert.throws(() => homeRunsSchema.parse({ ...examples.homeRuns, projects: [{ ...examples.homeRuns.projects[0], counts: { running: 1 } }] }), 'no server-computed counts')
+  assert.throws(() => registryRunsSchema.parse({ ...examples.registryRuns, unreadable: [{ project_id: 'a', workflow_id: 'b' }] }), 'an unreadable workflow names its code')
 })

@@ -5,7 +5,7 @@
  */
 import { afterEach, describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { formatAgo, formatClock, formatSpan, freshnessState, spanBetween, utcTitle } from '../../src/projects/time.ts'
+import { formatAgo, formatClock, formatSpan, freshnessState, freshnessStateAt, spanBetween, staleAfterMs, STALE_AFTER_MS, utcTitle } from '../../src/projects/time.ts'
 
 const SECOND = 1000
 const MINUTE = 60 * SECOND
@@ -37,6 +37,17 @@ describe('formatSpan', () => {
 
   test('a negative span reads as zero', () => {
     assert.equal(formatSpan(-5 * SECOND), '0s')
+  })
+
+  test('from 48 h it reads days and hours; below 48 h it is unchanged', () => {
+    assert.equal(formatSpan(25 * HOUR + 3 * MINUTE), '25h03m')
+    assert.equal(formatSpan(47 * HOUR + 59 * MINUTE + 29 * SECOND), '47h59m')
+    assert.equal(formatSpan(48 * HOUR - 400), '48h00m')
+    assert.equal(formatSpan(48 * HOUR - 1), '48h00m')
+    assert.equal(formatSpan(48 * HOUR), '2 d 0 h')
+    assert.equal(formatSpan(50 * HOUR), '2 d 2 h')
+    assert.equal(formatSpan(252 * HOUR + 30 * MINUTE), '10 d 12 h')
+    assert.equal(formatSpan(359 * HOUR + MINUTE), '14 d 23 h')
   })
 })
 
@@ -161,5 +172,29 @@ describe('freshnessState', () => {
     assert.equal(freshnessState({ status: 'running', settledAt: now - HOUR, failures: 0, visible: false, visibleSince: now - HOUR, now }), 'hidden')
     assert.equal(freshnessState({ status: 'running', settledAt: now - HOUR, failures: 0, visible: true, visibleSince: now - 2 * SECOND, now }), 'live')
     assert.equal(freshnessState({ status: 'running', settledAt: now - HOUR, failures: 0, visible: true, visibleSince: now - 20 * SECOND, now }), 'stale')
+  })
+})
+
+describe('the stale threshold follows the poll cadence (M29)', () => {
+  const now = Date.parse('2026-09-24T12:00:00Z')
+  const page = { visible: true, visibleSince: now - HOUR }
+  test('three polls at the cadence: 15 s at 5 s (unchanged), 45 s at the lists\' 15 s', () => {
+    assert.equal(staleAfterMs(5 * SECOND), STALE_AFTER_MS)
+    assert.equal(staleAfterMs(15 * SECOND), 45 * SECOND)
+  })
+  test('at 5 s it reads as freshnessState does for every input', () => {
+    for (const [status, ago, failures] of [['running', 15, 0], ['running', 16, 0], ['failed', 11, 2], ['paused', 3, 0], ['succeeded', 99, 9]] as const) {
+      const input = { status, settledAt: now - ago * SECOND, failures, ...page, now }
+      assert.equal(freshnessStateAt(input, 5 * SECOND), freshnessState(input), `${status} ${ago}`)
+    }
+  })
+  test('at 15 s an on-time poll never reads stale; two missed polls do', () => {
+    // Just before the next on-time poll lands, and just after a poll that came a little late.
+    assert.equal(freshnessStateAt({ status: 'failed', settledAt: now - 15 * SECOND, failures: 0, ...page, now }, 15 * SECOND), 'watching')
+    assert.equal(freshnessStateAt({ status: 'failed', settledAt: now - 29 * SECOND, failures: 0, ...page, now }, 15 * SECOND), 'watching')
+    assert.equal(freshnessStateAt({ status: 'running', settledAt: now - 20 * SECOND, failures: 0, ...page, now }, 15 * SECOND), 'live')
+    assert.equal(freshnessStateAt({ status: 'failed', settledAt: now - 31 * SECOND, failures: 2, ...page, now }, 15 * SECOND), 'stale')
+    assert.equal(freshnessStateAt({ status: 'failed', settledAt: now - 46 * SECOND, failures: 0, ...page, now }, 15 * SECOND), 'stale')
+    assert.equal(freshnessStateAt({ status: 'succeeded', settledAt: now - HOUR, failures: 0, ...page, now }, 15 * SECOND), 'finished')
   })
 })

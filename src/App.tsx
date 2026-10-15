@@ -11,7 +11,8 @@ import { GraphCanvas, type GraphCanvasHandle, type View, type ViewRequest } from
 import { GraphLayout, type LayoutSnapshot } from './graph/layout.ts'
 import { Outline } from './graph/Outline.tsx'
 import { ProjectsView } from './projects/ProjectsView.tsx'
-import { parseProjectsPathname, projectsPathname } from './projects/routes.ts'
+import { canonicalPathname, keepsListSearch, parseProjectsPathname, projectsPathname } from './projects/routes.ts'
+import type { ListMemory } from './projects/ProjectsView.tsx'
 import {
   buildIndex,
   childCounts,
@@ -53,7 +54,8 @@ type ReturnContext = {
   pathname: string; location: ParsedLocation; focusId: string | null
   mode: Mode; expanded: string[]; layout: LayoutSnapshot; view: View | null; scroll: number
 }
-type HistoryEntry = { pathname: string; browsing?: ReturnContext; origin?: ReturnContext }
+/** `list` is a Projects list's scroll position and opened folds when the operator left it, restored on Back. */
+type HistoryEntry = { pathname: string; browsing?: ReturnContext; origin?: ReturnContext; list?: ListMemory; search?: string }
 
 function fileName(ref: FileRef): string {
   return ref.path.slice(ref.path.lastIndexOf('/') + 1)
@@ -107,6 +109,10 @@ function LocationLinks({ locations, onNavigate }: { locations: Location[]; onNav
   )
 }
 
+/** The skills home opens on the graph with both sources expanded one level, so every location shows with its counts. */
+const INITIAL_MODE: Mode = 'graph'
+const INITIAL_EXPANDED: readonly string[] = ['Pi', 'Claude']
+
 const reducedMotionQuery = '(prefers-reduced-motion: reduce)'
 
 function usePrefersReducedMotion(): boolean {
@@ -127,9 +133,9 @@ function App() {
   useEffect(() => () => layout.dispose(), [layout])
 
   const [data, setData] = useState<Data>({ status: 'loading' })
-  const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set())
+  const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set(INITIAL_EXPANDED))
   const [location, setLocation] = useState<ParsedLocation>(() => parsePathname(window.location.pathname))
-  const [mode, setMode] = useState<Mode>('graph')
+  const [mode, setMode] = useState<Mode>(INITIAL_MODE)
   const [browsingRevision, setBrowsingRevision] = useState(0)
   const [announcement, setAnnouncement] = useState('')
   const [operation, setOperation] = useState<{ request: Operation; context: number } | null>(null)
@@ -147,17 +153,58 @@ function App() {
   // Monotonic navigation context: leaving and returning to the same history entry still abandons async navigation.
   const navigationRevision = useRef(0)
   const historyEntries = useRef(new Map<string, HistoryEntry>())
+  // A Projects list keeps its state in the URL's search; every other pathname is written without one, as before.
+  const [projectsSearch, setProjectsSearch] = useState(() => (keepsListSearch(window.location.pathname) ? window.location.search : ''))
   useLayoutEffect(() => {
     historyEntries.current.set(initialHistoryKey, { pathname: window.location.pathname })
-    window.history.replaceState({ mdManager: initialHistoryKey }, '', window.location.pathname)
+    const pathname = window.location.pathname
+    window.history.replaceState({ mdManager: initialHistoryKey }, '', keepsListSearch(pathname) ? pathname + window.location.search : pathname)
   }, [initialHistoryKey])
-  const writeHistory = useCallback((entry: Omit<HistoryEntry, 'pathname'>, pathname: string, replace = false) => {
+  const writeHistory = useCallback((entry: Omit<HistoryEntry, 'pathname'>, pathname: string, replace = false, search = '') => {
     navigationRevision.current += 1
     const key = replace ? historyKey.current : crypto.randomUUID()
     historyEntries.current.set(key, { ...entry, pathname })
     historyKey.current = key
-    window.history[replace ? 'replaceState' : 'pushState']({ mdManager: key }, '', pathname)
+    window.history[replace ? 'replaceState' : 'pushState']({ mdManager: key }, '', search === '' ? pathname : pathname + search)
   }, [])
+  // Set while popstate commits the departing list's pending search: the URL already shows the arriving entry.
+  const departingKey = useRef<string | null>(null)
+  /**
+   * A list's own state change: replaces the current entry's search, keeping its record and the navigation context, and
+   * records it in the record so a search committed on Back is shown again on Forward. A write for another pathname than the
+   * current entry's (a late debounced search after a navigation) is refused; a list's canonical pathname matches the entry
+   * opened at a noncanonical one (a trailing slash), whose URL keeps its own form.
+   */
+  const replaceListSearch = useCallback((pathname: string, search: string) => {
+    const key = departingKey.current ?? historyKey.current
+    const entry = historyEntries.current.get(key)
+    if (!entry || !keepsListSearch(pathname) || canonicalPathname(entry.pathname) !== canonicalPathname(pathname)) return
+    if (departingKey.current !== null) {
+      historyEntries.current.set(key, { ...entry, search })
+      return
+    }
+    if (canonicalPathname(window.location.pathname) !== canonicalPathname(pathname)) return
+    historyEntries.current.set(key, { ...entry, search })
+    window.history.replaceState({ mdManager: key }, '', window.location.pathname + search)
+    setProjectsSearch(search)
+  }, [])
+  // The list's opened folds as it reports them, saved with its scroll position into its entry when the operator leaves it.
+  const listFolds = useRef<Record<string, boolean>>({})
+  const [listRestore, setListRestore] = useState<{ key: string; memory: ListMemory } | null>(null)
+  const saveListMemory = useCallback(() => {
+    const entry = historyEntries.current.get(historyKey.current)
+    if (!entry || !keepsListSearch(entry.pathname)) return
+    historyEntries.current.set(historyKey.current, { ...entry, list: { scroll: window.scrollY, folds: { ...listFolds.current } } })
+  }, [])
+  const onListFolds = useCallback((folds: Record<string, boolean>) => { listFolds.current = folds }, [])
+  // The shown list's flush of a search still being typed: leaving the list from outside it (a root link) writes it first.
+  const listFlush = useRef<(() => void) | null>(null)
+  const onListFlush = useCallback((flush: (() => void) | null) => { listFlush.current = flush }, [])
+  /** Before the operator leaves a list: its pending search written into its entry, then its scroll and folds saved there. */
+  const leaveList = useCallback(() => {
+    listFlush.current?.()
+    saveListMemory()
+  }, [saveListMemory])
   const pendingFocus = useRef<string | null>(null)
   // Mirrors of state for event handlers that must not re-subscribe on every change.
   const locationRef = useRef(location)
@@ -267,6 +314,7 @@ function App() {
     const pathname = folderToPathname(ref)
     if (window.location.pathname !== pathname) {
       saveBrowsing()
+      leaveList()
       writeHistory({}, pathname, options.replace)
     }
     setLocation(ref ? { kind: 'folder', ref } : { kind: 'home' })
@@ -277,7 +325,7 @@ function App() {
     } else if (!ref) {
       requestView({ type: 'fit' })
     }
-  }, [requestView, saveBrowsing, writeHistory])
+  }, [requestView, saveBrowsing, writeHistory, leaveList])
 
   useEffect(() => {
     const onPopState = (event: PopStateEvent) => {
@@ -285,12 +333,25 @@ function App() {
       setOperation(null)
       setDiscardAction(null)
       saveBrowsingRef.current()
+      // A search still being typed is committed into the departing entry's record before the list is left.
+      departingKey.current = historyKey.current
+      try { listFlush.current?.() } finally { departingKey.current = null }
+      saveListMemory()
       const entry = historyEntries.current.get(event.state?.mdManager)
-      if (entry) historyKey.current = event.state.mdManager
-      else {
+      if (entry) {
+        historyKey.current = event.state.mdManager
+        // Returning to an entry whose search was committed after the browser recorded its URL shows that search again.
+        if (entry.search !== undefined && keepsListSearch(window.location.pathname) && entry.search !== window.location.search) {
+          window.history.replaceState({ mdManager: historyKey.current }, '', window.location.pathname + entry.search)
+        }
+      } else {
         historyKey.current = crypto.randomUUID()
-        writeHistory({}, window.location.pathname, true)
+        const pathname = window.location.pathname
+        writeHistory({}, pathname, true, keepsListSearch(pathname) ? window.location.search : '')
       }
+      setProjectsSearch(keepsListSearch(window.location.pathname) ? window.location.search : '')
+      listFolds.current = entry?.list?.folds ?? {}
+      setListRestore(entry?.list ? { key: crypto.randomUUID(), memory: entry.list } : null)
       const context = entry?.browsing
       if (context) {
         restoreBrowsing(context)
@@ -306,7 +367,7 @@ function App() {
     }
     window.addEventListener('popstate', onPopState)
     return () => window.removeEventListener('popstate', onPopState)
-  }, [requestView, restoreBrowsing, writeHistory])
+  }, [requestView, restoreBrowsing, writeHistory, saveListMemory])
 
   const index = data.status === 'ready' ? data.index : null
 
@@ -378,17 +439,31 @@ function App() {
   /** Navigates to any app pathname (Projects pages or Home) through history, keeping the unsaved-edit guards. */
   const navigatePathname = useCallback((pathname: string) => {
     guardLeave(() => {
-      if (window.location.pathname !== pathname) {
+      if (canonicalPathname(window.location.pathname) !== canonicalPathname(pathname)) {
         saveBrowsingRef.current()
+        leaveList()
         writeHistory({}, pathname)
+        listFolds.current = {}
+        setListRestore(null)
+        setProjectsSearch('')
+      } else if (keepsListSearch(pathname) && window.location.search !== '') {
+        // A bare-path link to the list already shown starts it again at its defaults.
+        replaceListSearch(pathname, '')
       }
       const next = parsePathname(pathname)
       setLocation(next)
       if (next.kind === 'home') requestView({ type: 'fit' })
     })
-  }, [guardLeave, requestView, writeHistory])
+  }, [guardLeave, requestView, writeHistory, leaveList, replaceListSearch])
   const navigateToSource = useCallback((source: Source) => guardLeave(() => navigate({ source, locationId: null, path: '' }, { reveal: true })), [guardLeave, navigate])
   const inProjects = location.kind === 'projects'
+  // A Projects list restores its own scroll position after its first settled read, so the browser's restore is turned off there.
+  useEffect(() => {
+    if (!inProjects || !('scrollRestoration' in window.history)) return
+    const previous = window.history.scrollRestoration
+    window.history.scrollRestoration = 'manual'
+    return () => { window.history.scrollRestoration = previous }
+  }, [inProjects])
   const projectsRoute = location.kind === 'projects' ? parseProjectsPathname(location.pathname) : null
   const rootSource: Source | null = location.kind === 'folder' || location.kind === 'file' ? location.ref.source : location.kind === 'legacy' ? location.source : null
 
@@ -550,9 +625,9 @@ function App() {
 
   const reset = useCallback(() => {
     layout.reset()
-    setExpanded(new Set())
+    setExpanded(new Set(INITIAL_EXPANDED))
     navigate(null)
-    setAnnouncement('Reset: showing the Pi and Claude sources.')
+    setAnnouncement('Reset: showing the Pi and Claude sources and their locations.')
   }, [layout, navigate])
 
   const toggleMode = useCallback(() => {
@@ -698,7 +773,8 @@ function App() {
       )}
 
       {inProjects && (
-        <ProjectsView route={projectsRoute} refreshToken={projectsRefresh} onRefreshingChange={setProjectsRefreshing} onNavigate={navigatePathname} onAnnounce={announce} />
+        <ProjectsView route={projectsRoute} refreshToken={projectsRefresh} onRefreshingChange={setProjectsRefreshing} onNavigate={navigatePathname} onAnnounce={announce}
+          search={projectsSearch} onSearch={replaceListSearch} restore={listRestore} onFolds={onListFolds} onFlush={onListFlush} />
       )}
 
       {!inProjects && <div className="navigation">
@@ -722,13 +798,15 @@ function App() {
             <button type="button" className="button" onClick={reset} disabled={!ready}>Reset</button>
             <button type="button" className="button" onClick={toggleMode} disabled={!ready} aria-pressed={mode === 'outline'}>Outline</button>
           </div>
-          <div className="toolbar" role="toolbar" aria-label="File operations">
-            <button type="button" className="button" onClick={() => requestFolderOperation('create-file')} disabled={!canCreate}>New file…</button>
-            <button type="button" className="button" onClick={() => requestFolderOperation('create-folder')} disabled={!canCreate}>New folder…</button>
-            <button type="button" className="button" onClick={() => requestFolderOperation('rename')} disabled={!isDirectory}>Rename…</button>
-            <button type="button" className="button" onClick={() => requestFolderOperation('move')} disabled={!isDirectory}>Move…</button>
-            <button type="button" className="button" onClick={() => requestFolderOperation('delete')} disabled={!isDirectory}>Delete…</button>
-          </div>
+          {(canCreate || isDirectory) && (
+            <div className="toolbar" role="toolbar" aria-label="File operations">
+              {canCreate && <button type="button" className="button" onClick={() => requestFolderOperation('create-file')}>New file…</button>}
+              {canCreate && <button type="button" className="button" onClick={() => requestFolderOperation('create-folder')}>New folder…</button>}
+              {isDirectory && <button type="button" className="button" onClick={() => requestFolderOperation('rename')}>Rename…</button>}
+              {isDirectory && <button type="button" className="button" onClick={() => requestFolderOperation('move')}>Move…</button>}
+              {isDirectory && <button type="button" className="button" onClick={() => requestFolderOperation('delete')}>Delete…</button>}
+            </div>
+          )}
         </div>
       )}
 
