@@ -1,0 +1,298 @@
+{
+  "version": "1.4.0",
+  "feature": "UX critique fixes, stage D: the decided items left unbuilt or unmet on main ca5e2bb; reviewer tones, the findings row and order, honest scope lines, a stopped controller under Needs you, dock and Back fixes, narrow chart rows, GitHub said once (ui); per-run list errors, the relaunch and Panes notes, archived launch sessions, enter_not_submitted, a disk transient, the panel budget default, relaunch and retry refusals (backend)",
+  "independent_review": true,
+  "integration_approval": true,
+  "max_verification_attempts": 3,
+  "setup": [
+    {
+      "argv": [
+        "npm",
+        "ci"
+      ],
+      "timeout_seconds": 600
+    },
+    {
+      "argv": [
+        "python3",
+        "-m",
+        "venv",
+        ".venv"
+      ],
+      "timeout_seconds": 180
+    },
+    {
+      "argv": [
+        ".venv/bin/python",
+        "-m",
+        "pip",
+        "install",
+        "--quiet",
+        "--no-input",
+        "--disable-pip-version-check",
+        "-r",
+        "workflow/requirements.lock"
+      ],
+      "timeout_seconds": 600
+    }
+  ],
+  "workers": [
+    {
+      "node_id": "ui",
+      "role": "frontend lists and pages",
+      "required_check_kinds": [
+        "build",
+        "unit",
+        "contract",
+        "browser"
+      ],
+      "owned_paths": [
+        "DESIGN.md",
+        "docs/handoff/ux-fixes-d-ui.md",
+        "src/App.tsx",
+        "src/projects/api.ts",
+        "src/projects/lists.ts",
+        "src/projects/runFilter.ts",
+        "src/projects/pins.ts",
+        "src/projects/findings.ts",
+        "src/projects/ProjectsView.tsx",
+        "src/projects/RunsHome.tsx",
+        "src/projects/NodeHeader.tsx",
+        "src/projects/RunView.tsx",
+        "src/projects/StepStrip.tsx",
+        "src/projects/ReviewDetail.tsx",
+        "src/projects/node/model.ts",
+        "src/projects/node/panels.ts",
+        "src/projects/node/ReviewSections.tsx",
+        "src/projects/node/review.css",
+        "src/projects/signal/dockWords.ts",
+        "src/projects/signal/SignalRun.tsx",
+        "src/projects/sessions/sessions.css",
+        "src/projects/dispatch/ProjectPage.tsx",
+        "src/projects/dispatch/ProjectsPage.tsx",
+        "src/projects/dispatch/GithubColumn.tsx",
+        "src/projects/dispatch/StepChart.tsx",
+        "src/projects/dispatch/stops.ts",
+        "src/projects/dispatch/projectModel.ts",
+        "src/projects/dispatch/dispatch.css",
+        "tests/unit/lists.test.ts",
+        "tests/unit/node.test.ts",
+        "tests/unit/signal.test.ts",
+        "tests/unit/dispatch.test.ts",
+        "tests/project-workflows/sessions.spec.ts",
+        "tests/project-workflows/revamp-pages.spec.ts",
+        "tests/project-workflows/revamp-lists.spec.ts",
+        "tests/project-workflows/dispatch.spec.ts",
+        "tests/project-workflows/ux-run.spec.ts",
+        "tests/project-workflows/fixtures/sessions.ts",
+        "tests/project-workflows/fixtures/dispatch.ts"
+      ],
+      "checks": [
+        {
+          "id": "frontend-build",
+          "kind": "build",
+          "argv": [
+            "npm",
+            "run",
+            "build"
+          ],
+          "timeout_seconds": 300,
+          "scenarios": []
+        },
+        {
+          "id": "frontend-lint",
+          "kind": "build",
+          "argv": [
+            "npm",
+            "run",
+            "lint"
+          ],
+          "timeout_seconds": 180,
+          "scenarios": []
+        },
+        {
+          "id": "shared-contract",
+          "kind": "contract",
+          "argv": [
+            "npm",
+            "run",
+            "test:contracts"
+          ],
+          "timeout_seconds": 180,
+          "scenarios": []
+        },
+        {
+          "id": "frontend-unit",
+          "kind": "unit",
+          "argv": [
+            "npm",
+            "run",
+            "test:unit"
+          ],
+          "timeout_seconds": 600,
+          "scenarios": []
+        },
+        {
+          "id": "project-workflows-browser",
+          "kind": "browser",
+          "argv": [
+            "npx",
+            "--no-install",
+            "playwright",
+            "test",
+            "--config=tests/project-workflows/playwright.config.ts"
+          ],
+          "timeout_seconds": 2400,
+          "scenarios": [
+            {
+              "id": "reviewer-tones",
+              "description": "In sessions.spec.ts at 1440x900, on the seeded run with reviewer verdicts (stage A's reviewer-verdict seed, plus one reviewer whose verdict word is 'failed', added to tests/project-workflows/fixtures/sessions.ts if none exists): on the node pages of reviewer-general (blocked), reviewer-critique (approved) and the failed-verdict reviewer, the node header's .node-title-row contains no .status-succeeded and no tone-ok element, and node-verdict-outcome is muted metadata reading '· session succeeded' on reviewer-general and reviewer-critique and '· session failed' on the failed-verdict reviewer; on the run page's step strip the failed-verdict reviewer's chip has data-verdict='failed', the tone-fail class, the failed glyph and an aria-label '<label>, failed' that never contains 'succeeded'; the blocked and approved chips keep stage A's assertions; panel.spec.ts:166 still passes unchanged, and a reviewer with no verdict keeps data-verdict='none'."
+            },
+            {
+              "id": "findings-groups",
+              "description": "At 1440x900 on the seeded blocked review's node page (the review-one-list seed): the findings filter row exposes one role=group per group (state, severity, reviewer, lane), each with a visible label; after any sequence of clicks Open P0/P1 and Open only are never both pressed, and the page still opens on Open P0/P1; a finding card's More button keeps the visible text 'More'/'Less', has aria-controls listing both its finding-rest id and its finding-body id, and has an accessible name that starts with 'More' and names what it reveals; the first card (data-blocking='true', P1) has a computed border-left-color equal to the --fail token's value, while a non-blocking P1 card keeps the --p1 colour; the visible-words allow-list test passes."
+            },
+            {
+              "id": "findings-first-screen",
+              "description": "At 1440x900 with no scroll, on the seeded blocked review's node page: the bottom of the first finding card's finding-message box is under 900 px (its head sentence wholly visible), not only the card's top; the verdict line, blocked-by and summary come before the findings; the review record's facts (reviewer session ids, reviewed at, bundle, diff) come after the findings, and the review-result block keeps its test id, data-reviewer-count and reviewer entries visible; node-compact's other assertions (no tablist, one sticky band) still hold."
+            },
+            {
+              "id": "filtered-lists",
+              "description": "At 1440x900 in both phases: on a seeded project page, with a text filter alone that matches exactly one of the dispatch-needs block's ('Needs you and running') runs, the block lists only that run and its heading reads '1 of <n>' (n counting the block's runs before the filter); with q=fail and status Failed, the heading reads '0 of <n>', the block says 'No run matches.' exactly once, and it shows neither dispatch-needs-none nor dispatch-needs-clear; clearing the filter restores the block and its heading as on main; the rail's and the project card's counts are the same with and without the filter; without a filter the block and its heading are as on main; a feature whose latest run succeeded keeps 'succeeded' as its header state word when the filter leaves only an older failed run, and when it leaves no run, never 'no runs'; on a filtered Triage every empty section's text contains 'No run matches.' exactly once."
+            },
+            {
+              "id": "back-to-run",
+              "description": "In both phases at 1440x900: on a seeded run page scrolled until its Sessions heading is in view (scrollY > 600), opening a node page and going Back returns to the run page with scrollY within 50 px of the value before; stage B's list-level Back-restore tests still pass."
+            },
+            {
+              "id": "dock-column-hold",
+              "description": "In both phases, at a viewport where the run frame measures 1200-1215 px before the sessions load: after the sessions load the run page has data-dock='column'; shrinking the viewport by 15 px keeps data-dock='column' and leaves the .sb-world transform unchanged; at a viewport whose run frame is under 1176 px the dock is data-dock='overlay', and widening it back to a frame of 1200 px or more gives data-dock='column'."
+            },
+            {
+              "id": "narrow-chart-rows",
+              "description": "On a seeded project page at 1024x900 with a run selected (stage C [L1]'s setup): every .dispatch-run-when and every landing note inside the chart has scrollWidth <= clientWidth; no descendant of .dispatch-chart has a right edge beyond the chart's right edge; each run id's text box is at most 2 lines tall; the chart's copyable status command reads 'python -m workflow status <runs root>/<run id> --by operator' with the run id filled in and the runs root as a named placeholder, never a bare run id after 'status'."
+            },
+            {
+              "id": "github-once",
+              "description": "On the Projects page at 1440x900 in both phases: the card of the seeded project that is not a git repository says 'not a git repository' exactly once and contains no 'GitHub not read'; a not_github card reads 'no GitHub remote' exactly once; any other not-read reason still reads 'GitHub not read: <reason>'; with the /api/dispatch/projects response held by page.route, no card text and no meta-line text contains 'not read' and every card foot says 'GitHub: reading…'; after the response is released the normal text shows; with the overview answered by an error, the cards say 'GitHub not read'; on the non-git project's own page (DISPATCH_UNREADABLE), the Local and GitHub card (dispatch-gh-local) contains no 'GitHub not read', and the header's 'git not read' (dispatch.spec.ts:155) stays."
+            },
+            {
+              "id": "triage-controller-stopped",
+              "description": "With page.clock installed and /api/dispatch/runs answered by page.route in both phases: a feature's latest run served as status running with activity.controller 'not_running' on two polls at least 15 s apart is listed under Needs you on Triage (not under Running), with the run page's 'controller not running' wording and the interrupted next step, and is counted in the tab title's '(n)', the rail's Triage badge and its project's rail and card waits; a following poll that serves activity.controller 'running' returns it to Running and restores every count on that poll; after a single not_running reading, or with activity.controller 'unknown' or null, it stays under Running and no count changes; a running run that is not its feature's latest is never moved."
+            },
+            {
+              "id": "unread-runs",
+              "description": "With a feature's per-workflow run list answered by page.route in both phases with two readable runs plus errors [{run_id, code, message}] naming a third: the feature page lists the two runs and one line '1 run cannot be read: <run id>', the line carries no data-run-id and is no li of run-list, and the scope line counts the two readable runs; the project page shows the same line under that feature, and when the steps answer also names that run in its errors, no D22 line names that run (the chart's steps-error row is the only 'cannot be read' text for it, whatever its message and command show) and dispatch-needs-unread reads '1 feature cannot be read'; with every run unreadable (runs [] and errors naming two runs), the feature page shows '2 runs cannot be read: <id>, <id>' and no empty-runs; with no errors key in the answer neither page shows the line and both are as on main."
+            },
+            {
+              "id": "resume-copy-row",
+              "description": "At 1280x900 on a seeded node page that shows a session block with a resume command: the Copy button's vertical range overlaps the command's first line (same row); on the run page at 1280x900 the Sessions table still shows each resume command on its own line."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "node_id": "backend",
+      "role": "server, contracts and engine",
+      "required_check_kinds": [
+        "build",
+        "unit",
+        "contract"
+      ],
+      "owned_paths": [
+        "server",
+        "contracts",
+        "workflow",
+        "src/projects/node/sidecar.ts",
+        "tests/unit/triage.test.ts",
+        "tests/unit/sidecar.test.ts",
+        "docs/handoff/ux-fixes-d-backend.md"
+      ],
+      "checks": [
+        {
+          "id": "frontend-build",
+          "kind": "build",
+          "argv": [
+            "npm",
+            "run",
+            "build"
+          ],
+          "timeout_seconds": 300,
+          "scenarios": []
+        },
+        {
+          "id": "frontend-lint",
+          "kind": "build",
+          "argv": [
+            "npm",
+            "run",
+            "lint"
+          ],
+          "timeout_seconds": 180,
+          "scenarios": []
+        },
+        {
+          "id": "shared-contract",
+          "kind": "contract",
+          "argv": [
+            "npm",
+            "run",
+            "test:contracts"
+          ],
+          "timeout_seconds": 180,
+          "scenarios": []
+        },
+        {
+          "id": "frontend-unit",
+          "kind": "unit",
+          "argv": [
+            "npm",
+            "run",
+            "test:unit"
+          ],
+          "timeout_seconds": 600,
+          "scenarios": []
+        },
+        {
+          "id": "server-unit",
+          "kind": "unit",
+          "argv": [
+            "npx",
+            "--no-install",
+            "tsx",
+            "--test",
+            "server/projects.test.ts",
+            "server/dispatch.test.ts",
+            "server/sessions.test.ts",
+            "server/controls.test.ts",
+            "server/app.test.ts"
+          ],
+          "timeout_seconds": 600,
+          "scenarios": []
+        },
+        {
+          "id": "workflow-unit",
+          "kind": "unit",
+          "argv": [
+            ".venv/bin/python",
+            "-m",
+            "workflow.run_tests"
+          ],
+          "timeout_seconds": 3600,
+          "scenarios": []
+        }
+      ]
+    }
+  ],
+  "critique_app": {
+    "argv": [
+      "npx",
+      "--no-install",
+      "tsx",
+      "tests/project-workflows/dispatch-app.ts"
+    ],
+    "ready_path": "/api/dispatch/projects",
+    "timeout_seconds": 180
+  }
+}

@@ -1,0 +1,67 @@
+{
+  "version": "2.10.0",
+  "name": "UX critique fixes, stage D (features/ux-critique-fixes-d/prd.md): the decided items stages A-C left unbuilt or unmet on main ca5e2bb: reviewer verdict tones, the findings row and findings-first review page, honest scope lines and filtered blocks, a stopped controller under Needs you, the dock's column hold, Back to a run page, narrow-chart rows and GitHub said once (lane ui); one unreadable run no longer fails its list, the relaunch and Panes-not-attached notes, archived launch sessions, enter_not_submitted, a disk transient, the panel budget default and the relaunch and retry refusals (lane backend)",
+  "branch_prefix": "feature/ux-critique-fixes-d",
+  "prd": "features/ux-critique-fixes-d/prd.md",
+  "policy": "policy.json",
+  "workers": [
+    {
+      "node_id": "ui",
+      "task": "ui-task.md",
+      "model": "claude-sonnet-5-5",
+      "effort": "medium",
+      "skills": [
+        "impeccable"
+      ],
+      "lane_review": {
+        "reviewers": [
+          {
+            "transport": "pi",
+            "model": "openai-codex/gpt-6.1-sol"
+          }
+        ],
+        "rounds": 1,
+        "timeout_minutes": 15
+      }
+    },
+    {
+      "node_id": "backend",
+      "task": "backend-task.md",
+      "model": "claude-opus-5-5",
+      "effort": "medium",
+      "lane_review": {
+        "reviewers": [
+          {
+            "transport": "pi",
+            "model": "openai-codex/gpt-6.1-sol"
+          }
+        ],
+        "rounds": 1,
+        "timeout_minutes": 15
+      }
+    }
+  ],
+  "reviewers": [
+    {
+      "reviewer_id": "general",
+      "prompt": "builtin:general"
+    },
+    {
+      "reviewer_id": "coverage",
+      "prompt": "builtin:coverage"
+    }
+  ],
+  "challenge": true,
+  "critique": {
+    "lanes": [
+      "ui"
+    ],
+    "skills": [
+      "impeccable"
+    ],
+    "max_budget_usd": 20,
+    "timeout_minutes": 60
+  },
+  "critical": false,
+  "tryout": false
+}

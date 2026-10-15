@@ -1,0 +1,17 @@
+# ux-critique-fixes-d
+
+Stage D of the fixes for the 2026-10-13 Astra + Fable critique and the collected md-manager issues: the decided items that stages A-C and the engine feature backlogged rather than built, or that the stage reviews found unmet, triaged against main ca5e2bb (operator-decisions.md [O16], recorded here as [O9]). Lane `ui`: reviewer verdict tones, the grouped findings row and findings-first review page, the fail stripe, cross-tab pins, honest scope lines and a filtered "Needs you and running" block, non-ticking waits, Back to a run page, the dock's column hold, the narrow step chart, GitHub said once, a stopped controller under Needs you, and the "cannot be read" line. Lane `backend`: one unreadable run no longer fails its workflow's list, the relaunch and "Panes not attached" notes read as notes, archived launch sessions stay listed, `enter_not_submitted`, a disk `transient`, the panel budget default, and truthful `relaunch` and `retry --all-failed` refusals.
+
+- `prd.md`: problem, non-goals, the lanes and the frozen D22 field (section 5), one numbered requirement per item (D1-D22 and D32 for `ui` in section 6, D22-D31 for `backend` in section 7) with files, rule, acceptance and tests, the DESIGN.md amendments (8), the amendments to prior decisions (9) and risks.
+- `feature.json` 2.10.0: lanes `ui` (claude-sonnet-5-5, medium, skill `impeccable`) and `backend` (claude-opus-5-5, medium), each with a GPT 6.1 lane reviewer (pi, 1 round, 15 min); reviewers general and coverage; the design challenge; the critique on `ui`; not critical; no tryout.
+- `policy.json` 1.4.0: owned paths (an exact file list for `ui`; `server`, `contracts`, `workflow` and `src/projects/node/sidecar.ts` for `backend`), setup (`npm ci` and the controller venv), the checks (both lanes: build, lint, contracts, unit; `ui`: the project-workflows browser config with eleven new scenarios; `backend`: server-unit and the workflow suite) and `critique_app`.
+- `ui-task.md`, `backend-task.md`: written after this draft from the PRD's sections; each repeats its scenarios' text under Acceptance and stays, with `decisions.md`, under 82 KB.
+- `decisions.md`: the operator's prompt and decisions ([O1]-[O10]), the grill answers ([O11]-[O15]), the grill defaults, Changes after launch and Deferred.
+
+Before launch:
+
+1. The grill (`~/.local/state/cook/ux-critique-fixes/stage-d/grill/q1` to `q5`): q1-q5 are answered and applied ([O11]-[O15] in `decisions.md`; q3 by the operator's pick, the others by panel agreement), and every `<!-- grill qN -->` place in `prd.md`, `decisions.md`, the tasks and `policy.json` agrees with its answer.
+2. Measure each worker prompt: task + `decisions.md` + 23 KB under 120,000 bytes (target under 105 KB).
+3. Check nothing outside this run holds the harness ports; probe the lane reviewer once (`pi -p --provider openai-codex --model gpt-6.1-sol "ok" </dev/null`): if it fails, drop `lane_review` from both lanes (never one) and record it under `## Changes after launch`. `fix/multi-lane-repair` is merged before launch or after the run finishes, never while it runs ([O9]).
+
+Launch from this checkout: `python -m workflow launch ux-critique-fixes-d --repo <this repository> --dry-run`, then `--live --automatic --fix-rounds 3 --judge-model claude-opus-5-5 --review-timeout-seconds 3600 --by operator`; both pass `--run-root ~/.local/state/md-manager-workflows/ux-critique-fixes-d`, because this checkout's name is not `md-manager`.
