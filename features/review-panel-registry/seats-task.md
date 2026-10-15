@@ -8,9 +8,9 @@ Spec: `features/review-panel-registry/prd.md` sections 4, 5, 6, 7.1, 7.2 (settle
 
 ## Context
 
-- **Follow-up run 005 ([L12]): first restore the run-004 candidate's version of your owned paths**, then check that nothing differs; the last command prints nothing once restored:
-  `git restore --source=9245e1efb704377aa4a003246243f27974f185a2 --staged --worktree -- workflow/reviewers.py workflow/test_reviewers.py workflow/panel.py workflow/test_panel.py workflow/launch.py workflow/test_pipeline.py workflow/test_feature_launch.py workflow/lane_review.py workflow/test_lane_review.py workflow/guardrails.py workflow/test_guardrails.py workflow/sidecar.py workflow/test_sidecar.py workflow/attack.py workflow/test_attack.py workflow/critique.py workflow/test_critique.py workflow/testdata/panel workflow/prompts/panels workflow/skills/workflow-grill workflow/README.md contracts/workflow docs/handoff/review-panel-seats.md`
-  `git diff --stat 9245e1efb704377aa4a003246243f27974f185a2 -- workflow/reviewers.py workflow/test_reviewers.py workflow/panel.py workflow/test_panel.py workflow/launch.py workflow/test_pipeline.py workflow/test_feature_launch.py workflow/lane_review.py workflow/test_lane_review.py workflow/guardrails.py workflow/test_guardrails.py workflow/sidecar.py workflow/test_sidecar.py workflow/attack.py workflow/test_attack.py workflow/critique.py workflow/test_critique.py workflow/testdata/panel workflow/prompts/panels workflow/skills/workflow-grill workflow/README.md contracts/workflow docs/handoff/review-panel-seats.md`
+- **Follow-up run 006 ([L14]): first restore your lane's run-005 snapshot of your owned paths**, then check that nothing differs; the last command prints nothing once restored:
+  `git restore --source=a722738f6b7c41c69bf2fee73a36cde02e1f1a10 --staged --worktree -- workflow/reviewers.py workflow/test_reviewers.py workflow/panel.py workflow/test_panel.py workflow/launch.py workflow/test_pipeline.py workflow/test_feature_launch.py workflow/lane_review.py workflow/test_lane_review.py workflow/guardrails.py workflow/test_guardrails.py workflow/sidecar.py workflow/test_sidecar.py workflow/attack.py workflow/test_attack.py workflow/critique.py workflow/test_critique.py workflow/testdata/panel workflow/prompts/panels workflow/skills/workflow-grill workflow/README.md contracts/workflow docs/handoff/review-panel-seats.md`
+  `git diff --stat a722738f6b7c41c69bf2fee73a36cde02e1f1a10 -- workflow/reviewers.py workflow/test_reviewers.py workflow/panel.py workflow/test_panel.py workflow/launch.py workflow/test_pipeline.py workflow/test_feature_launch.py workflow/lane_review.py workflow/test_lane_review.py workflow/guardrails.py workflow/test_guardrails.py workflow/sidecar.py workflow/test_sidecar.py workflow/attack.py workflow/test_attack.py workflow/critique.py workflow/test_critique.py workflow/testdata/panel workflow/prompts/panels workflow/skills/workflow-grill workflow/README.md contracts/workflow docs/handoff/review-panel-seats.md`
 - **Existing panel** (`workflow/panel.py`, 2.6.0): `TRANSPORTS` :67, `provider_settings` :116, `settings` :136 (`report_only` must be true :164), `check_launch` :264 (refuses `challenge`), `prove_transports` :285, `pin` :320-337, `PLAN_KEYS` :340, `assemble_review_context` :575-612 (no decisions.md today), the claude command :632 (cwd = shared review-worktree :953), `pi_command` :653, `pi_env` :660 (`env -i`), the parsers :713/:741, `TRANSPORT` dispatch :760, `normalize_findings` :789, `overlap` :827, `ensure_started` :988, `_finalize` :1068 (attention), `collect` :1123 (in `review_candidate`'s finally, `automatic.py:1211-1240`, after review.json), `status_lines` :1239, `outcome_lines` :1255, `export_section` :388.
 - **prepare pass-through:** `pipeline.py:1624-1640` parses `--panel-settings` and calls `panel.settings` per item, then `panel.pin` at :1775-1785. Put the resolved seats inside each panel item (`seats`), so you need **no change to `pipeline.py`** (the judge lane owns that file).
 - **Launch path:** `launch.py` `load_feature` :174-200, the panel preflight :356-365, `--panel-settings` :526-531 and the dry-run print :707-709. Template for an outside-the-repo default path with an env override: `attack.default_secret_files(env)` (`attack.py:131`) and `skills_root(home)` (`skills.py:26`). Test isolation helpers: `isolate_registry` / `stub_claude_cli` (`test_pipeline.py:37`, `:53`).
@@ -34,19 +34,7 @@ Spec: `features/review-panel-registry/prd.md` sections 4, 5, 6, 7.1, 7.2 (settle
 
 Your checks (`/home/agentops/dev/md-manager/.venv/bin/python -m workflow.run_tests --jobs 4` and `npm run test:contracts`) pass. PRD section 10 items 1, 2, 3, 4, 9 (for the panel record and export) and 10 are each proved by named tests in your files:
 
-0. **Run 005 ([L12], [L13]):** restore from the run-004 candidate `9245e1e`. Then fix B1 in `workflow/panel.py` only, as [L13] specifies:
-   - A per-seat watchdog armed at `start_seat` through a patchable timer factory.
-   - The callback returns when the seat has already exited or has a result. Otherwise it sets `job.expired` before its first `killpg`, then SIGTERMs, then SIGKILLs after the grace. It touches nothing else.
-   - Before the reap, only `job.expired` makes a seat `timed_out`. An exited seat without `expired` keeps its result, whatever the clock says. The clock check applies only to seats still running.
-   - The timer is cancelled in `_reap_seat` and `stop_seat`.
-
-   Named tests in `workflow/test_panel.py`, each under 5 s:
-   - `test_completed_seat_survives_late_settle`;
-   - `test_watchdog_expires_without_settle` (deterministic, 20 passes in a row under `--jobs 4`);
-   - `test_reaped_seat_watchdog_is_inert`;
-   - a test that stopping a seat cancels its timer.
-
-   Also correct `docs/handoff/review-panel-seats.md:79-81` to say "panel answer" (G8). Nothing else differs from `9245e1e`.
+0. **Run 006 ([L14]):** restore your run-005 snapshot `a722738`. `git diff --stat a722738 -- <your owned paths>` stays empty, and you change nothing; your code already meets the items below, including the run-005 fix. Run your checks and hand off.
 1. `reviewers.load` accepts `examples/reviewers.example.json` and rejects each bad input listed in PRD 10.1, with the path in the error. A missing file, an unreadable file and invalid JSON are refused with the path.
 2. `reviewers.resolve`, with injected `which` and `run`:
    - An absent named seat → `ValueError`.

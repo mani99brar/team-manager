@@ -161,6 +161,13 @@ Design challenge attempt 1 (3 P1, 7 P2) on run review-panel-registry-001. The bu
 
     This touches seats Acceptance 0 and 4 (the timeout path). PRD 5.1 and [G11]/[G12] are unchanged in substance.
 
+- [L14] (panel: agree, follow-up, run 005 blocked; decisions/008-controller_blocked) Follow-up run `review-panel-registry-006` follows run 005. No candidate exists, so each lane restores its own run-005 snapshot of its owned paths, without `--restore-from`: seats `a722738` (never `54226475`), judge `1aa2251`, viewer `a038212`. It supersedes [L12]'s `9245e1e` restore line. For one test-only edit, it also supersedes [L12]'s "the judge lane carries no code item" and judge Acceptance 0. [L11]'s policy.json and [L13] stand; no policy, check or feature.json change.
+  - **seats and viewer:** no code item. They restore and verify again, and their lane reviews run again. The viewer's archived-judge-sessions claim (V1) is refuted for the third time (triage 008; `server/projects.ts` is byte-identical to the code refuted in decisions 004 and 005) and is not carried.
+  - **judge, the flaky subprocess timeouts (test-only):** in `workflow/test_automatic.py`, the `subprocess` `timeout=90` at :2532 (`test_recovery_in_actual_new_controller_processes`) and at :3533 (`test_interrupted_reviewer_wait_keeps_the_reviewers_and_resumes_in_a_new_process`) becomes `timeout=300`. Nothing else changes, in that file or in any product code; the tests' assertions, fixtures and browser-queue setup stay as they are. Acceptance: both tests still fail on a child that never finishes (the timeout still raises), and the judge suite passes under `--jobs 4` within the 3600 s cap. The judge lane review runs on this snapshot, since it did not run in run 005.
+  - **Launch condition:** as in [L11]. Host-capacity admission (`cook.py reserve` and preflight) passes first. The launch waits while any other cook's test suite is running or the 1-minute load is above about 5.
+  - Every required gate runs again, including `JudgedCandidateTests` on the merged tree.
+  - **Why:** the judge failure was environmental: one child hit its 90 s limit under three concurrent 4-job suites plus Playwright. The test passes alone in 11.7 s and passed at least 10 times in runs 002-005, and the same 90 s family timed out in runs 001, 003 and 005. Raising the test's own timeout is the narrowest durable fix and is easy to revert. The browser-queue isolation in `GraphFixture.setUp` stays deferred.
+
 Not changed:
 - The Muse entry's `env.pass: []` stands. The session ran the challenge's cheap experiment, and the login works with an environment built from nothing (`decisions/001-challenge_paused/extra.md`).
 - The seats lane's effort stays medium, because feature.json is frozen after prepare.
@@ -205,4 +212,5 @@ Not changed:
   - Critique's two design P2s.
 
   G4 (= A) and G17 (= the browser-queue/host-load item) stay deferred as before.
+- From run 005 (triage 008, plausible P2): the viewer's panel card leaves out the judge's cost.
 - Test isolation: the workflow tests wait on the host-wide browser queue (`~/.config/md-manager/browser-queue`), so lane suites contend with live Playwright checks. This was run 001's seats timeout. It goes to a learning, not this cook.
