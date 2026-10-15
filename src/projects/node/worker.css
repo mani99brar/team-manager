@@ -10,7 +10,7 @@
 /* The report: the heading and its one honesty line, the summary clamped to three lines, the evidence behind counts. */
 .worker-report-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
 .worker-report-head h4 { margin: 0; }
-.worker-report-status { font-size: 0.85rem; }
+.worker-report-status { font-size: max(0.85rem, var(--type-floor)); }
 .worker-summary-block { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; }
 .worker-summary.is-clamped { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3; overflow: hidden; }
 .worker-verifier-note, .worker-result-summary { margin: 4px 0; font-size: 0.9rem; }
@@ -26,7 +26,7 @@
 .launch-files-tools { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 12px; margin: 6px 0; }
 /* The chosen filter stays readable under the pointer, as the Local/UTC toggle does. */
 .launch-files-tools .button[aria-pressed='true']:hover { background: var(--accent); color: var(--accent-contrast); }
-.launch-files-group { display: inline-flex; align-items: center; gap: 4px; font-size: 0.85rem; }
+.launch-files-group { display: inline-flex; align-items: center; gap: 4px; font-size: max(0.85rem, var(--type-floor)); }
 .file-rows { list-style: none; margin: 0; padding: 0; font-size: 0.9rem; }
 .file-rows > li + li { border-top: 1px solid var(--border); }
 .file-row-summary { display: grid; grid-template-columns: 3em minmax(0, 1fr) auto; align-items: center; gap: 8px; min-height: 32px; padding: 2px 4px; }
@@ -37,20 +37,20 @@ details.file-row > summary:hover { background: var(--surface-alt); }
 details.file-row > summary::-webkit-details-marker { display: none; }
 details.file-row > summary .file-row-severity::before { content: '▸ '; color: var(--text-muted); font-weight: 400; }
 details.file-row[open] > summary .file-row-severity::before { content: '▾ '; }
-.file-row-severity { font-weight: 700; font-size: 0.8rem; white-space: nowrap; }
+.file-row-severity { font-weight: 700; font-size: var(--type-floor); white-space: nowrap; }
 [data-findings]:not([data-findings='0']) .file-row-severity { color: var(--danger-text); }
 .file-row-path { justify-self: start; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; overflow-wrap: normal; }
-.file-row-meta { display: inline-flex; gap: 10px; font-size: 0.8rem; color: var(--text-muted); white-space: nowrap; }
+.file-row-meta { display: inline-flex; gap: 10px; font-size: var(--type-floor); color: var(--text-muted); white-space: nowrap; }
 .file-repair { color: var(--warn-text, var(--text)); }
 .file-row-body { display: flex; flex-direction: column; gap: 6px; padding: 4px 4px 10px calc(4px + 3em + 8px); }
-.file-row-facts { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; font-size: 0.85rem; }
+.file-row-facts { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; font-size: max(0.85rem, var(--type-floor)); }
 .file-content { max-height: 480px; overflow: auto; }
-.file-findings { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; font-size: 0.85rem; }
+.file-findings { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; font-size: max(0.85rem, var(--type-floor)); }
 .file-finding { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .file-finding-who { white-space: nowrap; }
 .file-finding-message { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; overflow-wrap: normal; }
 .file-group { padding-top: 6px; }
-.file-group-name { display: block; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.8rem; color: var(--text-muted); }
+.file-group-name { display: block; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: var(--type-floor); color: var(--text-muted); }
 
 /* The Session disclosure: closed until asked for. */
 .worker-session > summary { cursor: pointer; font-weight: 600; }

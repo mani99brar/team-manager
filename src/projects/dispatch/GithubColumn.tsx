@@ -1,9 +1,11 @@
 /**
  * The project page's GitHub column (docs/PRD_PROJECTS_DISPATCH.md 4.3, Appendix A): four cards — Local and GitHub, Pull
  * requests, Issues, and Also checked out as. Every claim names its source and time; nothing the data does not hold is shown.
- * When GitHub was not read each card says "GitHub not read: <reason>" and shows no GitHub counts (the Local and GitHub card
- * keeps its local sync, ahead and landing counts, which do not depend on GitHub, [P29]); when it was read but the latest
- * refresh failed the data shows with a "latest refresh failed" line ([P12]). PR and issue groups longer than 5 fold ([V8]).
+ * GitHub's state is said once per page: a project with no GitHub remote reads "no GitHub remote" in the column's one line
+ * and has no Pull requests or Issues card; any other not-read status reads "GitHub not read: <reason>" ("GitHub reads are
+ * turned off" when off) on the Local and GitHub card, which keeps its local sync, ahead and landing counts ([P29]), and the
+ * Pull requests and Issues cards do not repeat it; when it was read but the latest refresh failed the data shows with a
+ * "latest refresh failed" line, once ([P12]). PR and issue groups longer than 5 fold ([V8]).
  */
 import { useState } from 'react'
 import type { Project } from '../api.ts'
@@ -74,13 +76,13 @@ function Group({ title, items, render, note }: { title: string; items: readonly 
   )
 }
 
-function NotRead({ id, testId, title, reason }: { id: string; testId: string; title: string; reason: string }) {
-  return (
-    <div className="dispatch-gcard" id={id} data-testid={testId} tabIndex={-1}>
-      <h3>{title}</h3>
-      <p className="dispatch-muted">GitHub not read: {reason}</p>
-    </div>
-  )
+/** How a project's GitHub state is said when its data was not read: the one sentence a card or page carries. */
+// eslint-disable-next-line react-refresh/only-export-components
+export function githubNotReadText(github: GithubState | null): string {
+  if (github?.status === 'not_github') return 'no GitHub remote'
+  if (github?.status === 'off') return 'GitHub reads are turned off'
+  if (github === null) return 'GitHub not read: GitHub state not available'
+  return `GitHub not read: ${github.reason ?? 'not read yet'}`
 }
 
 type Props = {
@@ -103,8 +105,7 @@ type Props = {
 }
 
 export function GithubColumn({ project, git, github, runBranches, others, primaryName, viewerLogin, readAt, onShowAhead, aheadOpen, onNavigate, compact = false }: Props) {
-  const reason = github?.status === 'read' ? github.reason : github?.reason ?? 'not read yet'
-  const notReadReason = github === null ? 'GitHub state not available' : reason ?? 'not read yet'
+  const notReadText = githubNotReadText(github)
   if (compact) {
     const ahead = git !== null && (git.ahead_commits.length > 0 || git.landings.length > 0 || (git.origin?.compare === 'compared' && (git.origin.ahead ?? 0) > 0))
     return (
@@ -112,7 +113,7 @@ export function GithubColumn({ project, git, github, runBranches, others, primar
         <p className="dispatch-gline" id="g-local" data-testid="dispatch-gh-local" tabIndex={-1}>
           <span className="dispatch-gh-title">Local and GitHub</span>
           {' · '}{git === null ? 'git state not available.' : syncPhrase(git, project.project_id, primaryName)}
-          {' · '}<span data-testid="dispatch-gh-local-notread">GitHub not read: {notReadReason}</span>
+          {' · '}<span data-testid="dispatch-gh-local-notread">{notReadText}</span>
           {ahead && (
             <> {' · '}<button type="button" className="dispatch-gh-ahead-btn" data-testid="dispatch-ahead-button" aria-pressed={aheadOpen} onClick={onShowAhead}>Commits ahead and landings</button></>
           )}
@@ -133,7 +134,12 @@ export function GithubColumn({ project, git, github, runBranches, others, primar
     <div className="dispatch-gcard" id="g-local" data-testid="dispatch-gh-local" tabIndex={-1}>
       <h3>Local and GitHub</h3>
       {git === null
-        ? <p className="dispatch-muted">git state not available.</p>
+        ? (
+          <>
+            <p className="dispatch-muted">git state not available.</p>
+            {!read && <p className="dispatch-gsub dispatch-muted" data-testid="dispatch-gh-local-notread">{notReadText}</p>}
+          </>
+        )
         : (
           <>
             <p className="dispatch-gline">{syncPhrase(git, project.project_id, primaryName)}</p>
@@ -162,7 +168,7 @@ export function GithubColumn({ project, git, github, runBranches, others, primar
                     {github?.default_branch ? <>GitHub's <code>{github.default_branch}</code> has no commits.</> : githubNoHeadText(null)}
                   </p>
                 )
-                : <p className="dispatch-gsub dispatch-muted" data-testid="dispatch-gh-local-notread">GitHub not read: {notReadReason}</p>}
+                : <p className="dispatch-gsub dispatch-muted" data-testid="dispatch-gh-local-notread">{notReadText}</p>}
             {git.origin?.compare === 'compared' && (git.origin.ahead ?? 0) > 0 && (
               <p className="dispatch-gsub" data-testid="dispatch-ahead-naming">
                 Of the {git.origin.ahead} ahead, {git.ahead_naming_run} name a run; {(git.origin.ahead ?? 0) - git.ahead_naming_run} do not name a known run. Runs never push.
@@ -185,12 +191,10 @@ export function GithubColumn({ project, git, github, runBranches, others, primar
     </div>
   )
 
-  let prs: React.ReactNode
-  let issues: React.ReactNode
-  if (!read) {
-    prs = <NotRead id="g-prs" testId="dispatch-gh-prs" title="Pull requests" reason={notReadReason} />
-    issues = <NotRead id="g-iss" testId="dispatch-gh-issues" title="Issues" reason={notReadReason} />
-  } else {
+  // A project whose GitHub was not read has no Pull requests or Issues card: the Local and GitHub card says why, once.
+  let prs: React.ReactNode = null
+  let issues: React.ReactNode = null
+  if (read) {
     const groups = prGroups(github.prs, { branches, viewerLogin, readAt, defaultBranch })
     const relWhy = (pr: Pr) => { const rel = prRelation(pr, branches, defaultBranch); return rel ? `possibly related: ${relatedWhy(rel)}` : '' }
     prs = (

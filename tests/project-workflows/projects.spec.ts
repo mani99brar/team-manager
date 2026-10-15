@@ -2,7 +2,8 @@ import { test, expect, type Page } from '@playwright/test'
 import { rm, writeFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
-import { PI, currentCrumb, fileUrl, node, openGraph, roots } from '../helpers.ts'
+import { PI, currentCrumb, fileUrl, node, nodeBody, openGraph, roots, visibleNodeIds } from '../helpers.ts'
+import { SKILL_LOCATIONS } from './harness.ts'
 import { mockResponse } from './mock.ts'
 import {
   APPROVAL_MESSAGE,
@@ -52,11 +53,20 @@ async function expectNoExecutionControls(page: Page) {
 }
 
 test(`[scenario:projects-navigation] Pi and Claude remain usable and Projects opens registered projects (${phase})`, async ({ page }, testInfo) => {
-  // The existing skills graph still loads at Home with only the two sources, and the roots strip offers Projects.
+  // The skills graph loads at Home with both sources opened one level: exactly the two sources and each configured location
+  // (the harness's SKILL_LOCATIONS), no folder or file node. The roots strip offers Projects.
   await openGraph(page)
   await expect(rootsNav(page).getByRole('link')).toHaveText(['Pi', 'Claude', 'Projects'])
-  await expect(page.locator('.graph-canvas .node')).toHaveCount(2)
-  await expect(page.getByRole('toolbar', { name: 'File operations' })).toBeVisible()
+  const landing = ['Pi', 'Claude'].flatMap(source => [source, ...SKILL_LOCATIONS.filter(location => location.source === source).map(location => `${source}/${location.id}`)])
+  expect(await visibleNodeIds(page)).toEqual(landing)
+  // No file operation is offered before something is selected; the Pi source then offers creation, enabled, and nothing disabled.
+  const fileOperations = page.getByRole('toolbar', { name: 'File operations' })
+  await expect(fileOperations).toHaveCount(0)
+  await nodeBody(page, 'Pi').click()
+  await expect(fileOperations.getByRole('button')).toHaveText(['New file…', 'New folder…'])
+  await expect(fileOperations.getByRole('button', { name: 'New file…' })).toBeEnabled()
+  await expect(fileOperations.getByRole('button', { name: 'New folder…' })).toBeEnabled()
+  await expect(fileOperations.locator('button:disabled, button[aria-disabled="true"]')).toHaveCount(0)
 
   // Projects opens the registered project list without disturbing the skills domain.
   await rootsNav(page).getByRole('link', { name: 'Projects' }).click()

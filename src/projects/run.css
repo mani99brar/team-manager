@@ -38,7 +38,7 @@
 
 /* ---- The status line (the identity line and the node pages' run bar): badge, meaning and chips on one wrapping row ---- */
 .run-status-line { margin: 0; display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; }
-.run-status-meaning { font-size: 0.85rem; color: var(--text-muted); white-space: nowrap; }
+.run-status-meaning { font-size: max(0.85rem, var(--type-floor)); color: var(--text-muted); white-space: nowrap; }
 
 /* ---- The run bar of a node page (the run page's identity line lives in signal/signal.css) ---- */
 /* The run bar of a node page: one line, the Now headline ellipsized. */
@@ -75,16 +75,16 @@
 .run-now-reason-row { display: flex; align-items: flex-start; gap: 4px 12px; flex-wrap: wrap; }
 .run-now-reason { margin: 0; flex: 1 1 480px; min-width: 0; overflow-wrap: anywhere; }
 .run-now-reason.is-clamped { display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-.run-now-more, .run-now-show { min-height: 22px; padding: 0 8px; font-size: 0.75rem; }
+.run-now-more, .run-now-show { min-height: 22px; padding: 0 8px; font-size: var(--type-floor); }
 .run-now-actions { margin: 4px 0 0; }
-.run-now-open { white-space: nowrap; font-size: 0.85rem; font-weight: 400; }
+.run-now-open { white-space: nowrap; font-size: max(0.85rem, var(--type-floor)); font-weight: 400; }
 
 /* The likely next step: label, numbered steps, one copyable command each, and the honesty caption. */
 .command-block { display: flex; flex-direction: column; gap: 2px; margin-top: 2px; min-width: 0; }
 .command-label { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 8px; }
-.command-runbook { color: var(--text-muted); font-size: 0.85rem; }
-.command-legend { font-size: 0.85rem; color: var(--text-muted); }
-.command-legend > summary { cursor: pointer; color: var(--accent); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.8rem; }
+.command-runbook { color: var(--text-muted); font-size: max(0.85rem, var(--type-floor)); }
+.command-legend { font-size: max(0.85rem, var(--type-floor)); color: var(--text-muted); }
+.command-legend > summary { cursor: pointer; color: var(--accent); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: var(--type-floor); }
 .command-legend > summary:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
 .command-legend[open] { flex-basis: 100%; }
 .command-legend-text { display: block; }
@@ -92,16 +92,16 @@
 .command-step { min-width: 0; }
 .command-step::marker { color: var(--text-muted); font-variant-numeric: tabular-nums; }
 .command-step-body { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 8px; min-width: 0; }
-.command-step-caption { color: var(--text-muted); font-size: 0.85rem; }
-.command-line { display: inline-block; min-width: 0; max-width: 100%; overflow-x: auto; white-space: pre; padding: 0 6px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.8rem; line-height: 20px; vertical-align: middle; }
+.command-step-caption { color: var(--text-muted); font-size: max(0.85rem, var(--type-floor)); }
+.command-line { display: inline-block; min-width: 0; max-width: 100%; overflow-x: auto; white-space: pre; padding: 0 6px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: var(--type-floor); line-height: 20px; vertical-align: middle; }
 .command-line code { background: none; padding: 0; font-size: inherit; overflow-wrap: normal; }
 .command-prompt { color: var(--text-muted); user-select: none; }
-.command-copy { min-height: 22px; padding: 0 10px; font-size: 0.75rem; }
-.command-copied { font-size: 0.8rem; color: var(--text-muted); }
+.command-copy { min-height: 22px; padding: 0 10px; font-size: var(--type-floor); }
+.command-copied { font-size: var(--type-floor); color: var(--text-muted); }
 .command-copied:empty { display: none; }
 .command-prose { overflow-wrap: anywhere; }
-.command-caveat { margin: 0; font-size: 0.85rem; }
-.command-caption { margin: 0; font-size: 0.8rem; line-height: 18px; color: var(--text-muted); }
+.command-caveat { margin: 0; font-size: max(0.85rem, var(--type-floor)); }
+.command-caption { margin: 0; font-size: var(--type-floor); line-height: 18px; color: var(--text-muted); }
 
 /* ---- Tabs above the graph, touching their panel ---- */
 .workspace-projects:has(> .run-view) { padding-top: 8px; }
@@ -122,7 +122,7 @@
 .workflow-node.is-definition .workflow-node-status-bar { fill: var(--edge); }
 /* The status glyph sits in a badge on the node's corner, clear of its label. */
 .workflow-node-badge circle { fill: var(--surface); stroke: var(--text-muted); stroke-width: 1.5; }
-.workflow-node-glyph { font-size: 11px; font-weight: 700; fill: var(--text-muted); }
+.workflow-node-glyph { font-size: var(--type-floor); font-weight: 700; fill: var(--text-muted); }
 /* A run's node: the tone's soft fill, the tone's stroke, status bar and glyph (tone.ts `statusTone`). */
 .projects-shell .workflow-node.tone-ok { --node-tone: var(--ok); --node-tone-soft: var(--ok-soft); }
 .projects-shell .workflow-node.tone-run { --node-tone: var(--run); --node-tone-soft: var(--run-soft); }
@@ -137,7 +137,7 @@
 .projects-shell .workflow-node[data-tone] .workflow-node-badge circle { stroke: var(--node-tone); }
 .projects-shell .workflow-node[data-tone] .workflow-node-meta { fill: var(--fg); }
 .projects-shell .workflow-node-label { fill: var(--fg); }
-.workflow-graph.is-compact .workflow-node-label { font-size: 11px; }
+.workflow-graph.is-compact .workflow-node-label { font-size: var(--type-floor); }
 /* A step that waits on the operator keeps its amber ring, glyph and badge over its tone. */
 .projects-shell .workflow-node[data-attention] .workflow-node-glyph { fill: var(--attention); }
 .projects-shell .workflow-node[data-attention] .workflow-node-badge circle { stroke: var(--attention); stroke-width: 2.5; }
@@ -151,20 +151,20 @@
 .workflow-node[data-attention] .workflow-node-badge circle { stroke: var(--attention); stroke-width: 2.5; }
 .workflow-node-focus { fill: none; stroke: var(--focus); stroke-width: 3; stroke-dasharray: 4 3; display: none; }
 .workflow-node:focus-visible .workflow-node-focus { display: block; }
-.workflow-node-label { font-size: 12px; font-weight: 600; fill: var(--text); }
-.workflow-node-meta { font-size: 10px; fill: var(--text-muted); }
-.workflow-graph-legend { list-style: none; margin: 0; padding: 2px 0; display: flex; flex-wrap: wrap; gap: 4px 18px; font-size: 0.8rem; line-height: 20px; color: var(--text-muted); }
+.workflow-node-label { font-size: var(--type-floor); font-weight: 600; fill: var(--text); }
+.workflow-node-meta { font-size: var(--type-floor); fill: var(--text-muted); }
+.workflow-graph-legend { list-style: none; margin: 0; padding: 2px 0; display: flex; flex-wrap: wrap; gap: 4px 18px; font-size: var(--type-floor); line-height: 20px; color: var(--text-muted); }
 .workflow-graph-legend li { display: inline-flex; align-items: center; gap: 6px; }
 
 /* ---- Node pages: the sticky step strip and the node in full width ---- */
 .step-strip { position: sticky; top: 0; z-index: 3; display: flex; align-items: center; gap: 8px; padding: 4px 0; background: var(--surface); border-bottom: 1px solid var(--border); min-width: 0; }
-.step-strip-run, .step-strip-step { flex: none; white-space: nowrap; font-size: 0.85rem; }
+.step-strip-run, .step-strip-step { flex: none; white-space: nowrap; font-size: max(0.85rem, var(--type-floor)); }
 .step-strip-step.is-disabled { color: var(--text-muted); opacity: 0.6; }
 .step-strip-nav { flex: none; display: flex; gap: 10px; }
 .step-strip-list { position: relative; list-style: none; margin: 0; padding: 2px; display: grid; grid-template-rows: repeat(var(--rows, 1), auto); grid-auto-flow: column; grid-auto-columns: max-content; align-items: center; gap: 2px 4px; overflow-x: auto; flex: 1 1 auto; min-width: 0; }
 /* Lanes stack within their column, in the graph's column order. */
 .step-strip-list li { display: flex; grid-column: var(--column, auto); grid-row: var(--row, auto); }
-.step-chip { display: inline-flex; align-items: center; gap: 4px; padding: 1px 8px; min-height: 22px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface); color: var(--text); font-size: 0.8rem; text-decoration: none; white-space: nowrap; }
+.step-chip { display: inline-flex; align-items: center; gap: 4px; padding: 1px 8px; min-height: 22px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface); color: var(--text); font-size: var(--type-floor); text-decoration: none; white-space: nowrap; }
 .workspace-projects .step-chip { color: var(--text); }
 .step-chip:hover { background: var(--surface-alt); }
 .step-chip.tone-ok { background: var(--ok-soft); border-color: var(--ok); }
@@ -213,7 +213,7 @@
 .command-all-steps { margin-top: 6px; }
 .command-all-steps > summary {
   cursor: pointer;
-  font-size: 0.8rem;
+  font-size: var(--type-floor);
   color: var(--muted);
   padding: 2px 0;
 }
@@ -222,7 +222,7 @@
 /* The review diff rendered inline: a file list, each file a disclosure of its hunks in add/remove/context tones. */
 .review-diff-inline { margin: 12px 0; }
 .review-diff-tabs { display: flex; gap: 6px; margin-bottom: 8px; }
-.review-diff-totals { font-size: 0.85rem; color: var(--muted); margin: 0 0 8px; }
+.review-diff-totals { font-size: max(0.85rem, var(--type-floor)); color: var(--muted); margin: 0 0 8px; }
 .review-diff-files { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
 .diff-file {
   border: 1px solid var(--border);
@@ -232,13 +232,13 @@
 .diff-file > details > summary, .diff-file-binary-row, .diff-file-large { cursor: default; padding: 6px 10px; }
 .diff-file > details > summary { cursor: pointer; }
 .diff-file-head { display: inline-flex; gap: 10px; align-items: baseline; }
-.diff-file-path { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 0.8rem; }
-.diff-file-stat { font-size: 0.75rem; font-variant-numeric: tabular-nums; }
+.diff-file-path { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: var(--type-floor); }
+.diff-file-stat { font-size: var(--type-floor); font-variant-numeric: tabular-nums; }
 .diff-added { color: var(--ok); }
 .diff-removed { color: var(--fail); }
 .diff-file-large { display: flex; gap: 10px; align-items: center; justify-content: space-between; }
 .diff-hunks { overflow-x: auto; }
-.diff-hunk { width: 100%; border-collapse: collapse; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 0.78rem; }
+.diff-hunk { width: 100%; border-collapse: collapse; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: var(--type-floor); }
 .diff-hunk .diff-gutter {
   width: 1%;
   padding: 0 8px;

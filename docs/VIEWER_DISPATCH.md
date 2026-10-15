@@ -40,11 +40,12 @@ Appears on `/projects`, Triage, the project page and the workflow page (`railLev
 ## The Projects page (`src/projects/dispatch/ProjectsPage.tsx`)
 
 - `section[data-testid="dispatch-projects"]`, heading `h1` "Projects", `p[data-testid="dispatch-projects-meta"]` ("N projects in
-  M repositories · runs read <time> · GitHub read <time>").
+  M repositories · runs read <time> · GitHub read <time>"; "GitHub not read" when no project was read, and nothing about GitHub
+  when no project has a GitHub remote).
 - `ul[data-testid="dispatch-cards"]` of `a.dispatch-card[data-project-id]`, each one link to `/projects/<p>`: the state word
   (`.dispatch-card-word`, e.g. "1 of 3 features failed last"), the repository and `.dispatch-vis` chip for a read GitHub
   project, "on <checkout> · <sync>" (`.dispatch-card-line`), the non-zero run counts, the latest run, and the footer with open
-  PR/issue counts or "GitHub not read: <reason>".
+  PR/issue counts, "no GitHub remote" for a `not_github` project, "GitHub reads are turned off" or "GitHub not read: <reason>".
 
 ## The project page (`src/projects/dispatch/ProjectPage.tsx`)
 
@@ -60,14 +61,15 @@ Appears on `/projects`, Triage, the project page and the workflow page (`railLev
   feature was read and none has more; `/` focuses the search, Escape clears it). The bar filters every feature's
   rows; its state lives in the URL search (`routes.ts` `parseListSearch` / `listSearchString`).
 - A project whose GitHub status is `not_github` shows its GitHub column as one line under the header
-  (`aside[data-testid="dispatch-github"].dispatch-gh-line`, holding `#g-local`/`dispatch-gh-local` with the local sync and "GitHub
-  not read: not a GitHub remote", and the ahead button when there are commits ahead); the chart takes the full width, with a run
+  (`aside[data-testid="dispatch-github"].dispatch-gh-line`, holding `#g-local`/`dispatch-gh-local` with the local sync and "no GitHub
+  remote", said once, and the ahead button when there are commits ahead); the chart takes the full width, with a run
   selected too (the body keeps one grid track however wide it is).
 - **Step chart** (`src/projects/dispatch/StepChart.tsx`), `div[data-testid="dispatch-chart"]`:
   - `div[data-testid="dispatch-axis"]` — the sticky axis of the eight phase labels (Challenge, Launch, Freeze, Verify, Candidate,
-    Review, Approval, Integrate).
+    Review, Approval, Integrate). Where the chart's container is under 640px the axis shows two-letter short forms (Ch, La, Fr, Ve,
+    Ca, Re, Ap, In) and `p[data-testid="dispatch-axis-legend"]` under the chart names each with its full phase name (it may wrap).
   - `div[data-testid="dispatch-defs"]` above the features: one `details[data-testid="dispatch-def"][data-revision]` "Steps of this
-    definition · N steps · used by K features" per distinct definition revision (the features that use it listed inside), so every
+    definition · N steps · <the first three features that use it>" per distinct definition revision (the features that use it listed inside), so every
     feature's steps stay reachable; no feature carries its own fold.
   - `p[data-testid="project-features-sub"]` names the order: "<F> features · needs you and running first, then latest activity"
     (default: features by their most urgent run, needs you, running, paused, none, then last activity, then workflow id), or
@@ -86,12 +88,15 @@ Appears on `/projects`, Triage, the project page and the workflow page (`railLev
   - Run rows: `button.dispatch-run[data-run-id]`, `aria-selected`; the stop glyph (`.dispatch-stop-glyph`) sits in the stop phase
     cell (`.dispatch-cell`, one per phase), lane dots (`.dispatch-dot`), `×N` attempts (`.dispatch-att`). A multi-lane phase cell
     carries `.multi` and collapses to one mark at a chart width of 440px or less (container query on `#dispatch-runs-section`).
-  - "ended here" counts: `div[data-testid="dispatch-ends"]`. A feature that cannot be read shows a `.dispatch-badrow` with the
+  - "ended here" counts: `div[data-testid="dispatch-ends"]`; a non-empty `.dispatch-en` cell reads "<n> ended at <phase>" ("<n> landed"
+    under Integrate) and carries that sentence as its `aria-label` and `title`; in a container under 640px it shows the count alone.
+    A run row names its run by the whole run id; the landed shas of a feature header are separate chips in `.dispatch-landed`. A feature that cannot be read shows a `.dispatch-badrow` with the
     recorded error and `python -m workflow status <run-id> --by operator` (the literal placeholder for a whole-workflow failure).
 - **GitHub column** (`src/projects/dispatch/GithubColumn.tsx`), `aside[data-testid="dispatch-github"]`: four cards —
   `#g-local`/`[data-testid="dispatch-gh-local"]` (Local and GitHub, with `[data-testid="dispatch-ahead-naming"]` and
   `[data-testid="dispatch-landings"]`), `#g-prs`/`[data-testid="dispatch-gh-prs"]`, `#g-iss`/`[data-testid="dispatch-gh-issues"]`,
-  and `[data-testid="dispatch-gh-others"]`. When GitHub was not read each card says "GitHub not read: <reason>".
+  and `[data-testid="dispatch-gh-others"]`. GitHub's state is said once: a project that was not read has the Local and GitHub card and no Pull requests or Issues card, and that card
+  says "GitHub not read: <reason>" ("GitHub reads are turned off" when off); a read whose latest refresh failed keeps its data and says so once.
 - **Reading pane** (`src/projects/dispatch/ReadingPane.tsx`), `aside[data-testid="dispatch-pane"][data-run-id]`, docks only while
   a run is selected: the lead sentence (`[data-testid="dispatch-pane-lead"]`), facts, `[data-testid="dispatch-pane-steps"]`, the
   run page's `CommandBlock` (`[data-testid="now-next"]`, its command `now-command` and `copy-command`; run 002, V2), and

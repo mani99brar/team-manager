@@ -48,6 +48,7 @@ const baseURL = `http://127.0.0.1:${process.env.MD_MANAGER_WEB_PORT ?? (preview 
 export default defineConfig({
   testDir: './tests',
   testMatch: '**/*.spec.ts',
+  testIgnore: ['**/project-workflows/**'],
   globalTeardown: './tests/global-teardown.ts',
   // Browser tests mutate (and then clean) the shared temporary roots, so they must never run concurrently.
   workers: 1,

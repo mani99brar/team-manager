@@ -35,7 +35,7 @@
 .projects-shell ::selection { background: var(--accent-soft); color: var(--fg); }
 
 /* Shared primitives (src/projects/ui). Tone classes: .tone-ok .tone-run .tone-warn .tone-fail .tone-pause .tone-idle; severities: .sev-p0 .sev-p1 .sev-p2. */
-.projects-shell .ui-chip { display: inline-flex; align-items: center; gap: 6px; padding: 1px 9px; border-radius: 999px; font-size: 12px; font-weight: 600; white-space: nowrap; background: var(--idle-soft); color: var(--idle); }
+.projects-shell .ui-chip { display: inline-flex; align-items: center; gap: 6px; padding: 1px 9px; border-radius: 999px; font-size: var(--type-floor); font-weight: 600; white-space: nowrap; background: var(--idle-soft); color: var(--idle); }
 .projects-shell .ui-chip::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
 .projects-shell .ui-chip.plain::before { display: none; }
 .projects-shell .ui-chip.tone-ok { background: var(--ok-soft); color: var(--ok); }
@@ -45,7 +45,7 @@
 .projects-shell .ui-chip.tone-pause { background: var(--pause-soft); color: var(--pause); }
 .projects-shell .ui-chip.tone-override { background: var(--override-soft); color: var(--override); }
 @media (prefers-reduced-motion: no-preference) { .projects-shell .ui-chip.tone-run.live::before { animation: ui-pulse 1.6s infinite; } @keyframes ui-pulse { 50% { opacity: 0.35; } } }
-.projects-shell .ui-sev { display: inline-block; font-family: var(--font-mono); font-size: 11px; font-weight: 600; padding: 1px 6px; border-radius: 4px; color: var(--sev-fg); background: var(--p2); }
+.projects-shell .ui-sev { display: inline-block; font-family: var(--font-mono); font-size: var(--type-floor); font-weight: 600; padding: 1px 6px; border-radius: 4px; color: var(--sev-fg); background: var(--p2); }
 .projects-shell .ui-sev.sev-p0 { background: var(--p0); }
 .projects-shell .ui-sev.sev-p1 { background: var(--p1); }
 .projects-shell .ui-card { background: var(--surface); border: 1px solid var(--border); border-left: 4px solid var(--border-strong); border-radius: var(--radius); padding: 12px 14px; box-shadow: var(--shadow); display: flex; flex-direction: column; gap: 8px; min-width: 0; }
@@ -58,7 +58,7 @@
 .projects-shell .ui-section { display: flex; flex-direction: column; gap: 10px; }
 .projects-shell .ui-section-header { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
 .projects-shell .ui-section-header h2 { margin: 0; font-family: var(--font-display); font-size: 13px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
-.projects-shell .ui-section-header .ui-sub { color: var(--muted); font-size: 13px; }
+.projects-shell .ui-section-header .ui-sub { color: var(--muted); font-size: var(--type-floor); }
 .projects-shell .ui-section-header .ui-tools { margin-left: auto; display: flex; gap: 6px; flex-wrap: wrap; }
 .projects-shell .ui-figures { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
 .projects-shell .ui-figure { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 12px; display: grid; gap: 2px; box-shadow: var(--shadow); }

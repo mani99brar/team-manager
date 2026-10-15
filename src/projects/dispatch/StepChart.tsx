@@ -15,12 +15,13 @@ import type { Zone } from '../time.ts'
 import { AppLink } from '../panels.tsx'
 import { OVERRIDE_LABEL, STATUS_LABEL } from '../status.ts'
 import { stateTone, toneClass, type Tone } from '../tone.ts'
-import { CHART_COLUMNS, PHASE_SHORT, PHASES, phaseOf } from './phases.ts'
+import { CHART_COLUMNS, endedText, PHASE_SHORT, PHASES, phaseLegend, phaseOf } from './phases.ts'
 import { endedCounts, landingKnown, noStopWording, runStepsRead, runWhen, stopOf, type ChartRun, type StepsReadState } from './stops.ts'
 import { landingWording } from './derive.ts'
 import { StateGlyph } from './common.tsx'
 import type { Landing, ProjectStepsRun, ProjectStepsWorkflow } from './types.ts'
 
+/** A run chip in a feature's header is the run's number, with the whole id in its title (the run rows name the whole id). */
 const num = (runId: string) => runId.replace(/^.*-(\d+)$/, '$1')
 
 export type { ChartRun } from './stops.ts'
@@ -105,7 +106,7 @@ function ChartRow({ entry, landing, defaultBranch, stepsRead, selected, onSelect
       onClick={() => onSelect(entry.run.run_id)}>
       <span className="dispatch-run-1">
         <StateGlyph tone={tone} live={tone === 'run'} />
-        <span className="dispatch-run-id">{num(entry.run.run_id)}</span>
+        <span className="dispatch-run-id">{entry.run.run_id}</span>
         <span className="dispatch-word">{word}</span>
         {repairs > 0 && <span className="dispatch-tag">{repairs} {repairs === 1 ? 'repair' : 'repairs'}</span>}
         <span className="dispatch-run-when" data-testid="dispatch-run-when">{runWhen(entry, now, zone)}</span>
@@ -139,7 +140,7 @@ export function DefinitionFolds({ workflows, order }: { workflows: readonly Work
       {order && <p className="dispatch-muted dispatch-order" data-testid="project-features-sub">{order}</p>}
       {[...revisions.entries()].map(([revision, users]) => (
         <details key={revision} className="dispatch-def" data-testid="dispatch-def" data-revision={revision}>
-          <summary>Steps of this definition <span className="dispatch-muted">{users[0].nodes.length} steps · {users.length} {users.length === 1 ? 'feature' : 'features'}</span></summary>
+          <summary>Steps of this definition <span className="dispatch-muted">{users[0].nodes.length} steps · {users.slice(0, 3).map(user => user.workflow_id).join(', ')}{users.length > 3 ? ` and ${users.length - 3} more` : ''}</span></summary>
           <p className="dispatch-muted dispatch-def-users">{users.map(user => user.workflow_id).join(', ')}</p>
           <ol className="dispatch-def-list">
             {users[0].nodes.map(node => (
@@ -246,14 +247,14 @@ export function StepChart({ projectId, defaultBranch, groups, filtering, stepsRe
                       : filtering && group.runs.length === 0 && group.total > 0
                       ? `0 of ${group.total} runs match`
                       : `${group.runs.length} ${group.runs.length === 1 ? 'run' : 'runs'}`}
-                  {landed.length > 0 && <> · landed {landed.map(sha => <code key={sha}>{sha.slice(0, 7)}</code>)}</>}
+                  {landed.length > 0 && <> · landed <span className="dispatch-landed">{[...new Set(landed)].map(sha => <code key={sha}>{sha.slice(0, 7)}</code>)}</span></>}
                   {/* "nothing landed" only when every run's steps were read: a pending or failed read leaves it unknown. */}
                   {!error && group.runsRead === 'read' && landed.length === 0 && group.runs.length > 0 && landingKnown(group.runs, stepsRead) && ' · nothing landed'}
                 </span>
                 {group.runs.length > 1 && (
                   <span className="dispatch-chain" aria-label="Runs oldest first">
                     {[...group.runs].sort((a, b) => Date.parse(a.run.created_at) - Date.parse(b.run.created_at) || a.run.run_id.localeCompare(b.run.run_id)).map(entry => (
-                      <span key={entry.run.run_id} className={`dispatch-chip-run tone-${runTone(entry)}`}>
+                      <span key={entry.run.run_id} className={`dispatch-chip-run tone-${runTone(entry)}`} title={entry.run.run_id}>
                         <StateGlyph tone={runTone(entry)} />
                         <span className="dispatch-mono">{num(entry.run.run_id)}</span>
                         {entry.steps?.integrated_commit && <code>{entry.steps.integrated_commit.slice(0, 7)}</code>}
@@ -299,7 +300,15 @@ export function StepChart({ projectId, defaultBranch, groups, filtering, stepsRe
                       <div className="dispatch-ends" data-testid="dispatch-ends">
                         <span className="dispatch-ends-l">ended here</span>
                         <span className="dispatch-ends-track" style={{ gridTemplateColumns: CHART_COLUMNS }}>
-                          {counts.map((n, i) => <span key={i} className={`dispatch-en ${i === 7 ? 'land' : ''}`}>{n > 0 ? `${n}${i === 7 ? ' landed' : ''}` : ''}</span>)}
+                          {counts.map((n, i) => n > 0
+                            ? (
+                              <span key={i} className={`dispatch-en ${i === 7 ? 'land' : ''}`} aria-label={endedText(n, i)} title={endedText(n, i)}>
+                                <span className="dispatch-en-full" aria-hidden="true">{endedText(n, i)}</span>
+                                <span className="dispatch-en-count" aria-hidden="true">{n}</span>
+                                <span className="visually-hidden">{endedText(n, i)}</span>
+                              </span>
+                            )
+                            : <span key={i} className="dispatch-en" />)}
                         </span>
                       </div>
                     )}
@@ -315,6 +324,10 @@ export function StepChart({ projectId, defaultBranch, groups, filtering, stepsRe
           )
         })}
       </ul>
+      {/* Shown only where the axis uses its short forms (a narrow container): every short form with its full name. */}
+      <p className="dispatch-legend" data-testid="dispatch-axis-legend">
+        {phaseLegend().map(({ phase, short }) => <span key={phase} className="dispatch-legend-item"><b>{short}</b> {phase}</span>)}
+      </p>
     </div>
   )
 }

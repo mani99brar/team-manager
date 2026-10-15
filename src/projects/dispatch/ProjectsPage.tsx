@@ -12,6 +12,7 @@ import { stateTone, toneClass } from '../tone.ts'
 import { Time } from '../Time.tsx'
 import { cardStateWord, syncPhrase } from './derive.ts'
 import { StateGlyph, VisibilityChip } from './common.tsx'
+import { githubNotReadText } from './GithubColumn.tsx'
 import type { ProjectRunInfo } from './projectModel.ts'
 import type { DispatchOverview, ProjectDispatch } from './types.ts'
 
@@ -75,7 +76,7 @@ function Card({ data, onNavigate }: { data: CardData; onNavigate: (pathname: str
         <span className="dispatch-card-foot">
           {read
             ? <><span>{plural(github.open_prs ?? 0, 'open PR')}</span><span>{plural(github.open_issues ?? 0, 'open issue')}</span></>
-            : <span className="dispatch-muted">GitHub not read: {github?.reason ?? 'not read yet'}</span>}
+            : <span className="dispatch-muted">{githubNotReadText(github ?? null)}</span>}
           <span className="dispatch-card-open" aria-hidden="true">Open ›</span>
         </span>
       </AppLink>
@@ -97,6 +98,7 @@ type Props = {
 
 export function ProjectsPage({ cards, overview, repositoryCount, runsReadAt, runsError, onNavigate }: Props) {
   const githubReads = (overview?.projects ?? []).map(p => p.github).filter(g => g.status === 'read' && g.read_at !== null)
+  const noGithubRemote = (overview?.projects ?? []).length > 0 && (overview?.projects ?? []).every(p => p.github.status === 'not_github')
   const oldestGithub = githubReads.length ? githubReads.reduce((oldest, g) => (Date.parse(g.read_at!) < Date.parse(oldest) ? g.read_at! : oldest), githubReads[0].read_at!) : null
   return (
     <section className="dispatch-projects" aria-labelledby="dispatch-projects-title" data-testid="dispatch-projects">
@@ -109,7 +111,7 @@ export function ProjectsPage({ cards, overview, repositoryCount, runsReadAt, run
             ? <>{plural(cards.length, 'project')} · repositories not read</>
             : <>{plural(cards.length, 'project')} in {plural(repositoryCount, 'repository').replace('repositorys', 'repositories')}</>}
           {' · '}<span data-testid="dispatch-runs-read">{runsReadAt !== null ? <>runs read <Time iso={new Date(runsReadAt).toISOString()} /></> : runsError ? `runs not read: ${runsError}` : 'reading runs…'}</span>
-          {' · '}{oldestGithub ? <>GitHub read <Time iso={oldestGithub} /></> : 'GitHub not read'}
+          {oldestGithub ? <>{' · '}GitHub read <Time iso={oldestGithub} /></> : noGithubRemote ? null : <>{' · '}GitHub not read</>}
         </p>
         <p className="dispatch-muted">Each card opens the project's own page: runs by feature on the step chart, local against origin, pull requests and issues. Ordered as the rail is.</p>
       </header>

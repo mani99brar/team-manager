@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test'
-import { CLAUDE, LABELS, PI, browseUrl, nodeBody, openGraph, waitForApi } from './helpers.ts'
+import { CLAUDE, LABELS, PI, browseUrl, expandSourceIfNeeded, nodeBody, openGraph, waitForApi } from './helpers.ts'
 
 test.beforeEach(async ({ request }) => { await waitForApi(request) })
 
@@ -8,7 +8,7 @@ for (const returnAction of ['button', 'history'] as const) {
     const errors: string[] = []
     page.on('pageerror', error => errors.push(error.message))
     await openGraph(page, browseUrl('Pi', PI))
-    await page.getByRole('button', { name: 'Expand Claude', exact: true }).click()
+    await expandSourceIfNeeded(page, 'Claude')
     await page.getByRole('button', { name: `Expand ${LABELS[CLAUDE]}`, exact: true }).click()
     await expect(nodeBody(page, `Pi/${PI}/workflow.md`)).toBeVisible()
     await page.getByRole('button', { name: 'Outline', exact: true }).click()
@@ -37,7 +37,7 @@ for (const returnAction of ['button', 'history'] as const) {
 
 test('reload discards the document origin even when history.state contains a prior browsing snapshot', async ({ page }) => {
   await openGraph(page, browseUrl('Claude', CLAUDE))
-  await page.getByRole('button', { name: 'Expand Pi', exact: true }).click()
+  await expandSourceIfNeeded(page, 'Pi')
   await page.getByRole('button', { name: `Expand ${LABELS[PI]}`, exact: true }).click()
   await nodeBody(page, `Pi/${PI}/workflow.md`).click()
   await expect(page.getByRole('tabpanel')).toContainText('Sample Pi workflow')
@@ -67,7 +67,7 @@ test('historical outline origin restores its own scroll, focus and expansion aft
   await openGraph(page, browseUrl('Claude', CLAUDE))
   await page.getByRole('button', { name: 'Outline', exact: true }).click()
   const outline = page.getByRole('navigation', { name: 'Directory outline' })
-  await outline.getByRole('button', { name: 'Expand Pi', exact: true }).click()
+  await expandSourceIfNeeded(outline, 'Pi')
   await outline.getByRole('button', { name: `Expand ${LABELS[PI]}`, exact: true }).click()
   await outline.getByRole('button', { name: 'Expand skills', exact: true }).click()
   await outline.getByRole('button', { name: 'Expand subagents', exact: true }).click()

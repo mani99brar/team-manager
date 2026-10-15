@@ -1,4 +1,5 @@
 import { expect, type APIRequestContext, type Locator, type Page } from '@playwright/test'
+import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 // ---- The isolated harness (see playwright.config.ts) ------------------------------------------------
@@ -84,6 +85,42 @@ export async function openGraph(page: Page, path = '/') {
   await expect(page.locator('.graph-canvas')).toBeVisible()
   await expect(node(page, 'Pi')).toBeVisible()
 }
+
+/** Takes the graph back to the two collapsed sources, for tests that build their view from a bare start. */
+export async function collapseSources(page: Page) {
+  for (const source of ['Pi', 'Claude']) {
+    if (await collapseButton(page, source).count()) await collapseButton(page, source).click()
+    await expect(expandButton(page, source)).toBeVisible()
+  }
+}
+
+/** Expands a source (in the graph or an outline) only if it is not open already; the skills home opens both sources. */
+export async function expandSourceIfNeeded(scope: Page | Locator, source: 'Pi' | 'Claude') {
+  const expand = scope.getByRole('button', { name: `Expand ${source}`, exact: true })
+  if (await expand.count()) await expand.click()
+  await expect(scope.getByRole('button', { name: `Collapse ${source}`, exact: true })).toBeVisible()
+}
+
+/** Opens the graph and collapses both sources: the view the skills home had before it opened one level. */
+export async function openCollapsedGraph(page: Page, path = '/') {
+  await openGraph(page, path)
+  await collapseSources(page)
+}
+
+/** The locations of the suite's generated sources.json, in file order: the only place the landing view's ids come from. */
+export function configuredLocations(): { id: string; source: 'Pi' | 'Claude'; label: string; path: string }[] {
+  const config = JSON.parse(readFileSync(join(testRoot, 'sources.json'), 'utf8')) as { locations: { id: string; source: 'Pi' | 'Claude'; label: string; path: string }[] }
+  return config.locations
+}
+
+/** Node ids of the skills home after load: each source followed by its configured locations, nothing deeper. */
+export function landingNodeIds(): string[] {
+  const locations = configuredLocations()
+  return ['Pi', 'Claude'].flatMap(source => [source, ...locations.filter(location => location.source === source).map(location => `${source}/${location.id}`)])
+}
+
+/** The file-operation buttons by name, as the toolbar offers them. */
+export const FILE_OPERATIONS = ['New file…', 'New folder…', 'Rename…', 'Move…', 'Delete…']
 
 /** A graph node wrapper by id ("Pi", "Pi/pi-personal", "Pi/pi-personal/skills", "Claude/claude-personal/workflow.md"). */
 export function node(page: Page, id: string): Locator {

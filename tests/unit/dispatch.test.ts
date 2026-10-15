@@ -9,7 +9,7 @@ import { classifyRuns } from '../../src/projects/lists.ts'
 import { featureOpen, orderFeatureRuns, orderFeatures } from '../../src/projects/dispatch/projectModel.ts'
 import { runWhen } from '../../src/projects/dispatch/stops.ts'
 import assert from 'node:assert/strict'
-import { CHART_COLUMNS, PHASE_SHORT, PHASES, phaseOf } from '../../src/projects/dispatch/phases.ts'
+import { CHART_COLUMNS, endedText, PHASE_SHORT, PHASES, phaseLegend, phaseOf } from '../../src/projects/dispatch/phases.ts'
 import {
   cardStateWord, commitsAheadMore, everyRunListFailed, githubHeadState, githubNoHeadText, issueGroups, landingWording,
   compactTriage, OLDER_THAN_LISTED, prGroups, prRelation, railBadge, railBadgeTone, railOrder, relatedWhy, relTime, resolveRunWorkflow, sameRepoText,
@@ -140,13 +140,27 @@ const pr = (over: Partial<Pr>): Pr => ({
 })
 
 describe('the axis column template and short labels (V3)', () => {
-  test('the axis and the tracks share one column template; every phase has an un-elided short form', () => {
+  test('the axis and the tracks share one column template; every phase has a unique, un-elided two-letter short form', () => {
     assert.equal(CHART_COLUMNS, 'repeat(8, minmax(0, 1fr))')
-    assert.equal(PHASE_SHORT.Challenge, 'Chal.')
-    assert.equal(PHASE_SHORT.Candidate, 'Cand.')
-    assert.equal(PHASE_SHORT.Approval, 'Appr.')
-    assert.equal(PHASE_SHORT.Integrate, 'Integ.')
-    for (const phase of PHASES) { assert.ok(PHASE_SHORT[phase].length > 0); assert.doesNotMatch(PHASE_SHORT[phase], /…/) }
+    assert.equal(PHASE_SHORT.Challenge, 'Ch')
+    assert.equal(PHASE_SHORT.Candidate, 'Ca')
+    assert.equal(PHASE_SHORT.Approval, 'Ap')
+    assert.equal(PHASE_SHORT.Integrate, 'In')
+    for (const phase of PHASES) { assert.equal(PHASE_SHORT[phase].length, 2); assert.doesNotMatch(PHASE_SHORT[phase], /…/) }
+    assert.equal(new Set(PHASES.map(phase => PHASE_SHORT[phase])).size, PHASES.length)
+  })
+
+  test('the legend names every short form with its full phase name, in axis order', () => {
+    assert.deepEqual(phaseLegend().map(entry => entry.phase), [...PHASES])
+    assert.deepEqual(phaseLegend().map(entry => `${entry.short} ${entry.phase}`), ['Ch Challenge', 'La Launch', 'Fr Freeze', 'Ve Verify', 'Ca Candidate', 'Re Review', 'Ap Approval', 'In Integrate'])
+    for (const { phase, short } of phaseLegend()) assert.ok(phase.startsWith(short))
+  })
+
+  test('an "ended here" count says what it counts: ended at the full phase name, or landed under Integrate', () => {
+    assert.equal(endedText(2, 0), '2 ended at Challenge')
+    assert.equal(endedText(1, 3), '1 ended at Verify')
+    assert.equal(endedText(3, 5), '3 ended at Review')
+    assert.equal(endedText(4, 7), '4 landed')
   })
 })
 

@@ -17,7 +17,7 @@
 .projects-shell .finding-card.sev-p1 { border-left-color: var(--p1); }
 .projects-shell .finding-card.sev-p2 { border-left-color: var(--p2); }
 .finding-card-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
-.finding-reviewer, .finding-lane { font-size: 0.85rem; }
+.finding-reviewer, .finding-lane { font-size: max(0.85rem, var(--type-floor)); }
 .finding-reviewer { font-weight: 400; }
 .finding-lane { color: var(--text-muted); }
 /* Long prose reads at a measure (DESIGN.md Hierarchy): the head's first sentence and, opened, the rest of the message. */
@@ -27,7 +27,7 @@
 .finding-body { display: grid; gap: 6px; }
 .finding-body[hidden], .finding-rest[hidden] { display: none; }
 .finding-body .finding-file-link { display: block; }
-.finding-fields { margin: 0; display: flex; flex-wrap: wrap; gap: 2px 18px; font-size: 0.85rem; }
+.finding-fields { margin: 0; display: flex; flex-wrap: wrap; gap: 2px 18px; font-size: max(0.85rem, var(--type-floor)); }
 .finding-fields > div { display: flex; gap: 6px; align-items: baseline; min-width: 0; }
 .finding-fields dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
 .finding-requirement-field { flex: 1 1 100%; }

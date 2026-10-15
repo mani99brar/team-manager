@@ -34,6 +34,7 @@ colors:
   p2: "#4b5563"
   sev-fg: "#ffffff"
 typography:
+  # Nothing the operator reads is under 13px (14px under 720px) except uppercase labels (at least 11px); text inside a zoomable canvas follows its zoom.
   headline:
     fontFamily: "\"Atkinson Hyperlegible Next\", system-ui, \"Segoe UI\", Roboto, sans-serif"
     fontSize: "20px"
@@ -61,11 +62,11 @@ typography:
     lineHeight: 1.4
   meta:
     fontFamily: "\"Atkinson Hyperlegible Next\", system-ui, \"Segoe UI\", Roboto, sans-serif"
-    fontSize: "12.5px"
+    fontSize: "13px"
     fontWeight: 400
   word:
     fontFamily: "\"Atkinson Hyperlegible Next\", system-ui, \"Segoe UI\", Roboto, sans-serif"
-    fontSize: "12px"
+    fontSize: "13px"
     fontWeight: 700
     letterSpacing: "0.02em"
   label:
@@ -225,10 +226,11 @@ Severities, on severity chips only, with `sev-fg` text: **P0 Red** (#a51d27), **
 - **Title** (700, 15.5px, 1.2, two lines at most): a card's label.
 - **Body** (400, 15px, 1.4): the sheet's prose ("What it did").
 - **Body dense** (400, 13px to 13.5px): the dock, the sheet's lists, the identity line's facts.
-- **Meta** (400, 12.5px, Pencil): a card's meta lines, the hint, the dock's source line.
-- **Word** (700, 12px, 0.02em, lower case): the state word in its pill.
+- **Meta** (400, 13px, Pencil): a card's meta lines, the hint, the dock's source line.
+- **Word** (700, 13px, 0.02em, lower case): the state word in its pill.
 - **Label** (600, 13px, 0.08em, uppercase, Pencil): section headers on the list pages (unchanged).
-- **Mono** (400, 13px): commands, ids, lane chips (600, 12px), the sheet's file lists.
+- **Mono** (400, 13px): commands, ids, lane chips (600, 13px), the sheet's file lists.
+- **Floor**: 13px on a desk, 14px under 720px; only uppercase labels go below it, to 11px; graph text inside a zoomable stage follows the zoom.
 - **Measure**: long prose (finding messages, decisions and task text) at most 70ch.
 
 **The Lower-Case Word Rule.** State words on cards, pills and the sheet are lower case (`succeeded`, `running · needs you`); only the list pages' status badges keep their capitalised labels.
@@ -280,10 +282,10 @@ A 440 px Sheet with a hairline on its stage side and the float shadow: a head wi
 44 px floating controls bottom right: `Legend` (toggles the legend panel), the detail-level tag (`39% Overview`) and a three-button zoom group (−, fit, +), on Sheet with a Rule border and the float shadow. The legend lists the six glyphs with their words, the three outlines and the return mark.
 
 ### Chips and pills
-- **State pill** (sheet, dock, cards): glyph plus lower-case word, the tone's colour on its soft fill, 12 to 13px 700.
+- **State pill** (sheet, dock, cards): glyph plus lower-case word, the tone's colour on its soft fill, 13px 700.
 - **Status badge** (identity line, list pages): the Calm badge, unchanged, on the new tone pairs.
-- **Lane chip**: mono 12px 600 in a 1 px Rule box with 4 px corners.
-- **Severity chip**: solid P0/P1/P2 with `sev-fg` text, mono 11px.
+- **Lane chip**: mono 13px 600 in a 1 px Rule box with 4 px corners.
+- **Severity chip**: solid P0/P1/P2 with `sev-fg` text, mono 13px.
 
 ### Sessions table
 Under the stage, one line per session grouped by role (label linked to its step, model, status, started, duration, cost, session id), the totals line above it; a Claude row has one Copy and a Show command toggle for the full resume command. The cue under the stage, `Sessions · n · <spent> ↓`, is a link to it.
@@ -292,7 +294,7 @@ Under the stage, one line per session grouped by role (label linked to its step,
 Mono 13px on an Inset box with a hairline, 8 px corners; a Copy button beside it that says "Copied" or "Selected"; the honesty caption under the block. Unchanged in content from the Calm look.
 
 ### Lists, rails, rows, finding cards, section headers, buttons
-The home, project, feature and node pages keep the Calm components (run rows with a 4 px tone stripe, finding cards, figures, section headers, filter pills, the step strip, tabs) on the new tokens and faces. A finding card's head is the severity, the reviewer, the lane and the message's first sentence at normal weight, with the rest of the message, the requirement and the fields behind More; a blocking finding is marked in place (a "blocks integration" chip and the fail stripe) in the one findings list, which opens on the open P0/P1, never repeated in a second list. Figures are numbers only; a state (a worker's completion) is a chip on the heading it belongs to. On node pages the step strip is the only sticky band and there are no tabs (an Assignment link in the run bar replaces them); the run page and the Assignment view keep their tabs. Every run list (Triage, the project page, the feature page) has one filter bar (status, stopped-at phase, date, text, sort) and a scope line that says which runs were searched. Lists put the runs that need the operator first, then running, then paused, then the rest by latest activity, and the sub-header names the order. On the project page each feature is one header row (its link, state, run chips, last-activity date) with a Show runs disclosure; run rows carry their date and duration; the definition fold appears once per revision. A stopped run (paused, or interrupted while paused or running) reads as days since it stopped, 'paused 10 d (since Oct 2)'; only a running run shows a ticking span. Spans of 48 h and more read in days and hours. A badge is toned by what it counts (warn waits, pause paused, run running), never by the row's last result. Pinned is a shortcut list at the top of Triage; a pinned run keeps its place in its state section. On run and node pages the crumbs share one row with the run's 'Add to Triage' toggle, outside the workspace.
+The home, project, feature and node pages keep the Calm components (run rows with a 4 px tone stripe, finding cards, figures, section headers, filter pills, the step strip, tabs) on the new tokens and faces. A finding card's head is the severity, the reviewer, the lane and the message's first sentence at normal weight, with the rest of the message, the requirement and the fields behind More; a blocking finding is marked in place (a "blocks integration" chip and the fail stripe) in the one findings list, which opens on the open P0/P1, never repeated in a second list. Figures are numbers only; a state (a worker's completion) is a chip on the heading it belongs to. On node pages the step strip is the only sticky band and there are no tabs (an Assignment link in the run bar replaces them); the run page and the Assignment view keep their tabs. Every run list (Triage, the project page, the feature page) has one filter bar (status, stopped-at phase, date, text, sort) and a scope line that says which runs were searched. Lists put the runs that need the operator first, then running, then paused, then the rest by latest activity, and the sub-header names the order; Triage keeps fixed sections in the order Pinned, Needs you, Running, Today, Paused, Recent, with Needs you longest waiting first. On the project page each feature is one header row (its link, state, run chips, last-activity date) with a Show runs disclosure; run rows carry their date and duration; the definition fold appears once per revision. A stopped run (paused, or interrupted while paused or running) reads as days since it stopped, 'paused 10 d (since Oct 2)'; only a running run shows a ticking span. Spans of 48 h and more read in days and hours. A badge is toned by what it counts (warn waits, pause paused, run running), never by the row's last result. Pinned is a shortcut list at the top of Triage; a pinned run keeps its place in its state section. On run and node pages the crumbs share one row with the run's 'Add to Triage' toggle, outside the workspace. A filtered list says how many of the runs it read match ('3 of 50 runs · Load more runs') and never calls a loaded subset complete. A project without a GitHub remote shows its GitHub column as one line under the header. Triage's date choice 'All time' replaces the sections with one All runs list over every project, read page by page on request; its scope line says whether every page was read. A project's header states its Claude spend from the runs' recorded costs and how many runs were priced, or that none was recorded. GitHub's state is said once per page: 'no GitHub remote', or 'GitHub not read: <reason>'. The step chart never shows an abbreviation without a legend; a count says what it counts ('2 ended at Review'). The skills home opens with both sources expanded one level; file operations appear only for a selection they apply to.
 
 **The Selection Is Not State Rule.** Selection and the current item are drawn in Signal Violet (the ring, the hot edge) or Ink (the "now" outline), never in a tone.
 

@@ -14,17 +14,17 @@
 }
 .sidecar-card.sidecar-severity-P0, .sidecar-card.sidecar-severity-P1 { border-left-color: var(--danger-text); }
 .sidecar-card p { margin: 0; overflow-wrap: anywhere; }
-.sidecar-card-head { font-size: 0.85rem; }
+.sidecar-card-head { font-size: max(0.85rem, var(--type-floor)); }
 .sidecar-card-head .finding-severity { font-weight: 700; }
 .sidecar-card.sidecar-severity-P0 .finding-severity, .sidecar-card.sidecar-severity-P1 .finding-severity { color: var(--danger-text); }
-.sidecar-card-where { margin-top: 2px !important; font-size: 0.85rem; }
+.sidecar-card-where { margin-top: 2px !important; font-size: max(0.85rem, var(--type-floor)); }
 .sidecar-card-problem { margin-top: 4px !important; font-weight: 600; }
 .sidecar-card-facts { margin: 4px 0 0; display: grid; gap: 2px; }
 .sidecar-card-facts > div { display: grid; grid-template-columns: 6.5rem minmax(0, 1fr); gap: 8px; }
-.sidecar-card-facts dt { color: var(--text-muted); font-size: 0.85rem; }
+.sidecar-card-facts dt { color: var(--text-muted); font-size: max(0.85rem, var(--type-floor)); }
 .sidecar-card-facts dd { margin: 0; overflow-wrap: anywhere; }
 
-.sidecar-chip { display: inline-block; border: 1px solid var(--border); border-radius: 999px; padding: 0 8px; font-size: 0.8rem; white-space: normal; overflow-wrap: anywhere; }
+.sidecar-chip { display: inline-block; border: 1px solid var(--border); border-radius: 999px; padding: 0 8px; font-size: var(--type-floor); white-space: normal; overflow-wrap: anywhere; }
 .sidecar-message-undeliverable, .sidecar-message-refused, .sidecar-pass-failed, .sidecar-pass-timed_out, .sidecar-pass-rejected, .sidecar-pass-interrupted,
 .sidecar-escalation-kind { border-color: var(--danger-text); color: var(--danger-text); }
 
@@ -32,7 +32,7 @@
 .sidecar-escalation { border: 1px solid var(--border); border-left: 4px solid var(--danger-text); border-radius: 6px; padding: 6px 10px; }
 .sidecar-message { border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; }
 .sidecar-message p { margin: 0; }
-.sidecar-message-head { font-size: 0.85rem; }
+.sidecar-message-head { font-size: max(0.85rem, var(--type-floor)); }
 .sidecar-message-text { margin-top: 2px !important; }
 .sidecar-resolved > summary { cursor: pointer; }
 .sidecar-resolved > ul { margin-top: 6px; }

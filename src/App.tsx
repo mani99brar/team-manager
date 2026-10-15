@@ -109,6 +109,10 @@ function LocationLinks({ locations, onNavigate }: { locations: Location[]; onNav
   )
 }
 
+/** The skills home opens on the graph with both sources expanded one level, so every location shows with its counts. */
+const INITIAL_MODE: Mode = 'graph'
+const INITIAL_EXPANDED: readonly string[] = ['Pi', 'Claude']
+
 const reducedMotionQuery = '(prefers-reduced-motion: reduce)'
 
 function usePrefersReducedMotion(): boolean {
@@ -129,9 +133,9 @@ function App() {
   useEffect(() => () => layout.dispose(), [layout])
 
   const [data, setData] = useState<Data>({ status: 'loading' })
-  const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set())
+  const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set(INITIAL_EXPANDED))
   const [location, setLocation] = useState<ParsedLocation>(() => parsePathname(window.location.pathname))
-  const [mode, setMode] = useState<Mode>('graph')
+  const [mode, setMode] = useState<Mode>(INITIAL_MODE)
   const [browsingRevision, setBrowsingRevision] = useState(0)
   const [announcement, setAnnouncement] = useState('')
   const [operation, setOperation] = useState<{ request: Operation; context: number } | null>(null)
@@ -621,9 +625,9 @@ function App() {
 
   const reset = useCallback(() => {
     layout.reset()
-    setExpanded(new Set())
+    setExpanded(new Set(INITIAL_EXPANDED))
     navigate(null)
-    setAnnouncement('Reset: showing the Pi and Claude sources.')
+    setAnnouncement('Reset: showing the Pi and Claude sources and their locations.')
   }, [layout, navigate])
 
   const toggleMode = useCallback(() => {
@@ -794,13 +798,15 @@ function App() {
             <button type="button" className="button" onClick={reset} disabled={!ready}>Reset</button>
             <button type="button" className="button" onClick={toggleMode} disabled={!ready} aria-pressed={mode === 'outline'}>Outline</button>
           </div>
-          <div className="toolbar" role="toolbar" aria-label="File operations">
-            <button type="button" className="button" onClick={() => requestFolderOperation('create-file')} disabled={!canCreate}>New file…</button>
-            <button type="button" className="button" onClick={() => requestFolderOperation('create-folder')} disabled={!canCreate}>New folder…</button>
-            <button type="button" className="button" onClick={() => requestFolderOperation('rename')} disabled={!isDirectory}>Rename…</button>
-            <button type="button" className="button" onClick={() => requestFolderOperation('move')} disabled={!isDirectory}>Move…</button>
-            <button type="button" className="button" onClick={() => requestFolderOperation('delete')} disabled={!isDirectory}>Delete…</button>
-          </div>
+          {(canCreate || isDirectory) && (
+            <div className="toolbar" role="toolbar" aria-label="File operations">
+              {canCreate && <button type="button" className="button" onClick={() => requestFolderOperation('create-file')}>New file…</button>}
+              {canCreate && <button type="button" className="button" onClick={() => requestFolderOperation('create-folder')}>New folder…</button>}
+              {isDirectory && <button type="button" className="button" onClick={() => requestFolderOperation('rename')}>Rename…</button>}
+              {isDirectory && <button type="button" className="button" onClick={() => requestFolderOperation('move')}>Move…</button>}
+              {isDirectory && <button type="button" className="button" onClick={() => requestFolderOperation('delete')}>Delete…</button>}
+            </div>
+          )}
         </div>
       )}
 

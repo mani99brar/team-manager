@@ -11,12 +11,16 @@ import {
   SEEDED_SUMMARY,
   browseUrl,
   collapseButton,
+  configuredLocations,
   currentCrumb,
   dragNode,
   edge,
   expandButton,
   expandLocation,
+  FILE_OPERATIONS,
   fit,
+  landingNodeIds,
+  openCollapsedGraph,
   folderInfo,
   node,
   nodeBody,
@@ -29,13 +33,13 @@ import {
 
 test.beforeEach(async ({ request }) => { await waitForApi(request) })
 
-test('initial view shows only the two source nodes, fitted and unconnected; the listing carries locations', async ({ page, request }) => {
+test('initial view opens both sources one level, every configured location a node, nothing deeper; the listing carries locations', async ({ page, request }) => {
   const listing = await (await request.get('/api/entries')).json()
   expect(listing.locations).toEqual(SEEDED_LOCATIONS)
   expect(listing.entries).toEqual(SEEDED_ENTRIES)
   await openGraph(page)
-  expect(await visibleNodeIds(page)).toEqual(['Pi', 'Claude'])
-  await expect(page.locator('.graph-canvas line')).toHaveCount(0)
+  expect(await visibleNodeIds(page)).toEqual(landingNodeIds())
+  await expect(page.locator('.graph-canvas line')).toHaveCount(landingNodeIds().length - 2)
   await expect(page.getByRole('button', { name: /^Pi, source, 3 locations/ })).toBeVisible()
   await expect(page.getByRole('button', { name: /^Claude, source, 2 locations/ })).toBeVisible()
   await expect(currentCrumb(page)).toHaveText('Home')
@@ -52,7 +56,7 @@ test('initial view shows only the two source nodes, fitted and unconnected; the 
 })
 
 test('expansion reveals locations, then their immediate children with containment edges; collapse hides descendants', async ({ page }) => {
-  await openGraph(page)
+  await openCollapsedGraph(page)
   await expandButton(page, 'Pi').click()
   expect(await visibleNodeIds(page)).toEqual(['Pi', `Pi/${PI}`, `Pi/${PI_PACKAGE}`, `Pi/${PI_MISSING}`, 'Claude'])
   await expect(page.locator('.graph-canvas line')).toHaveCount(3)
@@ -100,10 +104,9 @@ test('selecting sources, locations and folders updates breadcrumb, counts, highl
   await expect(currentCrumb(page)).toHaveText('Pi')
   await expect(folderInfo(page)).toHaveText('3 locations')
   await expect(node(page, 'Pi')).toHaveClass(/is-selected/)
-  // Selection does not expand.
-  expect(await visibleNodeIds(page)).toEqual(['Pi', 'Claude'])
+  // Selection does not expand: the landing view is unchanged.
+  expect(await visibleNodeIds(page)).toEqual(landingNodeIds())
 
-  await expandButton(page, 'Pi').click()
   await fit(page)
   await nodeBody(page, `Pi/${PI}`).click()
   await expect(page).toHaveURL(browseUrl('Pi', PI))
@@ -148,7 +151,7 @@ test('direct links reveal the source, location and ancestor chain, expand the fo
   await openGraph(page, browseUrl('Claude', CLAUDE, 'subagents'))
   await expect(currentCrumb(page)).toHaveText('subagents')
   expect(await visibleNodeIds(page)).toEqual([
-    'Pi', 'Claude', `Claude/${CLAUDE}`, `Claude/${CLAUDE}/subagents`, `Claude/${CLAUDE}/subagents/implementer.md`,
+    'Pi', `Pi/${PI}`, `Pi/${PI_PACKAGE}`, `Pi/${PI_MISSING}`, 'Claude', `Claude/${CLAUDE}`, `Claude/${CLAUDE}/subagents`, `Claude/${CLAUDE}/subagents/implementer.md`,
     `Claude/${CLAUDE}/empty.md`, `Claude/${CLAUDE}/workflow.md`, `Claude/${CLAUDE_PLUGIN}`,
   ])
   await expect(node(page, `Claude/${CLAUDE}/subagents`)).toHaveClass(/is-selected/)
@@ -173,7 +176,7 @@ test('collapsing an ancestor of the selected folder selects the collapsing node'
   await collapseButton(page, 'Pi').click()
   await expect(page).toHaveURL('/browse/Pi')
   await expect(currentCrumb(page)).toHaveText('Pi')
-  expect(await visibleNodeIds(page)).toEqual(['Pi', 'Claude'])
+  expect(await visibleNodeIds(page)).toEqual(['Pi', 'Claude', `Claude/${CLAUDE}`, `Claude/${CLAUDE_PLUGIN}`])
 })
 
 test('missing folders, unknown sources and unconfigured locations explain themselves and link to a root', async ({ page }) => {
@@ -199,7 +202,7 @@ test('missing folders, unknown sources and unconfigured locations explain themse
 })
 
 test('dragging pins a node without selecting it; unpin and reset clear pins', async ({ page }) => {
-  await openGraph(page)
+  await openCollapsedGraph(page)
   await expandButton(page, 'Pi').click()
   const before = await nodeCenter(page, `Pi/${PI}`)
   await dragNode(page, `Pi/${PI}`, 140, 90)
@@ -224,13 +227,14 @@ test('dragging pins a node without selecting it; unpin and reset clear pins', as
   await expect(node(page, 'Pi')).toHaveClass(/is-pinned/)
   await page.getByRole('button', { name: 'Reset' }).click()
   await expect(page).toHaveURL('/')
-  expect(await visibleNodeIds(page)).toEqual(['Pi', 'Claude'])
+  expect(await visibleNodeIds(page)).toEqual(landingNodeIds())
+  await expect(page.getByRole('status')).toHaveText('Reset: showing the Pi and Claude sources and their locations.')
   await expect(page.locator('.graph-canvas .is-pinned')).toHaveCount(0)
   await expect(currentCrumb(page)).toHaveText('Home')
 })
 
 test('keyboard: outline-order tabbing, Enter selects, arrows expand/collapse, P pins', async ({ page }) => {
-  await openGraph(page)
+  await openCollapsedGraph(page)
   await nodeBody(page, 'Pi').focus()
   await page.keyboard.press('ArrowRight')
   await expect(node(page, `Pi/${PI}`)).toBeVisible()
@@ -278,7 +282,7 @@ test('keyboard: outline-order tabbing, Enter selects, arrows expand/collapse, P 
 })
 
 test('keyboard focus reveals off-screen node bodies, expand controls and pin controls', async ({ page }) => {
-  await openGraph(page)
+  await openCollapsedGraph(page)
   await nodeBody(page, 'Pi').focus()
   await page.keyboard.press('p')
 
@@ -315,7 +319,7 @@ test('keyboard focus reveals off-screen node bodies, expand controls and pin con
 })
 
 test('outline mode replaces the graph and shares selection, expansion, breadcrumbs, unavailable state and refresh', async ({ page }) => {
-  await openGraph(page)
+  await openCollapsedGraph(page)
   await expandButton(page, 'Pi').click()
   await expandButton(page, LABELS[PI]).click()
   await page.getByRole('button', { name: 'Outline' }).click()
@@ -428,4 +432,159 @@ test('narrow screens keep controls reachable without horizontal scrolling', asyn
   await expect(node(page, `Claude/${CLAUDE}/subagents`)).toBeInViewport()
   await expandLocation(page, 'Pi', PI)
   await expect(node(page, `Pi/${PI}/skills`)).toBeVisible()
+})
+
+// ---- The skills home: opened one level, file operations only for a selection they apply to ----------------
+
+type Box = { x: number; y: number; width: number; height: number }
+
+async function boxOf(locator: ReturnType<typeof node>): Promise<Box> {
+  const box = await locator.boundingBox()
+  if (!box) throw new Error('No bounding box')
+  return box
+}
+
+/** Sub-pixel layout rounding is not movement: a box moved when any edge differs by half a pixel or more. */
+function sameBox(a: Box, b: Box): boolean {
+  return (['x', 'y', 'width', 'height'] as const).every(key => Math.abs(a[key] - b[key]) < 0.5)
+}
+
+function inside(inner: Box, outer: Box): boolean {
+  return inner.x >= outer.x - 0.5 && inner.y >= outer.y - 0.5 && inner.x + inner.width <= outer.x + outer.width + 0.5 && inner.y + inner.height <= outer.y + outer.height + 0.5
+}
+
+/** What a location node's accessible name carries: its label and counts, or 'unavailable', from the seeded listing. */
+function expectedLocationName(location: { id: string; label: string }): string {
+  const seeded = SEEDED_LOCATIONS.find(candidate => candidate.id === location.id)
+  if (seeded?.status === 'unavailable') return `${location.label}, location, unavailable`
+  const own = SEEDED_ENTRIES.filter(entry => entry.locationId === location.id && !entry.path.includes('/'))
+  const folders = own.filter(entry => entry.kind === 'directory').length
+  const files = own.filter(entry => entry.kind === 'file').length
+  return `${location.label}, location, ${folders} ${folders === 1 ? 'folder' : 'folders'}, ${files} Markdown ${files === 1 ? 'file' : 'files'}`
+}
+
+const fileOperationsToolbar = (page: import('@playwright/test').Page) => page.getByRole('toolbar', { name: 'File operations' })
+
+async function expectNoFileOperations(page: import('@playwright/test').Page) {
+  await expect(fileOperationsToolbar(page)).toHaveCount(0)
+  for (const name of FILE_OPERATIONS) await expect(page.getByRole('button', { name, exact: true })).toHaveCount(0)
+}
+
+async function expectOnlyEnabledOperations(page: import('@playwright/test').Page, names: string[]) {
+  const toolbar = fileOperationsToolbar(page)
+  await expect(toolbar).toBeVisible()
+  await expect(toolbar.getByRole('button')).toHaveText(names)
+  for (const button of await toolbar.getByRole('button').all()) await expect(button).toBeEnabled()
+  expect(await toolbar.locator('button:disabled, button[aria-disabled="true"]').count()).toBe(0)
+}
+
+test('[scenario:skills-home] the skills home opens both sources one level, with operations only for a selection they apply to', async ({ page }, testInfo) => {
+  test.slow()
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await openGraph(page)
+  const locations = configuredLocations()
+  expect(locations.length).toBeGreaterThan(0)
+  const canvas = page.locator('.graph-canvas')
+  const landing = landingNodeIds()
+  expect(await visibleNodeIds(page)).toEqual(landing)
+  await expect(page.getByRole('button', { name: 'Outline' })).toHaveAttribute('aria-pressed', 'false')
+  const opened = await viewTransform(page)
+
+  // Every configured location is a node with its counts in its accessible name, wholly inside the canvas, with no scroll or zoom change.
+  const canvasBox = await boxOf(canvas)
+  for (const location of locations) {
+    await expect(page.getByRole('button', { name: expectedLocationName(location), exact: true })).toBeVisible()
+    const id = `${location.source}/${location.id}`
+    expect(inside(await boxOf(node(page, id)), canvasBox), `${id} inside the canvas`).toBe(true)
+  }
+  await expect(node(page, `Pi/${PI_MISSING}`)).toHaveClass(/is-unavailable/)
+  await expect(page.getByRole('button', { name: `${LABELS[PI_MISSING]}, location, unavailable`, exact: true })).toBeVisible()
+  expect(await page.evaluate('window.scrollY + window.scrollX')).toBe(0)
+  expect(await viewTransform(page)).toEqual(opened)
+  await expect(page.getByRole('status')).toContainText(`Loaded ${SEEDED_SUMMARY}.`)
+
+  // No file operation exists until something is selected.
+  await expectNoFileOperations(page)
+  await nodeBody(page, 'Pi').click()
+  await expectOnlyEnabledOperations(page, ['New file…', 'New folder…'])
+  await nodeBody(page, `Pi/${PI}`).click()
+  await expectOnlyEnabledOperations(page, ['New file…', 'New folder…'])
+  await nodeBody(page, `Pi/${PI_MISSING}`).click()
+  await expectNoFileOperations(page)
+  await expandButton(page, LABELS[PI]).click()
+  await fit(page)
+  await nodeBody(page, `Pi/${PI}/skills`).click()
+  await expectOnlyEnabledOperations(page, FILE_OPERATIONS)
+  await nodeBody(page, `Pi/${PI}`).click()
+
+  // Outline shows the same expansion and selection; the graph comes back with the view unchanged.
+  const selected = page.locator('.graph-canvas .is-selected')
+  await expect(selected).toHaveAttribute('data-node-id', `Pi/${PI}`)
+  const before = await viewTransform(page)
+  await page.getByRole('button', { name: 'Outline' }).click()
+  const outline = page.getByRole('navigation', { name: 'Directory outline' })
+  for (const id of [...landing, `Pi/${PI}/skills`, `Pi/${PI}/workflow.md`]) await expect(outline.locator(`[data-node-id="${id}"]`)).toBeVisible()
+  await expect(outline.locator(`[data-node-id="Pi/${PI}"] > *`).first()).toBeVisible()
+  await expect(outline.locator('[aria-current="true"]')).toHaveCount(1)
+  await expect(currentCrumb(page)).toHaveText(LABELS[PI])
+  await page.getByRole('button', { name: 'Outline' }).click()
+  expect(await viewTransform(page)).toEqual(before)
+  await expect(selected).toHaveAttribute('data-node-id', `Pi/${PI}`)
+  await expect(node(page, `Pi/${PI}/skills`)).toBeVisible()
+
+  // Reset returns to the opened-one-level view, refitted after zooming, and says so.
+  await page.getByRole('button', { name: 'Zoom in' }).click()
+  await page.getByRole('button', { name: 'Zoom in' }).click()
+  await page.getByRole('button', { name: 'Reset' }).click()
+  await expect(page.getByRole('status')).toHaveText('Reset: showing the Pi and Claude sources and their locations.')
+  expect(await visibleNodeIds(page)).toEqual(landing)
+  await expect(currentCrumb(page)).toHaveText('Home')
+  await expectNoFileOperations(page)
+  await expect.poll(async () => (await viewTransform(page)).k).toBeCloseTo(opened.k, 2)
+  const afterReset = await boxOf(canvas)
+  for (const location of locations) expect(inside(await boxOf(node(page, `${location.source}/${location.id}`)), afterReset), `${location.id} inside the canvas after Reset`).toBe(true)
+  const image = testInfo.outputPath('skills-home.png')
+  await page.screenshot({ path: image })
+  await testInfo.attach('screenshot:skills-home', { path: image, contentType: 'image/png' })
+})
+
+test('the skills home opens the same at 360x640, with the graph controls reachable in order and no sideways scroll', async ({ page }) => {
+  await page.setViewportSize({ width: 360, height: 640 })
+  await openGraph(page)
+  expect(await visibleNodeIds(page)).toEqual(landingNodeIds())
+  const names = ['Refresh', 'Zoom in', 'Zoom out', 'Fit', 'Reset', 'Outline']
+  const boxes: Box[] = []
+  for (const name of names) {
+    const button = page.getByRole('button', { name, exact: true })
+    await expect(button).toBeInViewport()
+    boxes.push(await boxOf(button))
+  }
+  for (let i = 1; i < boxes.length; i += 1) {
+    const previous = boxes[i - 1]
+    const box = boxes[i]
+    expect(box.y > previous.y + 1 || box.x > previous.x, `${names[i]} follows ${names[i - 1]}`).toBe(true)
+  }
+  expect(await page.evaluate('document.documentElement.scrollWidth - document.documentElement.clientWidth')).toBeLessThanOrEqual(0)
+  await expectNoFileOperations(page)
+})
+
+for (const viewport of [{ width: 1440, height: 900 }, { width: 360, height: 640 }]) {
+  test(`selecting the Pi source leaves the graph canvas where it was at ${viewport.width}x${viewport.height}`, async ({ page }) => {
+    await page.setViewportSize(viewport)
+    await openGraph(page)
+    const before = await boxOf(page.locator('.graph-canvas'))
+    await expectNoFileOperations(page)
+    await nodeBody(page, 'Pi').click()
+    await expectOnlyEnabledOperations(page, ['New file…', 'New folder…'])
+    expect(sameBox(await boxOf(page.locator('.graph-canvas')), before)).toBe(true)
+    await nodeBody(page, `Pi/${PI}`).click()
+    expect(sameBox(await boxOf(page.locator('.graph-canvas')), before)).toBe(true)
+  })
+}
+
+test('the missing Pi location offers no file operation and reads as unavailable', async ({ page }) => {
+  await openGraph(page)
+  await nodeBody(page, `Pi/${PI_MISSING}`).click()
+  await expect(page.getByRole('button', { name: `${LABELS[PI_MISSING]}, location, unavailable`, exact: true })).toBeVisible()
+  await expectNoFileOperations(page)
 })

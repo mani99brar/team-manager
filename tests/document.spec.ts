@@ -16,6 +16,7 @@ import {
   fit,
   node,
   nodeBody,
+  openCollapsedGraph,
   openGraph,
   visibleNodeIds,
   viewTransform,
@@ -129,7 +130,7 @@ test('opening from a selected location returns to that location, and duplicate n
 
 test('outline mode: files are buttons that open the document; return keeps outline mode, expansion, scroll and focus', async ({ page }) => {
   await page.setViewportSize({ width: 600, height: 420 })
-  await openGraph(page)
+  await openCollapsedGraph(page)
   await page.getByRole('button', { name: 'Outline' }).click()
   const outline = page.getByRole('navigation', { name: 'Directory outline' })
   await outline.getByRole('button', { name: 'Expand Pi' }).click()

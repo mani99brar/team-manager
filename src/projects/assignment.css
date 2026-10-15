@@ -9,14 +9,14 @@
 
 .assignment-setup code {
   font-family: ui-monospace, Menlo, Consolas, monospace;
-  font-size: 0.8rem;
+  font-size: var(--type-floor);
 }
 
 .assignment-lanes-table {
   width: 100%;
   border-collapse: collapse;
   margin: 0 0 16px;
-  font-size: 0.85rem;
+  font-size: max(0.85rem, var(--type-floor));
 }
 
 .assignment-lanes-table th,
@@ -28,7 +28,7 @@
 }
 
 .assignment-lanes-table thead th {
-  font-size: 13px;
+  font-size: var(--type-floor);
   font-weight: 600;
   letter-spacing: 0.04em;
   color: var(--muted);

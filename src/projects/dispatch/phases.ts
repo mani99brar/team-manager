@@ -19,11 +19,23 @@ export type Phase = (typeof PHASES)[number]
 export const CHART_COLUMNS = 'repeat(8, minmax(0, 1fr))'
 
 /**
- * A fixed short form per phase, used where a column is narrower than the full name so a label is never cut with an ellipsis
- * ("Cha…"); the full name stays the accessible name and the `title` (V3).
+ * A fixed two-letter short form per phase, used where the chart's container is narrower than the full names: two letters
+ * fit a 26px column at 13px, so a label is never cut with an ellipsis. The short form is unique per phase and is only
+ * shown together with the legend (`phaseLegend`), which names each one with its full name; the full name stays the
+ * accessible name and the `title` (V3).
  */
 export const PHASE_SHORT: Record<Phase, string> = {
-  Challenge: 'Chal.', Launch: 'Lau.', Freeze: 'Frz.', Verify: 'Ver.', Candidate: 'Cand.', Review: 'Rev.', Approval: 'Appr.', Integrate: 'Integ.',
+  Challenge: 'Ch', Launch: 'La', Freeze: 'Fr', Verify: 'Ve', Candidate: 'Ca', Review: 'Re', Approval: 'Ap', Integrate: 'In',
+}
+
+/** The legend under a narrow chart: every short form with the phase it stands for, in axis order. */
+export function phaseLegend(): { phase: Phase; short: string }[] {
+  return PHASES.map(phase => ({ phase, short: PHASE_SHORT[phase] }))
+}
+
+/** What a non-empty "ended here" cell counts: "<n> ended at <phase>", and "<n> landed" under Integrate. */
+export function endedText(count: number, phaseIndex: number): string {
+  return phaseIndex === PHASES.length - 1 ? `${count} landed` : `${count} ended at ${PHASES[phaseIndex]}`
 }
 
 export const PHASE_CHALLENGE = 0

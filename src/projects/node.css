@@ -17,13 +17,13 @@
 .node-verdict { font-weight: 600; }
 .node-title-row { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; min-width: 0; }
 .workspace-projects .node-title-row h3 { margin: 0; }
-.node-executor-line { font-size: 0.85rem; color: var(--text-muted); }
+.node-executor-line { font-size: max(0.85rem, var(--type-floor)); color: var(--text-muted); }
 .node-timing, .node-status-meaning { margin: 0; font-size: 0.9rem; }
 .node-timing { font-variant-numeric: tabular-nums; }
-.node-timing-source { font-size: 0.85rem; }
+.node-timing-source { font-size: max(0.85rem, var(--type-floor)); }
 
 /* The attempt strip: one chip per attempt, the diagnosis and repairs between them. */
-.node-attempts { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; font-size: 0.85rem; }
+.node-attempts { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; font-size: max(0.85rem, var(--type-floor)); }
 .node-attempts-label { color: var(--text-muted); }
 .node-attempts-list { display: flex; flex-wrap: wrap; gap: 4px; list-style: none; margin: 0; padding: 0; }
 .node-attempt-chip, .node-attempt-marker { display: inline-flex; align-items: center; gap: 4px; padding: 1px 8px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface); white-space: nowrap; font-variant-numeric: tabular-nums; }
@@ -43,7 +43,7 @@ a.node-attempt-chip[aria-current='page'] { border-color: var(--text); box-shadow
 .section-index-list { display: flex; flex-wrap: wrap; gap: 4px; list-style: none; margin: 0; padding: 0; min-width: 0; }
 .section-index-list li, .node-attempts-list li { flex: none; }
 .section-index > nav { min-width: 0; max-width: 100%; }
-.section-index-link { display: inline-flex; align-items: center; gap: 2px; white-space: nowrap; overflow-wrap: normal; padding: 2px 8px; border-radius: 4px; font-size: 0.85rem; text-decoration: none; }
+.section-index-link { display: inline-flex; align-items: center; gap: 2px; white-space: nowrap; overflow-wrap: normal; padding: 2px 8px; border-radius: 4px; font-size: max(0.85rem, var(--type-floor)); text-decoration: none; }
 .section-index-link:hover { background: var(--surface-alt); }
 .section-index-count { color: var(--text-muted); font-variant-numeric: tabular-nums; }
 .node-section { margin-top: 12px; }
