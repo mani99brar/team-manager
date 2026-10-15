@@ -2424,6 +2424,37 @@ test(`[scenario:triage-controller-stopped] A feature's latest running run whose 
   expect(await cardWaits()).toBe(calmCard + 1)
   await attach(page, testInfo, 'triage-controller-stopped')
 
+  // Its time reads interrupted, never a ticking span, wherever it is listed: as a row on Triage (pinned), in the project
+  // page's step chart and on the feature page; the list clock moving on changes none of it, and none lists it as running.
+  const pin = card1.locator('button.pin-toggle')
+  await pin.click()
+  const triageRow = page.getByTestId('pinned-runs').locator(`a[data-run-id="${RUN_DESK_LIVE}"]`)
+  await expect(triageRow).toHaveAttribute('data-attention', 'interrupted')
+  const triageWhen = triageRow.locator('.run-row-when')
+  await expect(triageWhen).toContainText('interrupted')
+  await expect(triageWhen.locator('.run-row-span')).toHaveCount(0)
+  const triageText = await triageWhen.innerText()
+  await poll()
+  await expect(triageWhen).toHaveText(triageText)
+  await pin.click()
+  await expect(page.getByTestId('pinned-runs')).toHaveCount(0)
+  await railRow.click()
+  const chartRun = page.locator(`li[data-workflow-id="${UX_REVAMP_LISTS_WORKFLOW_ID}"] .dispatch-run[data-run-id="${RUN_DESK_LIVE}"]`)
+  const chartWhen = chartRun.getByTestId('dispatch-run-when')
+  await expect(chartWhen).toContainText('interrupted', { timeout: 30_000 })
+  await expect(chartWhen).not.toContainText('running ')
+  await expect(chartRun.locator('.dispatch-word')).toHaveText('interrupted')
+  const chartText = await chartWhen.innerText()
+  await poll()
+  await expect(chartWhen).toHaveText(chartText)
+  await page.locator(`li[data-workflow-id="${UX_REVAMP_LISTS_WORKFLOW_ID}"] a.lists-group-head`).click()
+  const featureRow = page.getByTestId('run-list').locator(`a[data-run-id="${RUN_DESK_LIVE}"]`)
+  await expect(featureRow).toHaveAttribute('data-attention', 'interrupted', { timeout: 30_000 })
+  await expect(featureRow.locator('.run-row-when')).toContainText('interrupted')
+  await expect(featureRow.locator('.run-row-span')).toHaveCount(0)
+  await page.getByTestId('rail-triage').click()
+  await expect(needs.locator(`a[data-run-id="${RUN_DESK_LIVE}"][data-attention="interrupted"]`)).toHaveCount(1, { timeout: 15_000 })
+
   // A later running reading takes it out of Needs you on that poll, and every count returns.
   serve.live = 'running'
   await poll()

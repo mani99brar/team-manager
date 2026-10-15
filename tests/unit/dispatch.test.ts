@@ -543,4 +543,10 @@ describe('the project page order and folds', () => {
     assert.equal(runWhen(entry(summaryOf('x', 'succeeded', '2026-10-09T10:00:00Z', '2026-10-09T11:05:00Z')), morning, 'utc'), 'started Oct 9 · ran 1h05m')
     assert.match(runWhen(entry(summaryOf('x', 'running', '2026-10-13T08:00:00Z', '2026-10-13T08:30:00Z')), morning, 'utc'), /^started Oct 13 · running /)
   })
+  test('a running run moved to Needs you as interrupted (D32) reads interrupted on its row, never running', () => {
+    const now = T('2026-10-13T12:00:00Z')
+    const when = runWhen({ run: summaryOf('x', 'running', '2026-10-13T08:00:00Z', '2026-10-13T08:30:00Z'), cls: { needs: 'interrupted', supersededBy: null }, steps: null }, now, 'utc')
+    assert.ok(when.includes('interrupted'), when)
+    assert.ok(!when.includes('running '), when)
+  })
 })

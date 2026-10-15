@@ -658,6 +658,14 @@ describe('a running latest run whose controller has read not_running for 15 s ne
       assert.equal(needsOf([detail.summary], stoppedOf(detail.summary, readings), detail.summary.run_id) === 'interrupted', stopped)
     }
   })
+  test('a moved row reads interrupted from its last activity, never a ticking span; without the class it still runs', () => {
+    const run = summary('r', 'running', { created: '2026-03-20T10:00:00Z', activity: activity({ attention: null, controller: 'not_running', last_activity_at: '2026-03-20T10:30:00Z' }) })
+    const cls = { needs: 'interrupted' as const, supersededBy: null }
+    const time = rowTime(run, NOW, cls)
+    assert.deepEqual(time, { kind: 'stopped', how: 'interrupted', since: '2026-03-20T10:30:00Z' })
+    assert.deepEqual(rowTime(run, NOW + 3_600_000, cls), time)
+    assert.equal(rowTime(run, NOW).kind, 'live')
+  })
 })
 
 describe('a row\'s time: dates and days for a stopped run, a span only while it runs (M14)', () => {

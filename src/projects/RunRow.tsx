@@ -47,7 +47,7 @@ export function RunRow({ run, cls, href, labels, context = [], lanes = [], trail
   const [zone] = useTimeZone()
   const look = rowLook(run, cls)
   const kind = look.attention
-  const time = rowTime(run, now)
+  const time = rowTime(run, now, cls)
   const since = kind === null ? null : run.activity?.attention?.since ?? null
   const names = context.filter((name): name is string => Boolean(name))
   const summary = rowSummary(run, labels, kind)

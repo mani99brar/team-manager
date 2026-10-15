@@ -353,7 +353,9 @@ export function rowSummary(run: Pick<RunSummary, 'status' | 'activity' | 'accept
 /**
  * A row's time: a finished run's end and its duration (whatever attention it carries), a stopped run's stop (paused, or
  * interrupted while paused or running) with no span, a running run's start and its elapsed time, or (without activity, or
- * while it waits unfinished in another status) only its last update. Only a running run gets a ticking span.
+ * while it waits unfinished in another status) only its last update. Only a running run gets a ticking span. A running run
+ * the list moved to Needs you as interrupted (`cls`, D32: its controller is not running) is stopped too, dated from its last
+ * activity (else its last update), the latest move the list knows of, not when the controller stopped.
  */
 export type RowTime =
   | { kind: 'finished'; at: string; ms: number }
@@ -361,7 +363,7 @@ export type RowTime =
   | { kind: 'live'; started: string; last: string | null; ms: number }
   | { kind: 'updated'; at: string }
 
-export function rowTime(run: Pick<RunSummary, 'status' | 'created_at' | 'updated_at' | 'activity' | 'accepted'>, now: number): RowTime {
+export function rowTime(run: Pick<RunSummary, 'status' | 'created_at' | 'updated_at' | 'activity' | 'accepted'>, now: number, cls?: RunClass): RowTime {
   const activity = run.activity
   if (!activity) return { kind: 'updated', at: run.updated_at }
   if (activity.finished_at !== null) return { kind: 'finished', at: activity.finished_at, ms: Math.max(0, ms(activity.finished_at) - ms(run.created_at)) }
@@ -369,6 +371,7 @@ export function rowTime(run: Pick<RunSummary, 'status' | 'created_at' | 'updated
   const since = activity.attention?.since ?? movedAt(run)
   if (activity.attention?.kind === 'interrupted' && (run.status === 'paused' || run.status === 'running')) return { kind: 'stopped', how: 'interrupted', since }
   if (run.status === 'paused') return { kind: 'stopped', how: 'paused', since }
+  if (run.status === 'running' && cls?.needs === 'interrupted') return { kind: 'stopped', how: 'interrupted', since: movedAt(run) }
   // Only a running run ticks; one that waits to start or on an approval says when it last moved.
   if (run.status !== 'running') return { kind: 'updated', at: movedAt(run) }
   return { kind: 'live', started: run.created_at, last: activity.last_activity_at, ms: Math.max(0, now - ms(run.created_at)) }

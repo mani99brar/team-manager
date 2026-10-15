@@ -84,7 +84,7 @@ export function landingKnown(entries: readonly ChartRun[], stepsRead: StepsReadS
  * list clock while it runs, a stopped run's "paused 10 d (since Oct 2)"; "started Oct 9" alone when nothing else is recorded.
  */
 export function runWhen(entry: ChartRun, now: number, zone: Zone): string {
-  const time = rowTime(entry.run, now)
+  const time = rowTime(entry.run, now, entry.cls)
   const started = `started ${monthDay(entry.run.created_at, now, zone)}`
   if (time.kind === 'finished') return `${started} · ran ${formatSpan(time.ms)}`
   if (time.kind === 'live') return `${started} · running ${formatSpan(time.ms)}`
