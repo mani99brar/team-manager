@@ -221,7 +221,8 @@ class CandidateRepairEndToEnd(RepairFixture):
         self.assertTrue(any(message.startswith(f"Repair 1 by the operator (via a Claude Code session): snapshot ") for message in messages), messages)
         self.assertEqual((entry["status"], entry["base_kind"], entry["base_commit"], entry["source_commit"], entry["expected_candidate_tree"]),
                          ("applied", "candidate", candidate, fix, self.tree(fix)))
-        self.assertEqual(entry["attempt_targets"], {"worker:ui": 2, "candidate:adapter": 2, "candidate:ui": 3})
+        # Lockstep candidate attempts (run-checks-once [L2], challenge note 1): every lane gets the highest floor.
+        self.assertEqual(entry["attempt_targets"], {"worker:ui": 2, "candidate:adapter": 3, "candidate:ui": 3})
         self.assertEqual(entry["attempt_floors"], entry["attempt_targets"])
         self.assertEqual(entry["blocked"]["step"], "candidate")
         self.assertEqual([(packet["path"], packet["attempt"]) for packet in entry["blocked"]["packets"]], [("verification/candidate/ui/2/packet.json", 2)])
@@ -242,7 +243,7 @@ class CandidateRepairEndToEnd(RepairFixture):
         # A new candidate generation, checked for every lane at the raised attempts, then review and the feature branch.
         generation = read_json(directory / "candidate-1.json")
         self.assertTrue((directory / "candidate-1").is_dir())
-        for lane, attempt in (("adapter", 2), ("ui", 3)):
+        for lane, attempt in (("adapter", 3), ("ui", 3)):  # Lockstep (run-checks-once [L2]): one attempt for every lane.
             packet = read_json(directory / f"verification/candidate/{lane}/{attempt}/packet.json")
             self.assertEqual((packet["expected"]["output_commit"], packet["gate"]["status"]), (generation["commit"], "passed"))
         bundle = read_json(directory / "review-bundle.json")
@@ -315,7 +316,8 @@ class ForkPoint(RepairFixture):
         # The candidate ran once, after both verifies, as generation 1.
         steps = [event["node"] for event in self.events()[mark:]]
         self.assertEqual(sorted(steps[:4]), ["verify_adapter", "verify_adapter", "verify_ui", "verify_ui"])
-        self.assertEqual(steps[4:], ["candidate_adapter", "candidate_adapter", "candidate_ui", "candidate_ui", "candidate_ui"])  # Each lane says it is running; ui's verdict, then its gate's reasons.
+        # The shared checks' event (run-checks-once), then each lane says it is running; ui's verdict, then its gate's reasons.
+        self.assertEqual(steps[4:], ["candidate", "candidate_adapter", "candidate_adapter", "candidate_ui", "candidate_ui", "candidate_ui"])
         self.assertRegex(self.events()[-1]["message"], r"^Candidate gate blocked on attempt \d+: ")
         second_candidate = self.candidate_commit(1)
         self.assertNotEqual(second_candidate, first_candidate)
@@ -885,7 +887,8 @@ class CandidateStepWithoutAVerdictOnAnAutomaticRun(RepairFixture):
             commit = drive(self.runtime)
         self.assertEqual(git(self.repo, "rev-parse", "HEAD"), commit)
         self.assertEqual(read_json(directory / "verification/candidate/adapter/2/packet.json")["gate"]["status"], "passed")
-        self.assertEqual(read_json(directory / "verification/candidate/ui/1/packet.json")["gate"]["status"], "passed")
+        # Lockstep candidate attempts (run-checks-once [L2]): adapter's raised attempt raised ui's beside it.
+        self.assertEqual(read_json(directory / "verification/candidate/ui/2/packet.json")["gate"]["status"], "passed")
         self.assertEqual(sorted(self.sessions.starts), ["adapter", "review", "ui"])
 
 
@@ -1240,7 +1243,8 @@ class RepairSession(RepairFixture):
                 self.assertTrue((self.directory / f"repair-{number}.stop.json").exists())
                 self.assertEqual(self.head(), before)
                 self.assertEqual(git(self.repo, "for-each-ref", "--format=%(refname)", f"refs/workflow-repair/*/{number}/ui"), "")
-                self.assertEqual(read_json(self.directory / "attempts.json"), {"candidate:ui": 2})
+                # Lockstep candidate attempts (run-checks-once [L2]): the ui retry raised adapter's attempt beside it.
+                self.assertEqual(read_json(self.directory / "attempts.json"), {"candidate:ui": 2, "candidate:adapter": 2})
         # A blocked round takes no candidate generation: the next applied repair is generation 1, whatever its number.
         self.sessions.repair_status, self.sessions.repair_edits["ui"] = "completed", {"ui.txt": "after"}
         code, out, err = self.session_cli("ui", "--session", "--live")

@@ -407,39 +407,10 @@ def prune_attempt(repository, directory: Path) -> list[Path]:
     return removed
 
 
-def verify_revision(run: Path, plan: dict, policy: dict, node: str, commit: str, changed: list[str],
-                    session_id: str, phase: str = "worker", attempt: int = 1, prune: bool = True) -> dict:
-    """One fresh verification worktree per node/phase/attempt, artifacts retained. A passed attempt is pruned once its
-    packet is saved (prune_attempt); a failed one is kept whole, and so is one the caller may still fail (`prune=False`:
-    the failure drill's attempt)."""
-    worker = next(worker for worker in policy["workers"] if worker["node_id"] == node)
-    directory = run / "verification" / phase / node / str(attempt)
-    packet_path = directory / "packet.json"
-    if packet_path.exists():
-        packet = json.loads(packet_path.read_text())
-        # What the packet verified is its own phase, lane and attempt, not its path: a worker packet at the candidate path
-        # would pass a candidate whose checks were never run (recheck_packet gates it with the packet's own phase).
-        found = (packet["phase"], packet["expected"]["node_id"], packet["expected"]["attempt"])
-        if found != (phase, node, attempt):
-            raise ValueError(f"Existing verification at {packet_path} is the {found[0]} packet of {found[1]} attempt {found[2]}, "
-                             f"not the {phase} packet of {node} attempt {attempt}; it is never reused")
-        # A reused candidate packet has no evidence of its own: recheck_packet gates its worker packet's against the policy.
-        if packet["expected"]["output_commit"] != commit or ("evidence" in packet and packet["evidence"]["policy_sha256"] != policy_digest(policy)):
-            raise ValueError("Existing verification belongs to a different revision/policy")
-        return recheck_packet(packet, policy, run)
-    if directory.exists():
-        raise RuntimeError("Interrupted check attempt exists; use an explicitly incremented attempt")
-    directory.mkdir(parents=True, mode=0o700)
-    worktree = directory / "worktree"
-    git_worktree(plan["repository"], "add", "--detach", str(worktree), commit)
-    if git(worktree, "rev-parse", "HEAD") != commit or git(worktree, "status", "--porcelain"):
-        raise RuntimeError("Verification worktree did not start clean at expected revision")
-    artifacts_dir = directory / "artifacts"
-    artifacts_dir.mkdir()
-    capture = Capture(artifacts_dir)
-    # Captured before any check runs, so a check that rewrites a file cannot change what is recorded; the
-    # post-check cleanliness rule below invalidates the evidence if one does. The candidate phase captures nothing.
-    files_not_captured = capture_changed_files(worktree, changed, capture) if phase == "worker" else None
+def check_env(directory: Path, phase: str) -> tuple[dict, list[str], Path]:
+    """The checks' environment for one attempt folder: check_environment plus the phase, caches inside the folder and a
+    private TMPDIR outside the run (lane_tmpdir), with the secret-like names it dropped. Nothing in it names a lane, so a
+    shared execution (shared_checks) runs in exactly the environment each declaring lane's own attempt would have had."""
     env, dropped = check_environment(os.environ)
     # Share installed browser executables read-only, not profiles or test caches.
     if sys.platform == "linux":
@@ -456,14 +427,75 @@ def verify_revision(run: Path, plan: dict, policy: dict, node: str, commit: str,
     # holds no evidence, and is removed once the checks finish.
     tmpdir = lane_tmpdir()
     env["TMPDIR"] = str(tmpdir)
+    return env, dropped, tmpdir
+
+
+def verify_revision(run: Path, plan: dict, policy: dict, node: str, commit: str, changed: list[str],
+                    session_id: str, phase: str = "worker", attempt: int = 1, prune: bool = True, shared: dict | None = None) -> dict:
+    """One fresh verification worktree per node/phase/attempt, artifacts retained. A passed attempt is pruned once its
+    packet is saved (prune_attempt); a failed one is kept whole, and so is one the caller may still fail (`prune=False`:
+    the failure drill's attempt).
+
+    `shared` (candidate phase only): the shared record (shared_checks) this attempt cites, `{path, sha256}`. The lane's
+    non-browser checks are then not run again: their executions, counts, errors and logs are the record's, copied into
+    this folder as `check-<i>.log`. Only a lane with a browser check gets its own worktree, for those checks and their
+    setup. The packet names the record in `shared_record`; the returned gate is the lane's own checks', since the
+    candidate step gates the record's run checks once every lane's own checks pass (shared_checks.SharedCandidate)."""
+    from .shared_checks import launch_failed, load_record
+    worker = next(worker for worker in policy["workers"] if worker["node_id"] == node)
+    directory = run / "verification" / phase / node / str(attempt)
+    packet_path = directory / "packet.json"
+    if packet_path.exists():
+        packet = json.loads(packet_path.read_text())
+        # What the packet verified is its own phase, lane and attempt, not its path: a worker packet at the candidate path
+        # would pass a candidate whose checks were never run (recheck_packet gates it with the packet's own phase).
+        found = (packet["phase"], packet["expected"]["node_id"], packet["expected"]["attempt"])
+        if found != (phase, node, attempt):
+            raise ValueError(f"Existing verification at {packet_path} is the {found[0]} packet of {found[1]} attempt {found[2]}, "
+                             f"not the {phase} packet of {node} attempt {attempt}; it is never reused")
+        # A reused candidate packet has no evidence of its own: recheck_packet gates its worker packet's against the policy.
+        if packet["expected"]["output_commit"] != commit or ("evidence" in packet and packet["evidence"]["policy_sha256"] != policy_digest(policy)):
+            raise ValueError("Existing verification belongs to a different revision/policy")
+        # Lockstep (decisions [L2]): a packet of this attempt cites this attempt's one record, never an older one.
+        if shared is not None and packet.get("shared_record") != shared and ("shared_record" in packet or policy.get("run_checks")):
+            raise ValueError(f"Existing verification at {packet_path} cites another shared record than {shared['path']}; it is never reused beside it")
+        return recheck_packet(packet, policy, run, run_checks=shared is None)
+    if directory.exists():
+        raise RuntimeError("Interrupted check attempt exists; use an explicitly incremented attempt")
+    record = load_record(run, shared) if shared is not None else None
+    unstarted = record is not None and launch_failed(record, [check["argv"] for check in worker["checks"] if check["kind"] != "browser"])
+    if unstarted:  # Before the lane's folder exists: the step stops without a verdict on this lane, as before checks were shared.
+        raise RuntimeError(f"{unstarted}; see {run / shared['path']}")
+    own = shared is None or any(check["kind"] == "browser" for check in worker["checks"])
+    directory.mkdir(parents=True, mode=0o700)
+    # A citing lane without a browser check has no worktree of its own: every execution it cites ran in the record's.
+    worktree = directory / "worktree" if own else Path(record["worktree"])
+    if own:
+        git_worktree(plan["repository"], "add", "--detach", str(worktree), commit)
+        if git(worktree, "rev-parse", "HEAD") != commit or git(worktree, "status", "--porcelain"):
+            raise RuntimeError("Verification worktree did not start clean at expected revision")
+    artifacts_dir = directory / "artifacts"
+    artifacts_dir.mkdir()
+    capture = Capture(artifacts_dir)
+    # Captured before any check runs, so a check that rewrites a file cannot change what is recorded; the
+    # post-check cleanliness rule below invalidates the evidence if one does. The candidate phase captures nothing.
+    files_not_captured = capture_changed_files(worktree, changed, capture) if phase == "worker" else None
+    if own:
+        env, dropped, tmpdir = check_env(directory, phase)
+    else:
+        env, dropped, tmpdir = {}, list(record["dropped_env_names"]), Path(record["tmpdir"])
     executions, receipts, errors, effective_commands, scenario_errors = [], [], [], [], []
     try:
         run_lane_commands(policy, worker, worktree, directory, env, capture, executions, receipts, errors, effective_commands, scenario_errors,
-                          label=f"{plan['run_id']} {phase} {node} attempt {attempt}")
+                          label=f"{plan['run_id']} {phase} {node} attempt {attempt}", shared=(record, (run / shared["path"]).parent) if record else None)
     finally:
-        shutil.rmtree(tmpdir, ignore_errors=True)
-    # Source edits by checks invalidate the evidence. Ignored caches are allowed.
-    if git(worktree, "rev-parse", "HEAD") != commit or git(worktree, "status", "--porcelain"):
+        if own:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+    # Source edits by checks invalidate the evidence. Ignored caches are allowed. A cited execution after which the shared
+    # worktree was no longer clean carries `modified` (shared_checks.run_shared): only the lanes that cite it get the error.
+    if (own and (git(worktree, "rev-parse", "HEAD") != commit or git(worktree, "status", "--porcelain"))) or (
+            record is not None and any(cited_execution(record, check["argv"]).get("modified") for check in worker["checks"]
+                                       if check["kind"] != "browser" and not record["setup_errors"])):
         errors.append("Verification modified the tested source revision")
     expected = {"run_id": plan["run_id"], "node_id": node, "attempt": attempt, "base_commit": plan["base_commit"],
                 "output_commit": commit, "verification_cwd": str(worktree)}
@@ -480,8 +512,8 @@ def verify_revision(run: Path, plan: dict, policy: dict, node: str, commit: str,
     packet = {"phase": phase, "expected": expected, "result": result, "evidence": evidence,
               "artifact_root": str(artifacts_dir), "artifact_paths": {key: str(path) for key, path in capture.paths.items()},
               "capture_errors": errors, "scenario_errors": scenario_errors, "effective_commands": effective_commands, "tmpdir": str(tmpdir),
-              "dropped_env_names": dropped}
-    packet = recheck_packet(packet, policy, run)
+              "dropped_env_names": dropped, **({"shared_record": shared} if shared is not None else {})}
+    packet = recheck_packet(packet, policy, run, run_checks=shared is None)
     save_json(packet_path, packet)
     if prune and packet["gate"]["status"] == "passed":
         try:
@@ -543,11 +575,47 @@ def lane_tmpdir() -> Path:
     return tmpdir
 
 
+def cited_execution(record: dict, argv: list[str]) -> dict:
+    """The shared record's execution of this argv (shared_checks.run_shared runs each distinct argv once)."""
+    found = [execution for execution in record["executions"] if execution["argv"] == list(argv)]
+    if len(found) != 1:
+        raise ValueError(f"Shared record has {len(found)} executions of {shlex.join(argv)}")
+    return found[0]
+
+
+def cite_execution(check: dict, index: int, record: dict, folder: Path, directory: Path, capture: "Capture",
+                   executions: list, receipts: list, errors: list, effective_commands: list) -> None:
+    """A lane check the shared record ran: its execution as the lane's own, its log copied to `check-<index>.log`, its
+    counts parsed once and read under the lane's kind, its errors under the lane's check id (PRD 4 E8)."""
+    execution = cited_execution(record, check["argv"])
+    log = directory / f"check-{index}.log"
+    shutil.copyfile(folder / execution["log"], log)
+    log_id = capture.add(log, "log")
+    effective_commands.append(list(check["argv"]))
+    executions.append({"command": shlex.join(check["argv"]), "cwd": execution["cwd"], "started_at": execution["started_at"],
+                       "finished_at": execution["finished_at"], "exit_code": execution["exit_code"], "log_artifact_id": log_id,
+                       **({"transient": "memory"} if execution.get("transient") == "memory" else {})})
+    errors.extend(f"{check['id']}: {message}" for message in execution["errors"])
+    tests = execution["tests"] if check["kind"] in {"unit", "contract", "integration"} else None
+    receipts.append({"id": check["id"], "worker_check_index": index, "tests": tests, "scenarios": []})
+
+
 def run_lane_commands(policy: dict, worker: dict, worktree: Path, directory: Path, env: dict, capture: "Capture",
                       executions: list, receipts: list, errors: list, effective_commands: list, scenario_errors: list,
-                      label: str = "") -> None:
-    for index, setup in enumerate(policy.get("setup", [])):
-        log = directory / f"setup-{index}.log"
+                      label: str = "", shared: tuple[dict, Path] | None = None) -> None:
+    """Setup, then every check in policy order. With `shared` (the record and its folder), the record's setup and
+    executions stand for the lane's non-browser checks (cite_execution); setup runs again only in a browser lane's own
+    worktree, logged as `setup-<i>-browser.log`."""
+    own = shared is None or any(check["kind"] == "browser" for check in worker["checks"])
+    if shared is not None:
+        record, folder = shared
+        for index, item in enumerate(record["setup"]):
+            log = directory / f"setup-{index}.log"
+            shutil.copyfile(folder / item["log"], log)
+            capture.add(log, "log")
+        errors.extend(record["setup_errors"])
+    for index, setup in enumerate(policy.get("setup", []) if own and not errors else []):
+        log = directory / (f"setup-{index}.log" if shared is None else f"setup-{index}-browser.log")
         code, _, _ = execute(setup["argv"], worktree, log, setup["timeout_seconds"], env)
         capture.add(log, "log")
         if code != 0:
@@ -555,6 +623,9 @@ def run_lane_commands(policy: dict, worker: dict, worktree: Path, directory: Pat
             break
     if not errors:
         for index, check in enumerate(worker["checks"]):
+            if shared is not None and check["kind"] != "browser":
+                cite_execution(check, index, shared[0], shared[1], directory, capture, executions, receipts, errors, effective_commands)
+                continue
             argv = list(check["argv"])
             log = directory / f"check-{index}.log"
             browser_output = directory / f"browser-{index}"
@@ -595,7 +666,8 @@ def run_lane_commands(policy: dict, worker: dict, worktree: Path, directory: Pat
             receipts.append({"id": check["id"], "worker_check_index": index, "tests": tests, "scenarios": scenarios})
 
 
-def reuse_packet(run: Path, plan: dict, policy: dict, node: str, commit: str, worker_path: Path, attempt: int = 1) -> dict:
+def reuse_packet(run: Path, plan: dict, policy: dict, node: str, commit: str, worker_path: Path, attempt: int = 1,
+                 shared: dict | None = None) -> dict:
     """The candidate packet of a lane whose candidate is its own snapshot: the worker packet at `worker_path`, re-gated in the
     candidate phase, instead of a second verification worktree (C28). Nothing runs.
 
@@ -603,11 +675,14 @@ def reuse_packet(run: Path, plan: dict, policy: dict, node: str, commit: str, wo
     and sha256. recheck_packet loads that packet again, checks its digest and gates it as a candidate packet, so the cache
     rule of verify_revision (a packet of another phase, lane or attempt is never reused) still holds. Its `result` and
     `artifact_paths` are copies for readers of the file (the viewer, report.html); no gate trusts them.
+
+    On a policy with run checks, `shared` names the record that ran them on this candidate attempt: the packet cites it
+    in `shared_record` beside `reused_from`, and the candidate step gates them (shared_checks.SharedCandidate.finish).
     """
     directory = run / "verification" / "candidate" / node / str(attempt)
     packet_path = directory / "packet.json"
     if packet_path.exists():
-        return verify_revision(run, plan, policy, node, commit, [], "", phase="candidate", attempt=attempt)
+        return verify_revision(run, plan, policy, node, commit, [], "", phase="candidate", attempt=attempt, shared=shared)
     if directory.exists():
         raise RuntimeError("Interrupted check attempt exists; use an explicitly incremented attempt")
     worker_path = Path(worker_path).resolve()
@@ -619,8 +694,9 @@ def reuse_packet(run: Path, plan: dict, policy: dict, node: str, commit: str, wo
     expected = {"run_id": plan["run_id"], "node_id": node, "attempt": attempt, "base_commit": plan["base_commit"],
                 "output_commit": commit, "verification_cwd": worker["expected"]["verification_cwd"]}
     packet = {"phase": "candidate", "expected": expected,
-              "reused_from": {"path": str(worker_path.relative_to(run.resolve())), "sha256": digest}}
-    gated = recheck_packet(packet, policy, run)
+              "reused_from": {"path": str(worker_path.relative_to(run.resolve())), "sha256": digest},
+              **({"shared_record": shared} if shared is not None else {})}
+    gated = recheck_packet(packet, policy, run, run_checks=shared is None)
     reused = packet["reused_from"]["path"]
     directory.mkdir(parents=True, mode=0o700)
     result = {**gated["result"], "attempt": attempt, "summary": f"Worker check capture {reused} reused for the candidate gate; not integration approval"}
@@ -646,24 +722,39 @@ def recheck_reused(packet: dict, policy: dict, run: Path) -> dict:
     if (worker.get("phase"), "reused_from" in worker) != ("worker", False) or any(
             worker["expected"][key] != expected[key] for key in ("run_id", "node_id", "base_commit", "output_commit")):
         raise ValueError(f"{reference['path']} is not the worker packet of {expected['node_id']} at {expected['output_commit']}")
-    gated = recheck_packet({**worker, "phase": "candidate"}, policy, run)
+    # The worker packet re-gated as a candidate one never cites a record: the citation is the outer packet's (decisions [L6]).
+    gated = recheck_packet({**worker, "phase": "candidate"}, policy, run, cited=False)
     # The worker phase left its deferred checks out of transient_checks; at the candidate every check gates.
     lane = next(item for item in policy["workers"] if item["node_id"] == expected["node_id"])
     result = {key: value for key, value in gated["result"].items() if key != "transient_checks"}
     killed = transient_checks(lane, worker["evidence"]["checks"], worker["result"]["checks"], "candidate")
     return {**gated, "result": {**result, **({"transient_checks": killed} if killed else {})}, "phase": "candidate", "expected": expected,
-            "reused_from": reference}
+            "reused_from": reference, **{key: packet[key] for key in ("shared_record", "run_check_block") if key in packet}}
 
 
-def recheck_packet(packet: dict, policy: dict, run: Path) -> dict:
+def recheck_packet(packet: dict, policy: dict, run: Path, run_checks: bool = True, cited: bool = True) -> dict:
+    """Gate a saved packet again from its evidence. A packet citing a shared record (`shared_record`) is gated on the
+    record too (shared_checks.cited_record, gate_run_checks): its digest, its executions of the lane's argvs and, unless `run_checks` is
+    False (the candidate step before every lane's own checks passed), the record's run checks and their attribution.
+    On a policy with run checks a candidate packet that cites no record is refused, reused (C28) or not (decisions [L6]);
+    `cited` is False only for recheck_reused's inner gate of the worker packet, which never cites one."""
+    from .shared_checks import cited_record, gate_run_checks
+    if cited and packet.get("phase") == "candidate" and policy.get("run_checks") and "shared_record" not in packet:
+        raise ValueError(f"Candidate packet of {packet['expected']['node_id']} attempt {packet['expected']['attempt']} cites no shared "
+                         "record; the policy's run checks gate every candidate packet")
     if "reused_from" in packet:
-        return recheck_reused(packet, policy, run)
+        packet = recheck_reused(packet, policy, run)
+        if "shared_record" in packet:
+            gate_run_checks(packet, policy, run, cited_record(packet, policy, run, lane_checks=False), run_checks)
+        return packet
+    record = cited_record(packet, policy, run) if "shared_record" in packet else None
     root = Path(packet["artifact_root"]).resolve()
     if not root.is_relative_to(run.resolve()):
         raise ValueError("Artifact root outside run")
     gate = evaluate_worker(policy, packet["result"], packet["evidence"], expected=packet["expected"],
                            artifact_root=root, artifact_paths={key: Path(value) for key, value in packet["artifact_paths"].items()},
-                           enforce_ownership=packet["phase"] == "worker", phase=packet["phase"])
+                           enforce_ownership=packet["phase"] == "worker", phase=packet["phase"],
+                           shared_cwd=record["worktree"] if record is not None else None)
     # Capture errors are prefixed with their check id; a deferred check's errors are evidence, not a gate.
     deferred_prefixes = tuple(f"{check_id}{separator}" for check_id in gate["deferred_checks"] for separator in (":", "/"))
     gate["reasons"].extend(error for error in packet["capture_errors"] if not error.startswith(deferred_prefixes))
@@ -673,6 +764,8 @@ def recheck_packet(packet: dict, policy: dict, run: Path) -> dict:
     if gate["reasons"]:
         gate["status"] = "blocked"
     packet["gate"] = gate
+    if record is not None:
+        gate_run_checks(packet, policy, run, record, run_checks)
     return packet
 
 

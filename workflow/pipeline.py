@@ -742,11 +742,14 @@ class Pipeline:
         if expected_tree and git(Path(self.plan["repository"]), "rev-parse", f"{candidate['commit']}^{{tree}}") != expected_tree:
             raise ValueError(f"Candidate {candidate['commit']} differs from the repaired tree of repair {repairs[-1]['n']}; inspect")
         candidate_paths = []
+        # Each distinct non-browser command runs once for every lane, in lockstep attempts (run-checks-once; shared_checks).
+        from .shared_checks import SharedCandidate
+        shared = SharedCandidate(self, candidate["commit"], len(repairs), state, repaired=bool(repairs))
         for node in self.workers:
             attempt = self.attempt("candidate", node)
             reused = self.reusable_packet(node, attempt, candidate["commit"], state, repaired=bool(repairs))
             if reused:
-                packet = reuse_packet(self.directory, self.plan, self.policy, node, candidate["commit"], reused, attempt=attempt)
+                packet = reuse_packet(self.directory, self.plan, self.policy, node, candidate["commit"], reused, attempt=attempt, shared=shared.reference)
                 # A regular candidate packet already cached at this attempt (an earlier controller ran the checks) comes back as it is.
                 note = (f"; worker checks reused from {packet['reused_from']['path']} (one lane, no browser check, the candidate is its snapshot)"
                         if "reused_from" in packet else self.slow_note(node, packet))
@@ -755,7 +758,7 @@ class Pipeline:
                 self.event(f"candidate_{node}", "running", f"Attempt {attempt}; combined revision {candidate['commit']}")
                 packet = verify_revision(self.directory, self.plan, self.policy, node, candidate["commit"],
                                          changed_files(Path(candidate["worktree"]), self.plan["base_commit"]),
-                                         state["snapshots"][node]["session_id"], phase="candidate", attempt=attempt)
+                                         state["snapshots"][node]["session_id"], phase="candidate", attempt=attempt, shared=shared.reference)
                 note = self.slow_note(node, packet)
             path = self.directory / "verification" / "candidate" / node / str(attempt) / "packet.json"
             self.event(f"candidate_{node}", packet["gate"]["status"], f"Combined revision {candidate['commit']}{note}")
@@ -766,6 +769,7 @@ class Pipeline:
             if failed_before(self.directory, "candidate", node, attempt, candidate["commit"]):
                 self.event(f"candidate_{node}", "passed", f"Candidate gate passed on attempt {attempt} after attempt {attempt - 1} failed")
             candidate_paths.append(path)
+        shared.finish()  # The run checks, once every lane's own checks passed: raises when one failed.
         bundle = {"run_id": self.plan["run_id"], "base_commit": self.plan["base_commit"],
                   "candidate_commit": candidate["commit"], "policy_sha256": policy_digest(self.policy),
                   "snapshots": state["snapshots"],

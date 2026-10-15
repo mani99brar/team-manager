@@ -90,6 +90,18 @@ def validate_policy(policy: dict) -> dict:
     drill = policy.get("failure_drill")
     if drill and (drill["node_id"] not in workers or policy.get("max_verification_attempts", 3) < 2):
         raise ValueError("Failure drill requires a configured worker and at least two allowed verification attempts")
+    # 1.5.0 run checks (run-checks-once PRD 6.1; the schema refuses them before 1.5.0, a browser kind and scenarios): run once
+    # per candidate attempt, never per lane, so they never satisfy a lane's required kinds (checked above on lane checks only).
+    run_checks = policy.get("run_checks", [])
+    unique(run_checks, "id")
+    if len({tuple(check["argv"]) for check in run_checks}) != len(run_checks):
+        raise ValueError("Each run check needs a distinct command")
+    lane_ids = {check["id"] for worker in workers.values() for check in worker["checks"]}
+    for check in run_checks:
+        if check["id"] in lane_ids:
+            raise ValueError(f"Run check {check['id']} has the id of a lane check")
+        if check["kind"] == "browser" or check["scenarios"]:
+            raise ValueError("Run checks are never browser checks and have no scenarios")
     return policy
 
 
@@ -99,7 +111,8 @@ TEST_KINDS = ("unit", "integration", "contract", "browser")
 def policy_lint(policy: dict, previous: dict | None, since: str | None = None) -> list[str]:
     """Launch notes on a valid policy, never a refusal (C27): (a) each lane that requires no test kind, which is allowed
     (the operator may decline tests); (c) each lane's required kinds and check ids that `previous`, the pinned policy of
-    the feature's previous run (`since` names it), had and this one removed. Added checks and owned paths are no note."""
+    the feature's previous run (`since` names it), had and this one removed; (d) each non-browser argv two or more lanes
+    declare (run-checks-once PRD 6.4). Added checks and owned paths are no note."""
     notes = []
     before = {}
     workers = previous.get("workers") if isinstance(previous, dict) else None
@@ -109,6 +122,18 @@ def policy_lint(policy: dict, previous: dict | None, since: str | None = None) -
                 before[worker["node_id"]] = (set(required_kinds(previous, worker)), {check["id"] for check in worker["checks"]})
             except (KeyError, TypeError, ValueError, AttributeError):
                 continue  # A previous policy this controller cannot read lists nothing removed.
+    # (d) a non-browser command several lanes declare: shared once at the candidate, run per lane in the worker phase.
+    declared = {}
+    for worker in policy["workers"]:
+        for check in worker["checks"]:
+            if check["kind"] != "browser":
+                lanes = declared.setdefault(tuple(check["argv"]), [])
+                if worker["node_id"] not in lanes:
+                    lanes.append(worker["node_id"])
+    for argv, lanes in declared.items():
+        if len(lanes) > 1:
+            notes.append(f"lanes {', '.join(lanes)} declare {shlex.join(argv)}: it runs once at the candidate but once per lane in the worker "
+                         "phase; move it to run_checks (policy 1.5.0) and give the lanes targeted checks")
     for worker in policy["workers"]:
         node, kinds = worker["node_id"], required_kinds(policy, worker)
         if not set(kinds) & set(TEST_KINDS):
@@ -147,7 +172,7 @@ def slow_checks(worker: dict, result: dict, evidence: dict) -> list[str]:
 
 def evaluate_worker(policy: dict, result: dict, evidence: dict, *, expected: dict,
                     artifact_root: Path, artifact_paths: dict[str, Path], enforce_ownership: bool = True,
-                    phase: str = "candidate") -> dict:
+                    phase: str = "candidate", shared_cwd: str | None = None) -> dict:
     """Fail closed on absent, stale or inconsistent evidence.
 
     `expected` is backend-owned: run_id, node_id, attempt, base_commit,
@@ -158,6 +183,10 @@ def evaluate_worker(policy: dict, result: dict, evidence: dict, *, expected: dic
     In the `worker` phase, checks of a DEFERRED_WORKER_KINDS kind are verified for
     integrity (approved argv, worktree, timeout) and recorded, but their outcome does
     not gate; the returned `deferred_checks` names them. Every other phase gates on all.
+
+    `shared_cwd`: the worktree of the shared record a candidate packet cites (shared_checks). Its non-browser checks
+    must have run there and its browser checks in `verification_cwd`, the lane's own worktree: exactly those two cwds.
+    Without it, every check must have run in `verification_cwd`, as before.
     """
     reasons = []
     deferred = []
@@ -220,7 +249,8 @@ def evaluate_worker(policy: dict, result: dict, evidence: dict, *, expected: dic
             execution = result["checks"][receipt["worker_check_index"]]
             if execution["command"] != shlex.join(requirement["argv"]):
                 reasons.append(f"{check_id}: executed command differs from approved argv")
-            if Path(execution["cwd"]).resolve() != Path(expected["verification_cwd"]).resolve():
+            cwd = shared_cwd if shared_cwd is not None and requirement["kind"] != "browser" else expected["verification_cwd"]
+            if Path(execution["cwd"]).resolve() != Path(cwd).resolve():
                 reasons.append(f"{check_id}: wrong verification worktree")
             duration = (datetime.fromisoformat(execution["finished_at"]) - datetime.fromisoformat(execution["started_at"])).total_seconds()
             if duration > requirement["timeout_seconds"]:

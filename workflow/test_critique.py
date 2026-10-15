@@ -5,6 +5,7 @@ temporary directory and HOME. The engine lane of PRD_USER_CRITIQUE section 6.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shutil
@@ -19,8 +20,22 @@ from unittest import mock
 
 from . import critique
 from .sessions import read_json, save_json, worker_settings
+from .test_env import isolate_browser_queue
 
 ROOT = str(Path(__file__).resolve().parents[1])
+MODULE = contextlib.ExitStack()
+
+
+def setUpModule():
+    # Every critique child takes a slot of this module's own queue, never the operator's (test_env); the two slot tests
+    # below set a queue of their own.
+    temp = MODULE.enter_context(tempfile.TemporaryDirectory())
+    MODULE.enter_context(mock.patch.dict(os.environ))  # Restored, the queue variable with it, by tearDownModule.
+    isolate_browser_queue(temp)
+
+
+def tearDownModule():
+    MODULE.close()
 
 
 # ---- Configuration --------------------------------------------------------------------------------------------------

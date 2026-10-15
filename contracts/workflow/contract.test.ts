@@ -96,15 +96,15 @@ test('verification policy 1.2.0 declares lanes from configuration; 1.0.0 and 1.1
   // The policy schema uses conditional rules zod cannot import, so its structure is checked directly; the Python
   // controller validates every committed policy against it (workflow/test_verification.py, workflow/test_lanes.py).
   const schema = readJson('./verification.schema.json')
-  assert.deepEqual(schema.properties.version.enum, ['1.0.0', '1.1.0', '1.2.0', '1.3.0', '1.4.0'])
+  assert.deepEqual(schema.properties.version.enum, ['1.0.0', '1.1.0', '1.2.0', '1.3.0', '1.4.0', '1.5.0'])
   // 1.3.0 adds the optional attack_check (docs/PRD_ATTACK_PASS.md section 3), refused before 1.3.0 by a rule the legacy finder skips; 1.4.0 keeps it.
   assert.deepEqual(Object.keys(schema.properties.attack_check.properties).sort(), ['argv', 'timeout_seconds'])
   const attackRule = schema.allOf.find((rule: { if: { not?: unknown }; then: { not?: { required?: string[] } } }) => rule.if.not && rule.then.not?.required?.includes('attack_check'))
-  assert.deepEqual(attackRule.if.not, { properties: { version: { enum: ['1.3.0', '1.4.0'] } } })
+  assert.deepEqual(attackRule.if.not, { properties: { version: { enum: ['1.3.0', '1.4.0', '1.5.0'] } } })
   // 1.4.0 adds the optional critique_app (docs/PRD_USER_CRITIQUE.md section 4.2), refused before 1.4.0.
   assert.deepEqual(Object.keys(schema.properties.critique_app.properties).sort(), ['argv', 'ready_path', 'timeout_seconds'])
   const critiqueRule = schema.allOf.find((rule: { if: { not?: unknown }; then: { not?: { required?: string[] } } }) => rule.if.not && rule.then.not?.required?.includes('critique_app'))
-  assert.deepEqual(critiqueRule.if.not, { properties: { version: { const: '1.4.0' } } })
+  assert.deepEqual(critiqueRule.if.not, { properties: { version: { enum: ['1.4.0', '1.5.0'] } } })
   assert.equal(schema.properties.workers.minItems, 1)
   assert.equal('maxItems' in schema.properties.workers, false)
   const worker = schema.properties.workers.items.properties
@@ -450,4 +450,21 @@ test('registry-entry: the golden entry a live launch writes parses with the serv
   // The server schema is strict: the golden shape is exact, not merely tolerated.
   assert.throws(() => validateProjectsConfig({ version: 1, projects: [{ ...entry, extra: true }] }))
   assert.throws(() => validateProjectsConfig({ version: 1, projects: [{ ...entry, repository: 'relative/path' }] }))
+})
+
+test('verification policy 1.5.0 adds run_checks, refused before 1.5.0, and keeps attack_check and critique_app', () => {
+  // features/run-checks-once/prd.md section 6.1: version gates are exact-match sets, so each widened rule is asserted whole.
+  const schema = readJson('./verification.schema.json')
+  assert.deepEqual(schema.properties.version.enum, ['1.0.0', '1.1.0', '1.2.0', '1.3.0', '1.4.0', '1.5.0'])
+  type Rule = { if: { not?: { properties: { version: unknown } } }; then: { not?: { required?: string[] } } }
+  const ruleFor = (key: string) => schema.allOf.find((rule: Rule) => rule.if.not && rule.then.not?.required?.includes(key))
+  assert.deepEqual(ruleFor('attack_check').if.not, { properties: { version: { enum: ['1.3.0', '1.4.0', '1.5.0'] } } })
+  assert.deepEqual(ruleFor('critique_app').if.not, { properties: { version: { enum: ['1.4.0', '1.5.0'] } } })
+  assert.deepEqual(ruleFor('run_checks').if.not, { properties: { version: { const: '1.5.0' } } })
+  const runChecks = schema.properties.run_checks
+  assert.deepEqual([runChecks.type, runChecks.minItems, runChecks.maxItems], ['array', 1, 20])
+  assert.deepEqual(runChecks.items.required, ['id', 'kind', 'argv', 'timeout_seconds', 'scenarios'])
+  assert.equal(runChecks.items.additionalProperties, false)
+  assert.deepEqual(runChecks.items.properties.kind.enum, ['build', 'typecheck', 'unit', 'integration', 'contract'])
+  assert.deepEqual(runChecks.items.properties.scenarios, { type: 'array', maxItems: 0 })
 })

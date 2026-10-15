@@ -2127,7 +2127,7 @@ def fix_decision(runtime, state) -> tuple[str, str] | None:
     an unverified check, which retry, a candidate block that names no single lane). RuntimeError (exhausted) once the lane
     blocked again after its rounds, or its last round ended blocked."""
     from .attack import has_attack
-    from .repair import open_session, session_entries
+    from .repair import open_session, session_entries, unattributed_block
     rounds = fix_rounds(runtime.plan)
     if not rounds:
         return None
@@ -2168,7 +2168,7 @@ def fix_decision(runtime, state) -> tuple[str, str] | None:
         trigger, found = "verify", blocked_lanes(runtime, "worker", [node for node in workers if f"verify_{node}" in failures])
     else:
         return None
-    if not found or (trigger == "candidate" and len(found) != 1):
+    if not found or (trigger == "candidate" and (len(found) != 1 or unattributed_block(read_json(found[0][1])))):
         return None
     lane, path = found[0]
     from . import lane_review
