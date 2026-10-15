@@ -52,12 +52,15 @@ def validate_node_id(node) -> str:
 # names (`review.completion.json`, ...). A declared reviewer `<id>` owns the node `review-<id>` and the
 # files `review-<id>.*`, so its id follows the lane rules and can never be a lane id or a reserved name.
 DEFAULT_REVIEWER = "review"
+# Reviewer ids no feature may declare, beside the reserved node ids: `judge` is the judged review panel's judge entry in
+# review.json (feature.json 2.11.0, PRD 6 and 7.4), for every feature version. A lane may still be called `judge`.
+RESERVED_REVIEWER_IDS = frozenset({"judge"})
 
 
 def validate_reviewer_id(value, lanes: list[str] | None = None) -> str:
     if not isinstance(value, str) or not NODE_ID_PATTERN.fullmatch(value):
         raise ValueError(f"Reviewer id must match {NODE_ID_PATTERN.pattern}: {value!r}")
-    if value in RESERVED_NODE_IDS or value.startswith(RESERVED_NODE_PREFIXES):
+    if value in RESERVED_NODE_IDS or value in RESERVED_REVIEWER_IDS or value.startswith(RESERVED_NODE_PREFIXES):
         raise ValueError(f"Reviewer id is reserved: {value}")
     if lanes and value in lanes:
         raise ValueError(f"Reviewer id {value} is a worker lane of this run")

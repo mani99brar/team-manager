@@ -1,0 +1,57 @@
+{
+  "version": "1.1.0",
+  "panels": [
+    {
+      "id": "review",
+      "stage": "review",
+      "status": "succeeded",
+      "judged": true,
+      "overlap_threshold": null,
+      "context_bytes": 48211,
+      "providers": [
+        {"name": "claude", "prefix": "C", "transport": "claude", "model": null, "served_model": null, "cli_version": null,
+         "effort": "high", "status": "ok", "cost_usd": 1.64, "context_bytes": 48211, "finding_ids": ["C1"], "error": null},
+        {"name": "gpt", "prefix": "G", "transport": "pi", "model": "openai-codex/gpt-6.1-sol", "served_model": null, "cli_version": null,
+         "effort": null, "status": "timed_out", "cost_usd": null, "context_bytes": 48211, "finding_ids": [], "error": "timed out after 15 minutes"},
+        {"name": "muse", "prefix": "M", "transport": "cli", "model": "muse-wonder-1.0", "served_model": null,
+         "cli_version": "Muse Code 1.4.7 (1.4.7-R6101.1)", "effort": null, "status": "auth_required", "cost_usd": null, "context_bytes": 48211,
+         "finding_ids": [], "error": "Not logged in (run `muse login`)"},
+        {"name": "argon", "prefix": "A", "transport": "cli", "model": "gemini-4-argon", "served_model": null, "cli_version": null,
+         "effort": null, "status": "unavailable", "cost_usd": null, "context_bytes": null, "finding_ids": [],
+         "error": "disabled in the reviewer list"}
+      ],
+      "findings": [
+        {"id": "C1", "severity": "P1", "file": "server/projects.ts", "line": 2218, "title": "judge record ignored on export fallback",
+         "detail": "resolvePanelRecord drops the judge object when it reads the export.", "providers_raised": ["claude"],
+         "accepted": false, "unanchored": false}
+      ],
+      "started_at": "2026-10-15T11:02:11Z",
+      "ended_at": "2026-10-15T11:52:30Z",
+      "budget_usd": 5,
+      "error": null,
+      "delta_from": null,
+      "context_truncated": null,
+      "judge": {
+        "status": "timed_out",
+        "fallback": true,
+        "model": "claude-opus-5-5",
+        "effort": "high",
+        "session_id": null,
+        "started_at": "2026-10-15T11:22:30Z",
+        "ended_at": "2026-10-15T11:52:30Z",
+        "cost_usd": null,
+        "error": "judge timed out after 30 minutes; the built-in reviewers' P0/P1 decided (today's rule) and the panel findings stay unjudged",
+        "inputs": [
+          {"source": "general", "kind": "reviewer", "status": "approved", "finding_ids": []},
+          {"source": "coverage", "kind": "reviewer", "status": "approved", "finding_ids": []},
+          {"source": "claude", "kind": "seat", "status": "ok", "finding_ids": ["C1"]},
+          {"source": "gpt", "kind": "seat", "status": "timed_out", "finding_ids": []},
+          {"source": "muse", "kind": "seat", "status": "auth_required", "finding_ids": []},
+          {"source": "argon", "kind": "seat", "status": "unavailable", "finding_ids": []}
+        ],
+        "reviewer_findings": [],
+        "rulings": []
+      }
+    }
+  ]
+}

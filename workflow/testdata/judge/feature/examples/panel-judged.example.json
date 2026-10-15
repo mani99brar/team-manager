@@ -1,0 +1,83 @@
+{
+  "version": "1.1.0",
+  "panels": [
+    {
+      "id": "review",
+      "stage": "review",
+      "status": "succeeded",
+      "judged": true,
+      "overlap_threshold": null,
+      "context_bytes": 48211,
+      "providers": [
+        {"name": "claude", "prefix": "C", "transport": "claude", "model": null, "served_model": null, "cli_version": null,
+         "effort": "high", "status": "ok", "cost_usd": 1.82, "context_bytes": 48211, "finding_ids": ["C1", "C2"], "error": null},
+        {"name": "gpt", "prefix": "G", "transport": "pi", "model": "openai-codex/gpt-6.1-sol", "served_model": null, "cli_version": null,
+         "effort": null, "status": "ok", "cost_usd": 0.41, "context_bytes": 48211, "finding_ids": ["G1"], "error": null},
+        {"name": "muse", "prefix": "M", "transport": "cli", "model": "muse-wonder-1.0", "served_model": "muse-wonder-1.0",
+         "cli_version": "Muse Code 1.4.7 (1.4.7-R6101.1)", "effort": null, "status": "ok", "cost_usd": null, "context_bytes": 48211,
+         "finding_ids": ["M1"], "error": null}
+      ],
+      "findings": [
+        {"id": "C1", "severity": "P1", "file": "workflow/panel.py", "line": 212, "title": "settle returns before the last seat exits",
+         "detail": "settle() polls only seats that were running at its first pass; a seat started on resume is never awaited.",
+         "providers_raised": ["claude"], "accepted": true, "unanchored": false},
+        {"id": "C2", "severity": "P2", "file": "workflow/judge.py", "line": 88, "title": "judge stdin left open",
+         "detail": "The judge job may hang if stdin is not closed.", "providers_raised": ["claude"], "accepted": false, "unanchored": false},
+        {"id": "G1", "severity": "P0", "file": "workflow/attack.py", "line": 131, "title": "secret file list includes a world-readable path",
+         "detail": "default_secret_files lists a path that may be world-readable.", "providers_raised": ["gpt"], "accepted": false, "unanchored": false},
+        {"id": "M1", "severity": "P1", "file": "workflow/panel.py", "line": 214, "title": "resumed seat not awaited",
+         "detail": "A seat relaunched on resume is missing from the wait set.", "providers_raised": ["muse"], "accepted": true, "unanchored": false}
+      ],
+      "started_at": "2026-10-15T10:02:11Z",
+      "ended_at": "2026-10-15T10:31:40Z",
+      "budget_usd": 5,
+      "error": null,
+      "delta_from": null,
+      "context_truncated": null,
+      "judge": {
+        "status": "judged",
+        "fallback": false,
+        "model": "claude-opus-5-5",
+        "effort": "high",
+        "session_id": "5f0c2a8e-7d4b-4f1e-9a63-2b8d1c0e4f71",
+        "started_at": "2026-10-15T10:24:03Z",
+        "ended_at": "2026-10-15T10:31:40Z",
+        "cost_usd": 3.07,
+        "error": null,
+        "inputs": [
+          {"source": "general", "kind": "reviewer", "status": "blocked", "finding_ids": ["general-1"]},
+          {"source": "coverage", "kind": "reviewer", "status": "blocked", "finding_ids": ["coverage-1"]},
+          {"source": "claude", "kind": "seat", "status": "ok", "finding_ids": ["C1", "C2"]},
+          {"source": "gpt", "kind": "seat", "status": "ok", "finding_ids": ["G1"]},
+          {"source": "muse", "kind": "seat", "status": "ok", "finding_ids": ["M1"]}
+        ],
+        "reviewer_findings": [
+          {"id": "general-1", "reviewer": "general", "severity": "P1", "worker": "engine",
+           "message": "panel.settle can return while a resumed seat is still running (workflow/panel.py:212)."},
+          {"id": "coverage-1", "reviewer": "coverage", "severity": "P1", "worker": "viewer",
+           "message": "No unit test covers the judge-fallback banner."}
+        ],
+        "rulings": [
+          {"id": "J1", "ruling": "confirmed", "severity": "P1", "sources": ["general-1", "C1", "M1"], "file": "workflow/panel.py", "line": 212,
+           "title": "settle does not wait for a seat relaunched on resume",
+           "detail": "The wait set is built once from the seats running at the first pass; a seat relaunched on resume is never awaited, so the judge can start without its findings.",
+           "requirement": "PRD 7.2: the judge starts only after every seat has finished, failed or timed out",
+           "worker": "engine", "reason": "Reproduced by reading settle(): seats added by _relaunch are not in `waiting`.",
+           "evidence": "workflow/panel.py:205-214"},
+          {"id": "J2", "ruling": "confirmed", "severity": "P2", "sources": ["coverage-1"], "file": "tests/unit/panels.test.ts", "line": null,
+           "title": "No unit test for the judge-fallback banner",
+           "detail": "The banner renders (scenario covered in the browser suite) but no unit test pins its text.",
+           "requirement": null, "worker": "viewer",
+           "reason": "A test gap, not a defect in behaviour: regraded from P1 to P2.", "evidence": "tests/project-workflows/panel.spec.ts:140"},
+          {"id": "J3", "ruling": "refuted", "severity": "P2", "sources": ["C2"], "file": "workflow/judge.py", "line": 88,
+           "title": "judge stdin left open", "detail": "The job is started with stdin=DEVNULL.", "requirement": null, "worker": "engine",
+           "reason": "The cited line passes stdin=subprocess.DEVNULL.", "evidence": "workflow/judge.py:88"},
+          {"id": "J4", "ruling": "deferred", "severity": "P0", "sources": ["G1"], "file": "workflow/attack.py", "line": 131,
+           "title": "secret file list includes a world-readable path", "detail": "Pre-existing: the cited code is unchanged since the run's base.",
+           "requirement": null, "worker": "none",
+           "reason": "Unchanged since the run's base and named by no PRD or decisions line (base-scope rule).", "evidence": "workflow/attack.py:131"}
+        ]
+      }
+    }
+  ]
+}

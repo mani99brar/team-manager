@@ -16,6 +16,12 @@ every open P0/P1 names one lane blocks, the controller runs `repair.repair_sessi
 `fix_round`) up to `plan.automatic.fix_rounds` times, then stops with "fix loop exhausted". A review round is archived first
 (`review-rounds.json`, `archive_review`) and the next review's delta runs from that round's candidate. A check killed under
 memory pressure is rerun after a wait for memory without spending the attempt budget (`wait_for_memory`).
+
+A plan with a judged review panel (feature.json 2.11.0; RUNBOOK "Judged review panel (feature.json 2.11.0)") waits for every
+built-in reviewer to its verdict or failure on both transports, with no early decision and no grace (`wait_reviews`/
+`collect_print` with `judged`), then `panel.settle` and one judge (`judge_outcome`, workflow/judge.py); the judge's verdict and
+critique's decide review.json (`combined_review` with the judge), and a judge that fell back leaves today's rule. Every other
+plan reviews exactly as before, and nothing on its path touches `panel.settle` or `panel.record_judge`.
 """
 from __future__ import annotations
 
@@ -988,7 +994,7 @@ def announce_grace(runtime, state: ReviewStatus, remaining: list[str], until: fl
                                   "but never approve")
 
 
-def wait_reviews(runtime, state: ReviewStatus | None = None, *, clock=None, sleep=None) -> dict:
+def wait_reviews(runtime, state: ReviewStatus | None = None, *, clock=None, sleep=None, judged: bool = False) -> dict:
     """Poll every reviewer's receipt. Idle alone never means a verdict; each deadline counts from that reviewer's own launch.
 
     Returns the accepted decisions by reviewer id (also kept in `state.decisions`) as soon as every reviewer approved, or,
@@ -997,6 +1003,11 @@ def wait_reviews(runtime, state: ReviewStatus | None = None, *, clock=None, slee
     block, a rejected file (once the poll read every other ready file), an expired deadline or a missing session raises.
     A verdict accepted before a controller restart is read again and stays accepted, and a grace it started goes on until
     its original end.
+
+    With `judged` (a plan with a judged panel, PRD 7.2): no block decides early and there is no grace. Every reviewer is
+    waited for until its verdict is accepted or it fails (a refused file, a missing or refused session, its deadline); a
+    failure is recorded in its status (`blocked` with the error) and the wait goes on. Once every reviewer has a verdict or
+    failed, the accepted decisions are returned; with none at all, the first failure is raised, as today.
     """
     clock = clock or time.time
     sleep = sleep or time.sleep
@@ -1057,7 +1068,14 @@ def wait_reviews(runtime, state: ReviewStatus | None = None, *, clock=None, slee
         if accepted and reviewer_id not in decisions:
             accept(reviewer_id, accepted)
     # A block accepted before this controller started decides the run; its grace goes on, with the verdicts accepted since.
-    blocked = any(decision_blocks(decision) for decision in decisions.values())
+    blocked = not judged and any(decision_blocks(decision) for decision in decisions.values())
+    failed: dict = {}  # A judged run's reviewers that failed, in order: no longer waited for (always empty otherwise).
+
+    def fail(reviewer_id: str, error: Exception) -> None:
+        failed[reviewer_id] = error
+        state.statuses[reviewer_id].update(status="blocked", error=str(error))
+        state.save()
+        runtime.event("review", NOTE, f"Reviewer {reviewer_id} gave no verdict: {error}; the judge rules on the others' findings")
     while not blocked:
         rows = runtime.sessions.inventory()
         # First every reviewer whose turn is over and whose file is there, whatever the declared order: a verdict ready at this
@@ -1065,7 +1083,7 @@ def wait_reviews(runtime, state: ReviewStatus | None = None, *, clock=None, slee
         # others are read, unless a block came first: the first block starts the grace, which reads the remaining files.
         looked, failure = {}, None  # Each reviewer's row (or the error its lookup raised) for the second pass; the first refusal.
         for reviewer_id in state.ids:
-            if reviewer_id in decisions:
+            if reviewer_id in decisions or reviewer_id in failed:
                 continue
             node = review_node(reviewer_id)
             try:
@@ -1093,9 +1111,12 @@ def wait_reviews(runtime, state: ReviewStatus | None = None, *, clock=None, slee
                 try:
                     decision = accept(reviewer_id, None)
                 except RuntimeError as error:
+                    if judged:
+                        fail(reviewer_id, error)
+                        continue
                     failure = failure or error
                     continue
-                if decision_blocks(decision):
+                if not judged and decision_blocks(decision):
                     blocked = True
                     if failure is None:
                         break  # The first block decides the run; the grace below waits for the other reviewers' verdicts.
@@ -1105,17 +1126,28 @@ def wait_reviews(runtime, state: ReviewStatus | None = None, *, clock=None, slee
             break
         # Then the others: a session that is gone, or an expired deadline, ends the review at once.
         for reviewer_id, row in looked.items():
-            if reviewer_id in decisions:
+            if reviewer_id in decisions or reviewer_id in failed:
                 continue
             if isinstance(row, Exception):
+                if judged and not isinstance(row, TransientInfraError):  # Claude Code itself unavailable is no reviewer's failure.
+                    fail(reviewer_id, row)
+                    continue
                 raise row
             if row is None:
+                if judged:
+                    fail(reviewer_id, RuntimeError(f"Native reviewer {reviewer_id} missing; reconciliation required"))
+                    continue
                 raise RuntimeError(f"Native reviewer {reviewer_id} missing; reconciliation required")
             if clock() >= started[reviewer_id] + timeout:
                 state.statuses[reviewer_id].update(status="blocked", error="Reviewer deadline exhausted; no second reviewer is launched")
                 state.save()
+                if judged:
+                    fail(reviewer_id, RuntimeError(f"Reviewer {reviewer_id} deadline exhausted; no second reviewer is launched"))
+                    continue
                 raise RuntimeError(f"Reviewer {reviewer_id} deadline exhausted; no second reviewer is launched")
-        if set(decisions) == set(state.ids):
+        if set(decisions) | set(failed) == set(state.ids):
+            if not decisions and failed:
+                raise next(iter(failed.values()))  # No built-in verdict at all: the step fails, as today.
             return decisions
         sleep(2)
     wait_grace(runtime, state, started, timeout, gaps, clock, sleep)
@@ -1341,9 +1373,14 @@ def stop_reviewers(runtime, ids: list[str]) -> list[str]:
     return errors
 
 
-def combined_review(runtime, bundle: dict, digest: str, state: ReviewStatus, decisions: dict) -> dict:
+def combined_review(runtime, bundle: dict, digest: str, state: ReviewStatus, decisions: dict, judge: dict | None = None) -> dict:
     """review.json over the set: it passes only when every reviewer's derived verdict is approved; an unresolved P0/P1, a
-    blocked verdict without findings, a missing or rejected verdict blocks. Each entry holds the derived verdict (C34)."""
+    blocked verdict without findings, a missing or rejected verdict blocks. Each entry holds the derived verdict (C34).
+
+    With a `judge` object that did not fall back (a judged panel, PRD 7.4): the built-in entries keep their own verdicts for
+    the record but do not gate; the `judge` entry follows, blocked when a confirmed ruling is P0/P1, and `findings` holds
+    the confirmed rulings only (judge.review_findings). Critique joins and blocks as today. A judge that fell back, or none,
+    leaves today's rule."""
     entries, findings = [], []
     for reviewer_id in state.ids:
         status = state.statuses[reviewer_id]
@@ -1355,6 +1392,10 @@ def combined_review(runtime, bundle: dict, digest: str, state: ReviewStatus, dec
     blocked = any(reviewer_id not in decisions or decision_blocks(decisions[reviewer_id]) for reviewer_id in state.ids)
     # A late verdict, read after another reviewer's block, can add blockers but never makes the review approved.
     blocked = blocked or any(state.statuses[reviewer_id].get("late") for reviewer_id in decisions)
+    if judging(judge):
+        from .judge import JUDGE, review_findings, verdict
+        entries.append({"reviewer_id": JUDGE, "session_id": judge["session_id"], "verdict": verdict(judge), "accepted_at": judge["ended_at"]})
+        findings, blocked = review_findings(judge), verdict(judge) != "approved"
     # The critique reviewer joins review.json after the native ones (PRD 4.5): its entry and findings are appended, and its
     # verdict (null for a failed critique, blocked for an open P0/P1) counts toward the block. It is never in state.ids.
     from . import critique
@@ -1367,6 +1408,21 @@ def combined_review(runtime, bundle: dict, digest: str, state: ReviewStatus, dec
     return {"run_id": bundle["run_id"], "bundle_sha256": digest, "candidate_commit": bundle["candidate_commit"],
             "reviewer": ", ".join(sessions), "independent": True, "verdict": "blocked" if blocked else "approved",
             "findings": findings, "reviewers": entries}
+
+
+def judging(judge: dict | None) -> bool:
+    """The judge decides the review: a judged panel's judge object that did not fall back to today's rule (PRD 7.4, 7.5)."""
+    return isinstance(judge, dict) and judge.get("fallback") is False and judge.get("status") == "judged"
+
+
+def judged_blocked_event(judge: dict, critique_entry: dict | None = None) -> str:
+    """The timeline's `blocked` record of a judged review: the judge's confirmed P0/P1 rulings, then a blocking critique."""
+    from .judge import confirmed
+    blocking = [ruling["id"] for ruling in confirmed(judge) if ruling["severity"] in ("P0", "P1")]
+    parts = [f"judge ({len(blocking)} confirmed P0/P1: {', '.join(blocking)})"] if blocking else []
+    if critique_entry is not None and critique_entry["verdict"] != "approved":
+        parts.append(f"{CRITIQUE_ID} ({critique_entry['verdict'] or 'failed'}, {open_counts(critique_entry['findings'])})")
+    return f"Review blocked by {listing(parts)}" if parts else "Review blocked"
 
 
 def blocked_error(names: list[str], blockers: list[str], decisions: dict, critique_entry: dict | None = None) -> str:
@@ -1422,10 +1478,11 @@ def export_verdict(runtime) -> None:
         print(f"Export after the review verdict failed; the step exports again when it ends: {type(error).__name__}: {error}", file=sys.stderr)
 
 
-def _decide(runtime, bundle: dict, digest: str, state: ReviewStatus, decisions: dict) -> dict:
+def _decide(runtime, bundle: dict, digest: str, state: ReviewStatus, decisions: dict, judge: dict | None = None) -> dict:
     """Persist review.json for any verdict and, once the statuses (and a block's event) are saved, export it (export_verdict);
-    only unanimous approval without blocking findings passes."""
-    review = combined_review(runtime, bundle, digest, state, decisions)
+    only unanimous approval without blocking findings passes. With a deciding `judge` (judging), the judge's verdict and
+    critique's decide instead, and the built-in reviewers' statuses are left as accepted (their verdicts do not gate)."""
+    review = combined_review(runtime, bundle, digest, state, decisions, judge)
     save_json(runtime.directory / "review.json", review)
     # When the verdict was written, for the panel's grace (panel.verdict_time); review.json's key set is closed, so it is kept here.
     state.combined["decided_at"] = now()
@@ -1433,6 +1490,16 @@ def _decide(runtime, bundle: dict, digest: str, state: ReviewStatus, decisions: 
     crit = critique.review_entry(runtime)
     crit_blocks = crit is not None and crit["verdict"] != "approved"
     undecided = [reviewer_id for reviewer_id in state.ids if reviewer_id not in decisions]
+    if review["verdict"] != "approved" and judging(judge):
+        from .judge import JUDGE, review_findings, verdict
+        message = judged_blocked_event(judge, crit if crit_blocks else None)
+        runtime.event("review", "blocked", message)
+        attention_record(runtime.directory, "review_blocked", f"{message}. Read {runtime.directory / 'review.json'}; review findings are fixed "
+                                                              "in a new run.", node="review")
+        export_verdict(runtime)
+        names = ([JUDGE] if verdict(judge) != "approved" else []) + ([CRITIQUE_ID] if crit_blocks else [])
+        raise RuntimeError(blocked_error(names, names[:1] if names[:1] == [JUDGE] else [], {JUDGE: {"findings": review_findings(judge)}},
+                                         crit if crit_blocks else None))
     if review["verdict"] != "approved":  # A block, a reviewer without a verdict, a late verdict (only after a block), or the critique.
         late = [reviewer_id for reviewer_id in decisions if state.statuses[reviewer_id].get("late")]
         blockers = mark_blockers(state, decisions)
@@ -1445,8 +1512,9 @@ def _decide(runtime, bundle: dict, digest: str, state: ReviewStatus, decisions: 
         names = blockers + ([CRITIQUE_ID] if crit_blocks else [])
         raise RuntimeError(blocked_error(names or undecided or late, blockers, decisions, crit if crit_blocks else None))
     runtime.validate_review(review)
-    for status in state.statuses.values():
-        status["status"] = "succeeded"
+    for reviewer_id, status in state.statuses.items():
+        if not judging(judge) or reviewer_id in decisions:  # A judged run's reviewer that failed keeps its failure.
+            status["status"] = "succeeded"
     state.combined.update(status="succeeded", review=review, accepted_at=now())
     state.save()
     export_verdict(runtime)
@@ -1475,6 +1543,59 @@ def _record_partial(runtime, bundle: dict, digest: str, state: ReviewStatus) -> 
     state.combined["decided_at"] = now()  # The panel's grace counts from it (panel.verdict_time).
     state.save()
     export_verdict(runtime)
+
+
+def judged_panel(plan: dict) -> dict | None:
+    """The plan's judged panel (feature.json 2.11.0, judge.judged), or None: every other run reviews exactly as before."""
+    from .judge import judged
+    return judged(plan)
+
+
+def reviewer_inputs(state: ReviewStatus, decisions: dict) -> dict:
+    """What the judge reads of each built-in reviewer, in declared order: its derived verdict and findings, or for one without
+    a verdict `timed_out` (its deadline passed) or `error` (anything else), with no findings."""
+    result = {}
+    for reviewer_id in state.ids:
+        if reviewer_id in decisions:
+            result[reviewer_id] = {"status": derived_verdict(decisions[reviewer_id]), "findings": decisions[reviewer_id]["findings"]}
+        else:
+            error = str(state.statuses[reviewer_id].get("error") or "")
+            result[reviewer_id] = {"status": "timed_out" if "deadline" in error else "error", "findings": []}
+    return result
+
+
+def judge_outcome(runtime, item: dict, state: ReviewStatus, decisions: dict) -> dict:
+    """A judged run, once every built-in reviewer has a verdict or failed (PRD 7.2-7.6): `panel.settle` waits for every seat,
+    then one judge rules (judge.run). A terminal judge record already in panel.json (a controller that stopped after the judge
+    and before review.json) is reused, never rerun; a non-terminal one is rerun from scratch. Never raises except
+    KeyboardInterrupt and TransientInfraError: a settle that fails is a `failed` judge, and today's rule decides."""
+    from . import judge, panel
+    existing = judge.current(runtime.directory, item["id"])
+    if isinstance(existing, dict) and existing.get("status") in judge.TERMINAL:
+        runtime.event("review", NOTE, f"Judge {existing['status']} before this controller started: its record is reused, not rerun")
+        return existing
+    inputs = reviewer_inputs(state, decisions)
+    try:
+        seats = panel.settle(runtime)
+    except (KeyboardInterrupt, TransientInfraError):
+        raise
+    except Exception as error:  # noqa: BLE001 - the seats' failure is never the review step's: today's rule decides.
+        result = judge.unjudged(runtime, item, inputs, f"panel.settle failed: {type(error).__name__}: {error}")
+    else:
+        count = sum(len(entry["findings"]) for entry in inputs.values()) + sum(len(seat.get("findings") or []) for seat in seats)
+        runtime.event("review", NOTE, f"Judge started on {count} finding{'' if count == 1 else 's'} from {len(inputs)} reviewer"
+                                      f"{'' if len(inputs) == 1 else 's'} and {len(seats)} seat{'' if len(seats) == 1 else 's'}")
+        result = judge.run(runtime, item, seats, inputs)
+    if judging(result):
+        rulings = result["rulings"]
+        tally = {word: sum(ruling["ruling"] == word for ruling in rulings) for word in judge.RULINGS}
+        blocking = sum(ruling["ruling"] == "confirmed" and ruling["severity"] in ("P0", "P1") for ruling in rulings)
+        runtime.event("review", NOTE, f"Judge: {tally['confirmed']} confirmed ({blocking} P0/P1), {tally['deferred']} deferred, "
+                                      f"{tally['refuted']} refuted")
+    else:
+        runtime.event("review", NOTE, f"Judge {result['status']}: the built-in reviewers decide (today's rule); panel findings are "
+                                      f"unjudged. {result.get('error') or ''}".rstrip())
+    return result
 
 
 def requested(plan: dict) -> dict:
@@ -1605,8 +1726,11 @@ def _accept_native(runtime, bundle: dict, digest: str, state: ReviewStatus) -> d
     patch = runtime.directory / "review.diff"
     combined = state.combined
     waited = False
+    item = judged_panel(runtime.plan)
+    verdicts = None  # The judge object of a judged run (PRD 7.3), once it ruled or fell back.
     try:
-        decisions = wait_reviews(runtime, state)
+        # A judged run waits for every reviewer to its verdict or failure; no block decides early (PRD 7.2).
+        decisions = wait_reviews(runtime, state) if item is None else wait_reviews(runtime, state, judged=True)
         # The review decides once the native reviewers are settled AND the critique has a decision or failed (PRD 4.4). A
         # native block does not stop the critique job; the detached child did setup, the slot and the app, so this only
         # polls its status file. No-op for a plan without critique.
@@ -1616,7 +1740,9 @@ def _accept_native(runtime, bundle: dict, digest: str, state: ReviewStatus) -> d
         # The recorded UUIDs first, whatever the verdict: a missing, a worker's or a shared one is refused with no review.json, as
         # a record holding it would fail the run's own validation (export, the viewer).
         check_recorded_identity(bundle, state)
-        review = combined_review(runtime, bundle, digest, state, decisions)
+        if item is not None:
+            verdicts = judge_outcome(runtime, item, state, decisions)  # The seats settled, then the judge (or its terminal record).
+        review = combined_review(runtime, bundle, digest, state, decisions, verdicts)
         if review["verdict"] == "approved":
             check_listed_identity(runtime, state)
         else:
@@ -1624,7 +1750,8 @@ def _accept_native(runtime, bundle: dict, digest: str, state: ReviewStatus) -> d
             # grace ran must not cost the block its record, or replace its error, or have every resume exit 75 on it. The
             # blockers read blocked from here, so a worktree or evidence check that fails below leaves them so beside the record.
             save_json(runtime.directory / "review.json", review)
-            mark_blockers(state, decisions)
+            if not judging(verdicts):  # The built-in verdicts do not gate a judged record: their statuses stay accepted.
+                mark_blockers(state, decisions)
             state.save()
             try:
                 check_listed_identity(runtime, state)
@@ -1637,7 +1764,7 @@ def _accept_native(runtime, bundle: dict, digest: str, state: ReviewStatus) -> d
             raise RuntimeError("Reviewer worktree changed")
         if evidence_changed(runtime, combined, digest, patch):
             raise RuntimeError("Evidence changed during review")
-        review = _decide(runtime, bundle, digest, state, decisions)
+        review = _decide(runtime, bundle, digest, state, decisions, verdicts)
     except KeyboardInterrupt:
         # Operator/terminal interruption is not a reviewer failure: the native sessions keep
         # running and `automatic --live` resumes waiting for their completion files.
@@ -1702,7 +1829,7 @@ def print_verdict(runtime, reviewer_id: str, process: subprocess.Popen, status: 
 PRINT_POLL_SECONDS = 1.0  # How long the collection waits on one running print job before it looks at the others again.
 
 
-def collect_print(runtime, state: ReviewStatus, processes: dict, timeout: int) -> None:
+def collect_print(runtime, state: ReviewStatus, processes: dict, timeout: int, judged: bool = False, launch_failed: list = ()) -> None:
     """Read every print job as it exits, whatever the declared order; each deadline counts from that job's own launch.
 
     Each pass reads every job that exited before it looks at a deadline or raises for one that failed, so neither a
@@ -1712,10 +1839,15 @@ def collect_print(runtime, state: ReviewStatus, processes: dict, timeout: int) -
     parallel, so there is no grace (REVIEW_GRACE_SECONDS is the native reviewers'). One that exits by then is read and
     recorded late (it can add blockers, never approve); a late job that failed is kept as `late_error` and never raised;
     one still running at its deadline is stopped and ends superseded.
+
+    With `judged` (PRD 7.2) no block decides early: every job is read when it exits or stopped at its own deadline; a job that
+    failed or missed its deadline is recorded (`blocked` with the error) and never raised, unless no job gave a verdict. A
+    reviewer whose job failed to launch (`launch_failed`, already recorded) has no process and counts as such a failure.
     """
     decisions = state.decisions
-    pending = list(state.ids)
+    pending = [reviewer_id for reviewer_id in state.ids if reviewer_id in processes]
     blocked = False
+    failed = list(launch_failed)  # A judged run's failures, in order.
     while pending:
         failure = None  # The first job of this pass that failed before any block: raised once every job that exited is read.
         for reviewer_id in [reviewer_id for reviewer_id in pending if processes[reviewer_id][0].poll() is not None]:
@@ -1739,13 +1871,17 @@ def collect_print(runtime, state: ReviewStatus, processes: dict, timeout: int) -
                 status.update(status="blocked", error=str(error))
                 if not isinstance(error, Exception):
                     raise
+                if judged:
+                    failed.append(error)
+                    state.save()
+                    continue
                 failure = failure or error  # The verdicts of the others that exited are kept: _record_partial writes them.
                 continue
             decisions[reviewer_id] = decision
             status.update(status="accepted", accepted_at=now(), accepted_decision=decision, derived=True)
             state.save()
             note_override(runtime, reviewer_id, decision)
-            if decision_blocks(decision):
+            if not judged and decision_blocks(decision):
                 blocked = True
                 if pending and failure is None:  # Their deadlines, on the timeline's clock: each launch was taken on time.monotonic().
                     until = time.time() + max(processes[other][1] for other in pending) + timeout - time.monotonic()
@@ -1757,6 +1893,14 @@ def collect_print(runtime, state: ReviewStatus, processes: dict, timeout: int) -
             process, launched = processes[reviewer_id]
             if time.monotonic() < launched + timeout or process.poll() is not None:
                 continue  # Within its deadline, or it exited since this pass began: read at the next pass.
+            if judged:
+                error = RuntimeError(f"Reviewer {reviewer_id} deadline exhausted; no second reviewer is launched")
+                pending.remove(reviewer_id)
+                terminate(process)
+                state.statuses[reviewer_id].update(status="blocked", error=str(error))
+                state.save()
+                failed.append(error)
+                continue
             if not blocked:
                 error = f"Reviewer {reviewer_id} deadline exhausted; no second reviewer is launched"
                 state.statuses[reviewer_id].update(status="blocked", error=error)
@@ -1769,6 +1913,8 @@ def collect_print(runtime, state: ReviewStatus, processes: dict, timeout: int) -
                 processes[pending[0]][0].wait(timeout=PRINT_POLL_SECONDS)  # Returns as soon as that job exits.
             except subprocess.TimeoutExpired:
                 pass
+    if judged and failed and not decisions:
+        raise failed[0]  # No built-in verdict at all: the step fails, as today.
 
 
 def _review_print(runtime, bundle: dict, digest: str, cwd: Path, patch: Path) -> dict:
@@ -1786,6 +1932,9 @@ def _review_print(runtime, bundle: dict, digest: str, cwd: Path, patch: Path) ->
     timeout = runtime.plan["automatic"]["review_timeout_seconds"]
     processes = {}
     waited = False
+    item = judged_panel(runtime.plan)
+    verdicts = None
+    launch_failed = []  # A judged run's reviewers whose job never started.
     try:
         for reviewer in declared:
             reviewer_id = reviewer["reviewer_id"]
@@ -1798,19 +1947,33 @@ def _review_print(runtime, bundle: dict, digest: str, cwd: Path, patch: Path) ->
                                     role_flags(runtime.plan, "judges"))
             record_role(runtime.directory, node, runtime.plan, "judges")
             with prompt_path.open() as stdin, (runtime.directory / f"{node}.stdout.json").open("w") as output, (runtime.directory / f"{node}.stderr.log").open("w") as errors:
-                process = popen_claude(command, cwd=cwd, env=env, stdin=stdin, stdout=output, stderr=errors, text=True, start_new_session=True)
+                try:
+                    process = popen_claude(command, cwd=cwd, env=env, stdin=stdin, stdout=output, stderr=errors, text=True, start_new_session=True)
+                except Exception as error:
+                    if item is None or isinstance(error, TransientInfraError):  # Claude Code itself unavailable is no reviewer's failure.
+                        raise
+                    status.update(status="blocked", error=f"Reviewer {reviewer_id} launch failed: {error}")  # PRD 7.2: the others go on.
+                    state.save()
+                    runtime.event("review", NOTE, f"Reviewer {reviewer_id} gave no verdict: {status['error']}; the judge rules on the others' findings")
+                    launch_failed.append(error)
+                    continue
             processes[reviewer_id] = (process, time.monotonic())
             status.update(status="running", pid=process.pid)
             state.save()
         combined["status"] = "running"
         state.save()
-        collect_print(runtime, state, processes, timeout)
+        if item is None:
+            collect_print(runtime, state, processes, timeout)
+        else:
+            collect_print(runtime, state, processes, timeout, judged=True, launch_failed=launch_failed)  # Every job to its verdict or deadline (PRD 7.2).
         waited = True
+        if item is not None:
+            verdicts = judge_outcome(runtime, item, state, state.decisions)
         if worktree_changed(cwd, bundle):
             raise RuntimeError("Reviewer worktree changed")
         if evidence_changed(runtime, combined, digest, patch):
             raise RuntimeError("Evidence changed during review")
-        review = _decide(runtime, bundle, digest, state, state.decisions)
+        review = _decide(runtime, bundle, digest, state, state.decisions, verdicts)
     except BaseException as error:
         for process, _ in processes.values():
             if process.poll() is None:
@@ -2065,6 +2228,7 @@ def review_archive(runtime, k: int) -> list[tuple[Path, Path]]:
     folder = directory / f"review-round-{k}"
     moves = [(directory / f"{node}{suffix}", folder / f"{node}{suffix}") for node in review_nodes(runtime.plan) for suffix in REVIEW_SESSION_SUFFIXES]
     moves.append((directory / "panel", folder / "panel"))
+    moves.append((directory / "judge", folder / "judge"))  # A judged panel's judge jobs; their judge object moves inside panel.json.
     renames = [("review.json", f"review.round-{k}.json"), ("review-bundle.json", f"review-bundle.round-{k}.json"),
                ("review.diff", f"review.round-{k}.diff"), (DELTA, f"review.delta.round-{k}.diff"), ("panel.json", f"panel.round-{k}.json")]
     # The combined restart state is automatic-review.json in every run; a declared reviewer's own is automatic-review-<id>.json.
@@ -2082,8 +2246,8 @@ def restore_review(runtime, k: int) -> None:
 
 def archive_review(runtime, k: int) -> None:
     """Move review round `k` aside so the next round reviews afresh: the records renamed `<name>.round-<k>.<ext>` beside the
-    others (review.json, review-bundle.json, review.diff, review.delta.diff, automatic-review[-<id>].json, panel.json), each
-    reviewer's session files and panel/ into `review-round-<k>/`, and review-worktree/ removed (its sessions' transcripts stay
+    others (review.json, review-bundle.json, review.diff, review.delta.diff, automatic-review[-<id>].json, panel.json with a
+    judged panel's judge object), each reviewer's session files, panel/ and a judged panel's judge/ into `review-round-<k>/`, and review-worktree/ removed (its sessions' transcripts stay
     under their cwd, which the next round reuses). Idempotent: a controller that died midway completes it."""
     directory = runtime.directory
     (directory / f"review-round-{k}").mkdir(exist_ok=True)
