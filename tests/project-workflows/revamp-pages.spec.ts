@@ -13,6 +13,7 @@ import { RUN_REJECTED_CHECKS, UX_VERIFY_WORKFLOW_ID } from './fixtures/ux-verify
 import {
   BLOCKED_FINDINGS, DONE_FINDINGS, REVAMP_NOW, REVAMP_PAGES_WORKFLOW_ID, REVAMP_QUESTION, RUN_REVAMP_BLOCKED, RUN_REVAMP_DONE, RUN_REVAMP_RUNNING,
 } from './fixtures/ux-revamp-pages.ts'
+import { mockResponse } from './mock.ts'
 import { attach, expectNoExecutionControls, graphNode, installHooks, liveDock, nodeDetail, openStepSheet, phase, runUrl, stepSheet, workspace } from './support.ts'
 
 installHooks()
@@ -530,29 +531,34 @@ test(`[scenario:review-one-list] The blocked review is one findings list that op
   await attach(page, testInfo, 'review-one-list')
 })
 
-/** One finding of the blocked review recorded as a resolved P1 (a P1 that blocks nothing), in the browser, in both phases. */
-const NON_BLOCKING_P1 = `(() => {
-  const original = window.fetch.bind(window)
-  const message = ${JSON.stringify(BLOCKED_FINDINGS.generalUi)}
-  window.fetch = async (input, init) => {
-    const response = await original(input, init)
-    const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
-    if (!/\\/reviews\\/\\d+$/.test(new URL(url, window.location.href).pathname)) return response
-    const body = await response.clone().json()
-    const tweak = finding => (finding.message === message ? { ...finding, severity: 'P1', disposition: 'resolved' } : finding)
+/**
+ * Serves one finding of the blocked review recorded as a resolved P1 (a P1 that blocks nothing), in both phases: the review read
+ * from the mocks in the worker phase, from the real API (`route.fetch()`) in the candidate phase. Returns how many it served.
+ */
+async function answerNonBlockingP1(page: Page): Promise<() => number> {
+  let served = 0
+  type Finding = { message: string; severity: string; disposition: string }
+  const tweak = (finding: Finding) => (finding.message === BLOCKED_FINDINGS.generalUi ? { ...finding, severity: 'P1', disposition: 'resolved' } : finding)
+  await page.route(url => /\/reviews\/\d+$/.test(url.pathname), async route => {
+    const body = (phase === 'worker'
+      ? JSON.parse(String(mockResponse(new URL(route.request().url())).body))
+      : await (await route.fetch()).json()) as { findings: Finding[]; reviewers: { findings: Finding[] }[] }
     body.findings = body.findings.map(tweak)
     body.reviewers = body.reviewers.map(reviewer => ({ ...reviewer, findings: reviewer.findings.map(tweak) }))
-    return new Response(JSON.stringify(body), { status: response.status, headers: response.headers })
-  }
-})()`
+    served += 1
+    await route.fulfill({ json: body })
+  })
+  return () => served
+}
 
 test(`[scenario:findings-groups] The findings filter is one group under visible captions (State, Severity, Reviewer, Lane), the state is one choice, a card's More names what it opens, and a blocking card wears the fail stripe (${phase})`, async ({ page }, testInfo) => {
   test.slow()
-  await page.addInitScript(NON_BLOCKING_P1)
+  const served = await answerNonBlockingP1(page)
   await page.clock.install({ time: new Date(REVAMP_NOW) })
   await page.setViewportSize({ width: 1440, height: 900 })
   await page.goto(revampUrl(RUN_REVAMP_BLOCKED, 'review'))
   await expect(nodeDetail(page)).toHaveAttribute('data-node-id', 'review')
+  await expect.poll(served, { message: 'the review is served with the resolved P1' }).toBeGreaterThan(0)
 
   // One group, its captions visible in order, each labelling exactly its own buttons; All is the reset choice and has no caption.
   await expect(findings(page).getByRole('group')).toHaveCount(1)
