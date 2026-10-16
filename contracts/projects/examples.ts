@@ -723,7 +723,7 @@ export const fixLoopRestored: FixLoop = { ...fixLoopHeader, ...fixLoopRestoredRe
 /** A loop neither source could project: no repairs, no rounds, no repair nodes. */
 export const fixLoopError: FixLoop = { contract_version: '1.10.0', source: 'export', version: '1.0.0', error: 'repairs.json: repair 2 has a status the viewer does not know', rounds: null, repairs: [], review_rounds: [] }
 
-// ---- Run controls (docs/PRD_RUN_CONTROLS.md Appendix A, contract 1.1.0) -------------------------------------------------------
+// ---- Run controls (docs/PRD_RUN_CONTROLS.md Appendix A, contract 1.2.0) -------------------------------------------------------
 
 const PANE_REASON = 'Typing the answer needs the lane\'s Herdr pane; answer in your terminal'
 /** The two 1.1.0 controls' texts, as `server/controls.ts` serves them. */
@@ -733,6 +733,11 @@ export const RELAUNCH_EFFECT = 'Relaunches the lane\'s worker session once, afte
 export const RELAUNCH_NOT_EFFECT = 'It reconciles and restarts nothing itself, and relaunches a lane at most once.'
 export const RETRY_ALL_FEWER = 'Fewer than two worker checks failed'
 export const RELAUNCH_NONE = 'No lane launch is waiting to be relaunched'
+/** The 1.2.0 control's texts (steering), as `server/controls.ts` serves them. */
+export const NOTE_EFFECT = 'Types your note into the lane\'s lead session between its turns and records it in <lane>.notes.json.'
+export const NOTE_NOT_EFFECT = 'It does not interrupt a running tool call; a team workflow that is running takes no input until it returns.'
+export const NOTE_NONE = 'No lane\'s worker is launched and still working'
+export const NOTE_PANE = 'Typing a note needs the lane\'s Herdr pane; send it in your terminal'
 
 type ControlBase = Omit<Control, 'available' | 'reason' | 'recommended' | 'params'>
 
@@ -766,6 +771,8 @@ const controlBases: ControlBase[] = [
     effect: RETRY_ALL_EFFECT, not_effect: RETRY_ALL_NOT_EFFECT },
   { id: 'relaunch', label: 'Relaunch a lane', command: '$PY -m workflow relaunch "$RUN" <lane> --by operator', runs: 'short', confirm: 'plain',
     effect: RELAUNCH_EFFECT, not_effect: RELAUNCH_NOT_EFFECT },
+  { id: 'note', label: 'Send a note to the lead', command: '$PY -m workflow note "$RUN" <lane> --by operator -- "<text>"', runs: 'short', confirm: 'plain',
+    effect: NOTE_EFFECT, not_effect: NOTE_NOT_EFFECT },
 ]
 
 const typedParam: ParamSpec = { name: 'confirm_run_id', kind: 'typed', required: true }
@@ -776,13 +783,14 @@ const noParams: Record<ControlId, ParamSpec[]> = {
   approve: [typedParam], repair_session: [{ name: 'lane', kind: 'choice', choices: [], required: true }, typedParam],
   abandon: [{ name: 'reason', kind: 'text', min_length: 1, max_length: 500, required: true }, typedParam], clean: [typedParam],
   retry_all: [], relaunch: [{ name: 'lane', kind: 'choice', choices: [], required: true }],
+  note: [{ name: 'lane', kind: 'choice', choices: [], required: true }, { name: 'text', kind: 'text', min_length: 1, max_length: 2000, required: true }],
 }
-const DEFAULT_REASONS: Partial<Record<ControlId, string>> = { retry_all: RETRY_ALL_FEWER, relaunch: RELAUNCH_NONE }
+const DEFAULT_REASONS: Partial<Record<ControlId, string>> = { retry_all: RETRY_ALL_FEWER, relaunch: RELAUNCH_NONE, note: NOTE_NONE }
 
 /** One RunControls: `offered` lists the available ids (with their parameter specs), `reasons` the reason of every other control. */
 function controlsExample(token: string, supervisor: RunControls['supervisor'], offered: Partial<Record<ControlId, ParamSpec[]>>, reasons: Partial<Record<ControlId, string>>, records: ControlRecord[] = [], commands: Partial<Record<ControlId, string>> = {}): RunControls {
   return {
-    version: '1.1.0', run_state_token: token, supervisor, supervisor_since: supervisor === 'running' ? '2026-10-10T10:42:07Z' : null,
+    version: '1.2.0', run_state_token: token, supervisor, supervisor_since: supervisor === 'running' ? '2026-10-10T10:42:07Z' : null,
     controls: controlBases.map(base => {
       const id = base.id
       const available = id in offered
@@ -799,8 +807,8 @@ const SUPERVISOR_RUNNING = 'A supervisor is running (since 10:42 UTC)'
 const NO_QUESTION = 'No lane has an unanswered question'
 const NOT_PAUSED = 'The design challenge is not paused, held or interrupted'
 
-export const controlsStatus: ControlsStatus = { version: '1.1.0', enabled: true, paired: true }
-export const controlsStatusOff: ControlsStatus = { version: '1.1.0', enabled: false, paired: false }
+export const controlsStatus: ControlsStatus = { version: '1.2.0', enabled: true, paired: true }
+export const controlsStatusOff: ControlsStatus = { version: '1.2.0', enabled: false, paired: false }
 
 export const controlRecordRunning: ControlRecord = {
   record_id: 'c-0a1b2c3d4e5f', request_id: '3f2504e0-4f89-41d3-9a0c-0305e82c3301', control: 'restart', params: {}, command: '$PY -m workflow automatic "$RUN" --live --by operator',
@@ -844,6 +852,7 @@ export const runControlsStates: Record<string, RunControls> = {
     pause: 'No supervisor is running', retry: 'No check failed or was interrupted without a verdict', resume: NOT_PAUSED, accept_challenge: 'The latest design challenge is not paused',
     release_hold: 'The design challenge is not held', answer: NO_QUESTION, approve: 'The run is not waiting for your approval',
     repair_session: 'The run is not blocked at a check verdict after freeze, before review', clean: 'The run is not finished or abandoned',
+    note: NOTE_PANE,
   }),
   challengePaused: controlsExample('rs-paused', 'not_running', { restart: [], resume: [], accept_challenge: [reasonSpec(10)], abandon: [reasonSpec(1), typedParam] }, {
     pause: 'No supervisor is running', retry: 'No check failed or was interrupted without a verdict', reconcile: 'No launch needs reconciling', release_hold: 'The design challenge is not held',
@@ -879,12 +888,13 @@ export const runControlsStates: Record<string, RunControls> = {
   abandoned: controlsExample('rs-abandoned', 'not_running', { clean: [typedParam] }, {
     restart: 'The run was abandoned', pause: 'No supervisor is running', retry: 'The run was abandoned', reconcile: 'The run was abandoned', resume: 'The run was abandoned',
     accept_challenge: 'The run was abandoned', release_hold: 'The run was abandoned', answer: NO_QUESTION, approve: 'The run is not waiting for your approval',
-    repair_session: 'The run was abandoned', abandon: 'The run was abandoned', retry_all: 'The run was abandoned',
+    repair_session: 'The run was abandoned', abandon: 'The run was abandoned', retry_all: 'The run was abandoned', note: 'The run was abandoned',
   }),
   finished: controlsExample('rs-finished', 'not_running', { clean: [typedParam] }, {
     restart: 'The run is finished', pause: 'No supervisor is running', retry: 'The run is finished', reconcile: 'No launch needs reconciling', resume: NOT_PAUSED,
     accept_challenge: 'The latest design challenge is not paused', release_hold: 'The design challenge is not held', answer: NO_QUESTION, approve: 'The run is not waiting for your approval',
     repair_session: 'The run is not blocked at a check verdict after freeze, before review', abandon: 'The run is already integrated', retry_all: 'The run is finished',
+    note: 'The run was accepted by the operator',
   }),
 }
 // 1.1.0: a stopped automatic run with two failed worker checks and a lane launch that needs reconciliation.
@@ -893,7 +903,16 @@ runControlsStates.recovery = controlsExample('rs-recovery', 'not_running', {
 }, {
   pause: 'No supervisor is running', resume: NOT_PAUSED, accept_challenge: 'The latest design challenge is not paused', release_hold: 'The design challenge is not held',
   answer: NO_QUESTION, approve: 'The run is not waiting for your approval', repair_session: 'The run is not blocked at a check verdict after freeze, before review', clean: 'The run is not finished or abandoned',
+  note: NOTE_PANE,
 }, [], { relaunch: '$PY -m workflow relaunch "$RUN" <lane> --by operator' })
+// 1.2.0: a supervised run whose ui lane is working (a pane, no question): the note to its lead is offered while the supervisor runs.
+runControlsStates.steering = controlsExample('rs-steering', 'running', {
+  pause: [], note: [choice('lane', ['ui']), { name: 'text', kind: 'text', min_length: 1, max_length: 2000, required: true }],
+}, {
+  restart: SUPERVISOR_RUNNING, retry: SUPERVISOR_RUNNING, reconcile: SUPERVISOR_RUNNING, resume: SUPERVISOR_RUNNING, accept_challenge: SUPERVISOR_RUNNING,
+  release_hold: SUPERVISOR_RUNNING, answer: NO_QUESTION, approve: 'The run is not waiting for your approval', repair_session: SUPERVISOR_RUNNING, abandon: SUPERVISOR_RUNNING, clean: SUPERVISOR_RUNNING,
+  retry_all: SUPERVISOR_RUNNING, relaunch: SUPERVISOR_RUNNING,
+})
 export const runControls: RunControls = runControlsStates.stoppedAutomatic
 export const controlRequest: ControlRequest = { request_id: '3f2504e0-4f89-41d3-9a0c-0305e82c3306', run_state_token: 'rs-stopped', params: {} }
 export const cleanPreviewRequest = { run_state_token: 'rs-finished' }

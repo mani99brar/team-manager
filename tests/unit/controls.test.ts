@@ -25,7 +25,7 @@ const control = (id: ControlId, patch: Partial<Control> = {}): Control => ({
 const record = (patch: Partial<ControlRecord> = {}): ControlRecord => ({
   record_id: 'c-000000000001', request_id: 'r', control: 'restart', params: {}, command: '$PY', status: 'running', exit_code: null, started_at: '2026-03-02T09:00:00Z', ended_at: null, output_tail: [], ...patch,
 })
-const payload = (controls: Control[], records: ControlRecord[] = []): RunControls => ({ version: '1.1.0', run_state_token: 'rs-1', supervisor: 'not_running', supervisor_since: null, controls, records })
+const payload = (controls: Control[], records: ControlRecord[] = []): RunControls => ({ version: '1.2.0', run_state_token: 'rs-1', supervisor: 'not_running', supervisor_since: null, controls, records })
 
 describe('the dialog model', () => {
   test('a text parameter needs its length, a typed one the run id, a choice a listed value', () => {
@@ -287,9 +287,9 @@ describe('the relaunch dry run (1.1.0)', () => {
     assert.equal(relaunchConfirmable(late, 'ui', 'rs-1'), false)
     assert.equal(relaunchConfirmable(answerCheck(check, answered('ui', 'rs-1', 0, 'relaunch ui: allowed', 3)), 'ui', 'rs-1'), true)
   })
-  test('the preview path is the run\'s relaunch-preview route; the control ids end with retry_all and relaunch', () => {
+  test('the preview path is the run\'s relaunch-preview route; the control ids end with retry_all, relaunch and note', () => {
     assert.equal(controlPaths.relaunchPreview(SCOPE), '/api/run-controls/alpha-project/controls/controls-stopped/relaunch-preview')
-    assert.equal(CONTROL_ORDER.length, 14)
-    assert.deepEqual(CONTROL_ORDER.slice(12), ['retry_all', 'relaunch'])
+    assert.equal(CONTROL_ORDER.length, 15)
+    assert.deepEqual(CONTROL_ORDER.slice(12), ['retry_all', 'relaunch', 'note'])
   })
 })

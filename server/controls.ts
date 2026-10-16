@@ -9,6 +9,10 @@ import {
   relaunchPreviewRequestSchema, relaunchPreviewResponseSchema, runControlsSchema, type Control, type ControlId, type ControlRecord, type Params, type ParamSpec, type RunControls,
 } from '../contracts/projects/controls.ts'
 import {
+  GITHUB_ACTIONS_VERSION, GITHUB_ACTION_IDS, githubActionRequestSchema, githubActionResponseSchema, runGithubActionsSchema, runGithubSchema, type GithubActionId,
+  type GithubActionRecord, type GithubParams, type RunGithub, type RunGithubActions,
+} from '../contracts/projects/github.ts'
+import {
   CONTROLS_PREFIX, ControlsError, isPaired, requireBrowserGuards, requireToken, type ControlsConfig, type ControlsSetup,
 } from './controlsGuard.ts'
 import {
@@ -16,14 +20,22 @@ import {
   type Holder, type LockProbe, type RunKey, type RunnerOptions, type StoredRecord,
 } from './controlsRunner.ts'
 import { DIRECTORY_FLAGS, at } from './files.ts'
+import {
+  GITHUB_READ_FAILED, GITHUB_READ_MISSING, GithubRecordStore, githubActionsOf, githubArgv, githubDisplay, githubStateToken, newGithubRecordId, reviewerSuggestions, shownPath,
+  summaryDefaults, urlOf, validateGithubParams, type GithubSource, type StoredGithubRecord,
+} from './githubActions.ts'
 import { ProjectApiError, type LoadedRun, type RunStore } from './projects.ts'
 import { ID_PATTERN } from './projectsConfig.ts'
 
 /**
- * The run-control API (docs/PRD_RUN_CONTROLS.md sections 3 to 5 and Appendix A, decisions.md [L1] to [L5]): fourteen controls from a
+ * The run-control API (docs/PRD_RUN_CONTROLS.md sections 3 to 5 and Appendix A, decisions.md [L1] to [L5]): fifteen controls from a
  * closed table, the offer rules that hide what the controller would refuse, and a POST that runs exactly one existing
  * `python -m workflow ...` command as the operator. The controller stays the judge: nothing here edits a run file, writes a marker or
  * retries a refusal. Errors are `{ error: { code, message } }`, never a path or the token.
+ *
+ * The fifteenth control, `note` (docs/PRD_RUN_TEAMS.md "Steering"), types a note into a lane's lead session through `workflow note`.
+ * The run's GitHub actions (docs/PRD_RUN_TEAMS.md "GitHub actions"; `githubActions.ts`) are a second family in this scope,
+ * `GET/POST .../:run_id/github[/:action_id]`: they share the guards, the pairing token, the runner and the one-in-flight-per-run rule.
  */
 const BYTE_LIMIT = 16 * 1024 * 1024
 const SMALL_LIMIT = 1024 * 1024
@@ -34,6 +46,10 @@ export type ControlsRouteOptions = {
   setup: ControlsSetup
   runner?: RunnerOptions
   now?: () => Date
+  /** The run's GitHub read (the GitHub-read lane's `RunGithub`) and its "read this branch again" hook; absent, every GitHub action is unavailable. */
+  github?: GithubSource
+  /** Whether the GitHub actions are on; defaults to `MD_MANAGER_GITHUB_ACTIONS=on` in the server's environment. */
+  githubActions?: boolean
 }
 
 type ErrorBody = { error: { code: string; message: string } }
@@ -180,6 +196,13 @@ const SPECS: Spec[] = [
     display: params => `$PY -m workflow relaunch "$RUN" ${params.lane ?? '<lane>'} --by operator`,
     argv: (runDir, params) => [...W, 'relaunch', runDir, params.lane!, ...BY],
   },
+  {
+    id: 'note', label: 'Send a note to the lead', runs: 'short', confirm: 'plain',
+    effect: 'Types your note into the lane\'s lead session between its turns and records it in <lane>.notes.json.',
+    not_effect: 'It does not interrupt a running tool call; a team workflow that is running takes no input until it returns.',
+    display: params => `$PY -m workflow note "$RUN" ${params.lane ?? '<lane>'} --by operator -- ${quoted(params.text, '"<text>"')}`,
+    argv: (runDir, params) => [...W, 'note', runDir, params.lane!, ...BY, '--', params.text!],
+  },
 ]
 
 /** The relaunch dry run's argv: the confirmed command with `--dry-run` before the actor. */
@@ -211,8 +234,9 @@ const SPEC_BY_ID = new Map(SPECS.map(spec => [spec.id, spec]))
 if (SPECS.map(spec => spec.id).join() !== CONTROL_IDS.join()) throw new Error('The control table must follow the order of PRD section 4')
 
 export const ANSWER_PANE_REASON = 'Typing the answer needs the lane\'s Herdr pane; answer in your terminal'
+export const NOTE_PANE_REASON = 'Typing a note needs the lane\'s Herdr pane; send it in your terminal'
 
-const TEXT_LIMITS = { text: { min: 1, max: 4000 }, accept: { min: 10, max: 500 }, abandon: { min: 1, max: 500 } } as const
+const TEXT_LIMITS = { text: { min: 1, max: 4000 }, note: { min: 1, max: 2000 }, accept: { min: 10, max: 500 }, abandon: { min: 1, max: 500 } } as const
 
 // ---- Reading the run ----------------------------------------------------------------------------------------------------
 
@@ -294,6 +318,11 @@ type Facts = {
   digest: string | null
   longReason: string | null
   token: string
+  /** What the note control's offer reads (workflow/sidecar.py `refusal`): launched lanes that have not gone on, frozen, accepted. */
+  notes: { working: string[]; frozen: boolean; accepted: boolean }
+  /** The loaded run (for the GitHub actions' default pull request title and body) and the project's registered repository. */
+  loaded: LoadedRun
+  repository: string
 }
 
 /** The lane list a run launched: `plan.json` workers, else the projected inputs, else none. */
@@ -422,6 +451,17 @@ async function readFacts(store: RunStore, key: RunKey, config: ControlsConfig, r
       const holderMatches = supervisor.state === 'held' && holder !== null && holder.pgrp !== null && await holderIsSupervisorOf(holder, runDir)
       const longAvailability = await runner.longAvailable()
 
+      // The note's gate, as workflow/sidecar.py `refusal` reads it: frozen (snapshots, or a closed sidecar ledger), launched, not gone on.
+      const ledger = await readJson(directory, 'sidecar.ledger.json', BYTE_LIMIT)
+      const notesFrozen = await exists(directory, 'snapshots.json') || (isRecord(ledger) && ledger.closed_at !== null && ledger.closed_at !== undefined)
+      const working: string[] = []
+      for (const lane of lanes) {
+        if (!(await exists(directory, `${lane}.interactive.json`))) continue
+        const wentOn = await Promise.all(['stop', 'handoff', 'completion'].map(kind => exists(directory, `${lane}.${kind}.json`)))
+        if (!wentOn.some(Boolean)) working.push(lane)
+      }
+      const accepted = Boolean(loaded.detail.summary.accepted) || await exists(directory, 'accepted.json')
+
       const repairRecorded = (loaded.fixLoop?.repairs ?? []).some(repair => repair.status === 'recorded')
       const token = createHash('sha256').update(JSON.stringify([
         loaded.detail.summary.updated_at, snapshot.last_sequence, status, sha(attention), questions.map(([lane, entry]) => [lane, entry.hash]), abandoned,
@@ -430,7 +470,7 @@ async function readFacts(store: RunStore, key: RunKey, config: ControlsConfig, r
       return {
         runId: key.run, runDir, status, automatic, abandoned, finished, lanes, supervisor, controller, holder, holderMatches, since: holder?.since ?? null,
         challenge: challengeFacts, retryTargets, relaunchLanes, capabilities: await capabilities, reconcile, repairRecorded, repairLanes, waiting, panes, digest: approvalDigest(plan, state),
-        longReason: longAvailability.ok ? null : longAvailability.reason, token,
+        longReason: longAvailability.ok ? null : longAvailability.reason, token, notes: { working, frozen: notesFrozen, accepted }, loaded, repository: scope.project.repository,
       }
     } finally {
       await directory.close()
@@ -558,6 +598,19 @@ function offerOf(spec: Spec, facts: Facts): Offer {
       if (!facts.capabilities.relaunch) return no(RELAUNCH_ABSENT, params)
       return needsQuiet(() => (facts.relaunchLanes.length > 0 ? yes(params) : no('No lane launch is waiting to be relaunched', params)), params)
     }
+    case 'note': {
+      // workflow note's own refusals the server can see; it needs no quiet run (a note reaches a lead while the supervisor runs).
+      const open = facts.notes.working.filter(lane => !facts.waiting.includes(lane))
+      const choices = open.filter(lane => facts.panes.has(lane))
+      const params = [lanes(choices), textSpec('text', TEXT_LIMITS.note.min, TEXT_LIMITS.note.max)]
+      if (facts.abandoned) return no('The run was abandoned', params)
+      if (facts.notes.accepted) return no('The run was accepted by the operator', params)
+      if (facts.notes.frozen) return no('The workers are frozen: a note reaches a lead only before freeze', params)
+      if (facts.notes.working.length === 0) return no('No lane\'s worker is launched and still working', params)
+      if (open.length === 0) return no('Every working lane waits on a question; answer it instead', params)
+      if (choices.length === 0) return no(NOTE_PANE_REASON, params)
+      return yes(params)
+    }
   }
 }
 
@@ -653,8 +706,11 @@ export async function controlRoutes(scope: FastifyInstance, options: ControlsRou
   // The controller's two newer commands, read once as the routes start (never on a request) and kept for the process.
   const capabilities = readCapabilities(runner, config.python)
   scope.setNotFoundHandler((_request, reply) => send(reply, 404, errorBody('NOT_FOUND', 'No run control resource exists at that path.')))
+  const githubSource = options.github ?? null
+  const githubEnabled = options.githubActions ?? config.childEnv.MD_MANAGER_GITHUB_ACTIONS === 'on'
+  const githubRecords = new GithubRecordStore(config.stateDir, now, secrets)
   scope.addHook('onReady', async () => {
-    const lost = await records.recoverLost()
+    const lost = await records.recoverLost() + await githubRecords.recoverLost()
     if (lost > 0) log.warn({ lost }, 'Run control records still running at startup were marked lost')
   })
 
@@ -745,6 +801,120 @@ export async function controlRoutes(scope: FastifyInstance, options: ControlsRou
     const line = first(result.stdout) ?? first(result.stderr, candidate => candidate.startsWith('Blocked:')) ?? first(result.stderr) ?? ''
     return send(reply, 200, conform(relaunchPreviewResponseSchema, { exitCode: result.exitCode, line: redactLine(line, secrets) }, log))
   })
+
+  // ---- The GitHub actions (githubActions.ts): the same guards, token, runner and one-in-flight rule as the controls ----------
+
+  /** The run's GitHub read, the four offers and their state token. A read that fails leaves every action unavailable. */
+  async function githubView(key: RunKey, facts: Facts) {
+    let read: RunGithub | null = null
+    let readReason: string | null = null
+    if (githubSource === null) {
+      readReason = GITHUB_READ_MISSING
+    } else {
+      try {
+        const parsed = runGithubSchema.safeParse(await githubSource.read(key.project, key.workflow, key.run))
+        if (parsed.success) read = parsed.data
+        else readReason = GITHUB_READ_FAILED
+      } catch {
+        readReason = GITHUB_READ_FAILED
+      }
+    }
+    let recent: string[] = []
+    if (githubSource?.recentAuthors) {
+      try { recent = await githubSource.recentAuthors(key.project) } catch { recent = [] }
+    }
+    const repositoryShown = shownPath(facts.repository, secrets)
+    const actions = githubActionsOf({
+      enabled: githubEnabled, read, readReason, runStatus: facts.status, repositoryShown, suggestions: reviewerSuggestions(read, recent),
+      defaults: summaryDefaults(facts.loaded, key.workflow, read),
+    })
+    return { read, actions, repositoryShown, token: githubStateToken(read, facts.status) }
+  }
+
+  scope.get('/:project_id/:workflow_id/:run_id/github', async (request, reply) => {
+    const key = keyOf(request.params as Record<string, string>)
+    const facts = await readFacts(store, key, config, runner, capabilities)
+    const view = await githubView(key, facts)
+    const body: RunGithubActions = {
+      version: GITHUB_ACTIONS_VERSION, enabled: githubEnabled, state_token: view.token, repo: view.read?.repo.owner_name ?? null, visibility: view.read?.github.visibility ?? null,
+      actions: view.actions, records: await githubRecords.list(key),
+    }
+    return send(reply, 200, conform(runGithubActionsSchema, body, log))
+  })
+
+  scope.post('/:project_id/:workflow_id/:run_id/github/:action_id', { bodyLimit: 512 * 1024 }, async (request, reply) => {
+    const routeParams = request.params as Record<string, string>
+    const key = keyOf(routeParams)
+    const id = routeParams.action_id as GithubActionId
+    if (!(GITHUB_ACTION_IDS as readonly string[]).includes(id)) throw new ControlsError(404, 'NOT_FOUND', 'No such GitHub action.')
+    const parsed = githubActionRequestSchema.safeParse(request.body)
+    if (!parsed.success) invalid('The body must be { request_id, state_token, params } with parameters this action accepts.')
+    const body = parsed.data
+    const runKey = runKeyOf(key)
+    const repeated = await githubRecords.byRequest(key, body.request_id)
+    if (repeated) return send(reply, repeated.status === 'running' ? 202 : 200, conform(githubActionResponseSchema, { record: repeated }, log))
+    const leased = !inFlight.has(runKey)
+    if (leased) inFlight.add(runKey)
+    try {
+      const facts = await readFacts(store, key, config, runner, capabilities)
+      const view = await githubView(key, facts)
+      if (view.token !== body.state_token) throw new ControlsError(409, 'STATE_CHANGED', 'The branch or pull request changed since you looked; review it and try again.')
+      if (!leased) throw new ControlsError(409, 'BUSY', 'Another control or GitHub action of this run is starting or running. Wait for it to finish.')
+      const action = view.actions.find(candidate => candidate.id === id)!
+      if (!action.available || view.read === null) throw new ControlsError(422, 'NOT_AVAILABLE', action.reason ?? 'This action is not available.')
+      const params = validateGithubParams(action, body.params, view.read.repo.owner_name)
+      const record = await executeGithub(id, facts, view.read, view.repositoryShown, key, body.request_id, params)
+      return send(reply, 200, conform(githubActionResponseSchema, { record }, log))
+    } finally {
+      if (leased) inFlight.delete(runKey)
+    }
+  })
+
+  /** Runs one GitHub action as a short child and returns its final record; an `open_pr` body lives in a mode-600 file for the call only. */
+  async function executeGithub(id: GithubActionId, facts: Facts, read: RunGithub, repositoryShown: string, key: RunKey, requestId: string, params: GithubParams): Promise<GithubActionRecord> {
+    const recordId = newGithubRecordId()
+    await githubRecords.prepare(key)
+    let bodyFile: string | null = null
+    try {
+      if (id === 'open_pr') {
+        bodyFile = githubRecords.bodyPath(key, recordId)
+        await fs.writeFile(bodyFile, params.body!, { mode: 0o600, flag: 'wx' })
+        await fs.chmod(bodyFile, 0o600)
+      }
+      const argv = githubArgv(id, facts.runDir, facts.repository, read, params, bodyFile)
+      const shownParams = {
+        ...(params.title !== undefined ? { title: params.title } : {}), ...(params.body !== undefined ? { body_chars: params.body.length } : {}),
+        ...(params.reviewers !== undefined ? { reviewers: params.reviewers } : {}),
+      }
+      const base: StoredGithubRecord = {
+        record_id: recordId, request_id: requestId, action: id, params: shownParams, command: githubDisplay(id, repositoryShown, read, params), status: 'running', exit_code: null,
+        started_at: fresh(now), ended_at: null, output_tail: [], url: null, argv: [config.python, ...argv].map(element => redactText(element, secrets)),
+      }
+      await githubRecords.write(key, base)
+      const logPath = githubRecords.logPath(key, recordId)
+      let child
+      try {
+        child = await runner.start(config.python, argv, logPath, true)
+      } catch {
+        await githubRecords.write(key, { ...base, status: 'refused', ended_at: fresh(now), output_tail: ['The command could not be started.'] })
+        throw new ControlsError(500, 'SPAWN_FAILED', 'The command could not be started.')
+      }
+      const result = await settle(await child.done)
+      const output = tailLines(await readLogTail(logPath), secrets)
+      const ended: StoredGithubRecord = {
+        ...base, status: result.status, exit_code: result.code, ended_at: fresh(now), output_tail: [...output, ...(result.note ? [result.note] : [])].slice(-40),
+        url: result.status === 'succeeded' ? urlOf(output) : null,
+      }
+      await githubRecords.write(key, ended)
+      if (ended.status === 'refused') throw new ControlsError(500, 'SPAWN_FAILED', 'The command could not be started.')
+      if (ended.status === 'succeeded') githubSource?.markDue(key.project, key.workflow, key.run)
+      const { argv: _argv, ...shown } = ended
+      void _argv
+      return shown
+    } finally {
+      if (bodyFile !== null) await fs.rm(bodyFile, { force: true }).catch(() => undefined)
+    }
+  }
 
   scope.post('/:project_id/:workflow_id/:run_id/:control_id', { bodyLimit: 64 * 1024 }, async (request, reply) => {
     const routeParams = request.params as Record<string, string>

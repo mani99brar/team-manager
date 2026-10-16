@@ -1,10 +1,10 @@
 /**
- * The run-controls API as docs/PRD_RUN_CONTROLS.md Appendix A writes it (contract 1.1.0), mirrored here because the viewer
+ * The run-controls API as docs/PRD_RUN_CONTROLS.md Appendix A writes it (contract 1.2.0), mirrored here because the viewer
  * lane is built beside the server lane and meets it only at the candidate. Wire names stay snake_case, except the two keys of
  * the clean preview (decisions [L4]).
  */
 export type ControlId = 'restart' | 'pause' | 'retry' | 'reconcile' | 'resume' | 'accept_challenge' | 'release_hold'
-  | 'answer' | 'approve' | 'repair_session' | 'abandon' | 'clean' | 'retry_all' | 'relaunch'
+  | 'answer' | 'approve' | 'repair_session' | 'abandon' | 'clean' | 'retry_all' | 'relaunch' | 'note'
 
 export type ParamSpec =
   | { name: 'lane'; kind: 'choice'; choices: string[]; required: true }
@@ -45,7 +45,7 @@ export type ControlRecord = {
 }
 
 export type RunControls = {
-  version: '1.1.0'
+  version: '1.2.0'
   run_state_token: string
   supervisor: 'running' | 'not_running' | 'unknown'
   supervisor_since: string | null
@@ -66,8 +66,8 @@ export type ControlErrorCode = 'CONTROLS_DISABLED' | 'NOT_FOUND' | 'INVALID_PARA
 /** The run a control acts on, the same three segments every run-controls route carries. */
 export type ControlScope = { projectId: string; workflowId: string; runId: string }
 
-/** The fourteen controls in the order of PRD section 4, then the two 1.1.0 adds after `clean`. */
-export const CONTROL_ORDER: readonly ControlId[] = ['restart', 'pause', 'retry', 'reconcile', 'resume', 'accept_challenge', 'release_hold', 'answer', 'approve', 'repair_session', 'abandon', 'clean', 'retry_all', 'relaunch']
+/** The fifteen controls: the twelve in the order of PRD section 4, the two 1.1.0 adds after `clean`, then 1.2.0's `note`. */
+export const CONTROL_ORDER: readonly ControlId[] = ['restart', 'pause', 'retry', 'reconcile', 'resume', 'accept_challenge', 'release_hold', 'answer', 'approve', 'repair_session', 'abandon', 'clean', 'retry_all', 'relaunch', 'note']
 
 /** Where this browser keeps the pairing token (client.ts): the only place it is ever stored. */
 export const TOKEN_KEY = 'md-manager.run-controls.token'

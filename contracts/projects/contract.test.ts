@@ -905,7 +905,7 @@ test('run controls (Appendix A): every example validates, one RunControls per of
   const states = Object.entries(examples.runControlsStates)
   assert.deepEqual(states.map(([name]) => name), [
     'stoppedAutomatic', 'runningSupervisor', 'failedVerify', 'needsReconciliation', 'challengePaused', 'challengeHeld', 'questionWithPane', 'questionWithoutPane',
-    'awaitingApproval', 'blockedAfterFreeze', 'abandoned', 'finished', 'recovery',
+    'awaitingApproval', 'blockedAfterFreeze', 'abandoned', 'finished', 'recovery', 'steering',
   ])
   for (const [name, controls] of states) {
     runControlsSchema.parse(controls)
@@ -924,16 +924,24 @@ test('run controls (Appendix A): every example validates, one RunControls per of
   controlErrorSchema.parse({ error: { code: 'NOT_AVAILABLE', message: 'The run is not finished or abandoned' } })
 })
 
-test('run controls 1.1.0: fourteen ids, the first twelve in their order, retry_all and relaunch after clean', () => {
-  assert.equal(CONTROLS_VERSION, '1.1.0')
-  assert.deepEqual([...CONTROL_IDS], ['restart', 'pause', 'retry', 'reconcile', 'resume', 'accept_challenge', 'release_hold', 'answer', 'approve', 'repair_session', 'abandon', 'clean', 'retry_all', 'relaunch'])
+test('run controls 1.2.0: fifteen ids, the first fourteen in their 1.1.0 order, note last', () => {
+  assert.equal(CONTROLS_VERSION, '1.2.0')
+  assert.deepEqual([...CONTROL_IDS], ['restart', 'pause', 'retry', 'reconcile', 'resume', 'accept_challenge', 'release_hold', 'answer', 'approve', 'repair_session', 'abandon', 'clean', 'retry_all', 'relaunch', 'note'])
   const controls = structuredClone(examples.runControlsStates.recovery)
   runControlsSchema.parse(controls)
-  assert.throws(() => runControlsSchema.parse({ ...controls, controls: controls.controls.slice(0, 12) }), 'twelve controls are refused')
-  assert.throws(() => runControlsSchema.parse({ ...controls, controls: [...controls.controls, controls.controls[0]] }), 'fifteen controls are refused')
+  assert.throws(() => runControlsSchema.parse({ ...controls, controls: controls.controls.slice(0, 14) }), 'fourteen controls are refused')
+  assert.throws(() => runControlsSchema.parse({ ...controls, controls: [...controls.controls, controls.controls[0]] }), 'sixteen controls are refused')
   const swapped = [...controls.controls]; [swapped[12], swapped[13]] = [swapped[13], swapped[12]]
   assert.throws(() => runControlsSchema.parse({ ...controls, controls: swapped }), 'a changed order is refused')
+  const noteFirst = [...controls.controls]; [noteFirst[13], noteFirst[14]] = [noteFirst[14], noteFirst[13]]
+  assert.throws(() => runControlsSchema.parse({ ...controls, controls: noteFirst }), 'note comes after relaunch')
   assert.throws(() => runControlsSchema.parse({ ...controls, version: '1.0.0' }), 'the 1.0.0 version is refused')
+  assert.throws(() => runControlsSchema.parse({ ...controls, version: '1.1.0' }), 'the 1.1.0 version is refused')
+  const steering = Object.fromEntries(examples.runControlsStates.steering.controls.map(control => [control.id, control]))
+  assert.equal(steering.note.available, true)
+  assert.equal(steering.note.command, '$PY -m workflow note "$RUN" <lane> --by operator -- "<text>"')
+  assert.deepEqual(steering.note.params.map(param => param.name), ['lane', 'text'])
+  assert.match(steering.note.not_effect ?? '', /does not interrupt a running tool call/)
   const byId = Object.fromEntries(controls.controls.map(control => [control.id, control]))
   assert.equal(byId.retry_all.command, '$PY -m workflow retry "$RUN" --phase worker --all-failed --by operator')
   assert.match(byId.retry_all.effect, /Restart supervisor/)
