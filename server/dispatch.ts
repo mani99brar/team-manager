@@ -56,7 +56,15 @@ function conform<T>(schema: z.ZodType<T>, payload: unknown, log: FastifyInstance
 }
 
 /** The dispatch dependencies, built by `createApp` from its options (defaults: real git, no timer, GitHub off). */
-export type DispatchDeps = { store: RunStore; git: GitReader; github: GithubReader; steps: StepDigests; runGithub: RunGithubSource }
+export type DispatchDeps = {
+  store: RunStore
+  git: GitReader
+  github: GithubReader
+  steps: StepDigests
+  runGithub: RunGithubSource
+  /** Logins of the human authors of the project's repository's recent pull requests in the GitHub cache (reviewer suggestions). */
+  recentAuthors(projectId: string): Promise<string[]>
+}
 
 export type DispatchAppOptions = {
   gitRunner?: GitRunner
@@ -77,7 +85,15 @@ export function buildDispatch(store: RunStore, options: DispatchAppOptions, warn
   const steps = new StepDigests(store, warn)
   // The run GitHub source: built once here and shared by the route and (through the app's `runGithub` decoration) the controls.
   const runGithub = createRunGithubSource({ store, github, branches: new RunBranchReader(gitRunner, now), now, warn })
-  return { store, git, github, steps, runGithub }
+  const recentAuthors = async (projectId: string): Promise<string[]> => {
+    await store.sync()
+    const project = store.config.projects.find(candidate => candidate.project_id === projectId)
+    if (!project) return []
+    const keys = await discoverGithubRepos([project], gitRunner)
+    const authors = keys.flatMap(key => github.state(key, false).prs.filter(pr => !pr.author_is_bot).map(pr => pr.author))
+    return [...new Set(authors)]
+  }
+  return { store, git, github, steps, runGithub, recentAuthors }
 }
 
 function gitFailed(repositoryLabel: string, now: () => number): GitState {

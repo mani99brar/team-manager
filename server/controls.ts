@@ -12,6 +12,7 @@ import {
   GITHUB_ACTIONS_VERSION, GITHUB_ACTION_IDS, githubActionRequestSchema, githubActionResponseSchema, runGithubActionsSchema, runGithubSchema, type GithubActionId,
   type GithubActionRecord, type GithubParams, type RunGithub, type RunGithubActions,
 } from '../contracts/projects/github.ts'
+import type { Teams } from '../contracts/projects/teams.ts'
 import {
   CONTROLS_PREFIX, ControlsError, isPaired, requireBrowserGuards, requireToken, type ControlsConfig, type ControlsSetup,
 } from './controlsGuard.ts'
@@ -823,10 +824,15 @@ export async function controlRoutes(scope: FastifyInstance, options: ControlsRou
     if (githubSource?.recentAuthors) {
       try { recent = await githubSource.recentAuthors(key.project) } catch { recent = [] }
     }
+    // The draft PR body says when a lane worked as a team; the team read is only worth its cost while a PR can still be opened.
+    let teams: Teams | null = null
+    if (githubEnabled && read !== null && read.pr === null) {
+      try { teams = await store.teams(store.scope(key.project, key.workflow), key.run) } catch { teams = null }
+    }
     const repositoryShown = shownPath(facts.repository, secrets)
     const actions = githubActionsOf({
       enabled: githubEnabled, read, readReason, runStatus: facts.status, repositoryShown, suggestions: reviewerSuggestions(read, recent),
-      defaults: summaryDefaults(facts.loaded, key.workflow, read),
+      defaults: summaryDefaults(facts.loaded, key.workflow, read, teams),
     })
     return { read, actions, repositoryShown, token: githubStateToken(read, facts.status) }
   }

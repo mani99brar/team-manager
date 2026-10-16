@@ -31,7 +31,7 @@ export type AppOptions = {
    * The run controls (server/controls.ts), from `loadControlsConfig`. Omitted means off: `/api/run-controls/status` answers
    * `enabled: false` and every other control route is a 404 `CONTROLS_DISABLED`. `runner` and `now` are injected by tests.
    */
-  controls?: { setup: ControlsSetup; runner?: RunnerOptions; now?: () => Date }
+  controls?: { setup: ControlsSetup; runner?: RunnerOptions; now?: () => Date; /** Overrides MD_MANAGER_GITHUB_ACTIONS (tests). */ githubActions?: boolean }
   /**
    * The dispatch API (server/dispatch.ts) dependencies: the git runner, clock, HOME for labels and the GitHub reader.
    * Omitted means real git with GitHub off — no timer, no cache, no gh runner — so every existing server test stays quiet (note 7).
@@ -126,7 +126,9 @@ export function createApp(locations: readonly LocationConfig[], options: AppOpti
   app.addHook('onReady', async () => { dispatch.github.start() })
   app.addHook('onClose', async () => { dispatch.github.stop() })
   // Run controls live outside the read-only Projects API; with controls off the scope answers 404 CONTROLS_DISABLED and nothing else changes.
-  app.register(controlRoutes, { prefix: CONTROLS_PREFIX, store, setup: options.controls?.setup ?? { enabled: false, warnings: [] }, runner: options.controls?.runner, now: options.controls?.now })
+  // The GitHub actions read the same run GitHub source the dispatch route serves; reviewer suggestions come from its cache.
+  const github = { read: dispatch.runGithub.read, markDue: dispatch.runGithub.markDue, recentAuthors: dispatch.recentAuthors }
+  app.register(controlRoutes, { prefix: CONTROLS_PREFIX, store, setup: options.controls?.setup ?? { enabled: false, warnings: [] }, runner: options.controls?.runner, now: options.controls?.now, github, githubActions: options.controls?.githubActions })
   // The first Runs home visit finds every workflow's summaries cached: projected once in the background after boot.
   app.addHook('onReady', async () => { void store.warmSummaries() })
   app.get('/api/entries', async (_request, reply) => {

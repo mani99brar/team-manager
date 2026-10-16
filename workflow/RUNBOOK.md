@@ -594,7 +594,7 @@ The run page can run the commands this runbook prints (`docs/PRD_RUN_CONTROLS.md
 
 ## GitHub actions
 
-`$PY -m workflow github <action> "$RUN" --repo <checkout> ... --by operator` publishes a run's branch to GitHub, one action at a time, only when you run it (or confirm it on the run page). The controller still never pushes on its own: no step of a run, no supervisor and no worker calls these commands, and workers keep `git push` denied. `--repo` is a checkout of the run's repository (the registry's checkout or the run's source checkout; while `plan.repository` exists it must share its Git directory) whose `origin` is on github.com (`https://github.com/o/n`, `ssh://git@github.com/o/n` or `git@github.com:o/n`). The branch is always the run's `source_branch` from `plan.json`, never one you name. `--by operator` or `--by maintainer`; the panel is refused.
+`$PY -m workflow github <action> "$RUN" --repo <checkout> ... --by operator` publishes a run's branch to GitHub, one action at a time, only when you run it (or confirm it on the run page). The controller still never pushes on its own: no step of a run, no supervisor and no worker calls these commands, and workers keep `git push` denied. `--repo` is a checkout of the run's repository (the registry's checkout or the run's source checkout; while `plan.repository` exists it must share its Git directory) whose `origin` is on github.com (`https://github.com/o/n`, `ssh://git@github.com/o/n` or `git@github.com:o/n`). The branch is always the run's `source_branch` from `plan.json`, never one you name. Publishing is the operator's decision: only `--by operator` runs (a maintainer session and the panel are refused).
 
 | Action | Runs | Refuses (exit 2, one `Blocked:` line) |
 |---|---|---|

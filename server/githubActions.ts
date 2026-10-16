@@ -6,6 +6,7 @@ import {
   GITHUB_ACTIONS_VERSION, GITHUB_ACTION_IDS, githubActionRecordSchema, type GithubAction, type GithubActionId, type GithubActionRecord, type GithubParamSpec,
   type GithubParams, type RunGithub, type RunGithubActions,
 } from '../contracts/projects/github.ts'
+import type { Teams } from '../contracts/projects/teams.ts'
 import { runSummaryMarkdown, runSummaryTitle, type RunSummaryInput } from '../contracts/projects/summary.ts'
 import { ControlsError } from './controlsGuard.ts'
 import { readLogTail, redactText as redactSecrets, tailLines, type RunKey } from './controlsRunner.ts'
@@ -295,7 +296,16 @@ export function validateGithubParams(action: GithubAction, params: GithubParams,
 // ---- The default title and body (the run summary) ---------------------------------------------------------------------------
 
 /** The run summary's input from what the store loaded and the GitHub read; every free text goes through `redactText`. */
-export function summaryInput(loaded: LoadedRun, workflowId: string, read: RunGithub | null): RunSummaryInput {
+/** A lane's team facts for the summary: its worker session's workflows, when the team reader found any; else null. */
+function laneTeam(teams: Teams | null, lane: string): RunSummaryInput['lanes'][number]['team'] {
+  const session = teams?.sessions.find(candidate => candidate.role === 'worker' && candidate.lane === lane && candidate.records === 'found')
+  if (!session) return null
+  const agents = session.workflows.reduce((sum, workflow) => sum + workflow.agent_count, 0)
+  const failed = session.workflows.reduce((sum, workflow) => sum + workflow.agents.filter(agent => agent.state === 'failed').length, 0)
+  return { workflows: session.workflows.length, agents, failed }
+}
+
+export function summaryInput(loaded: LoadedRun, workflowId: string, read: RunGithub | null, teams: Teams | null = null): RunSummaryInput {
   const review = loaded.review
   const open = review ? review.findings.filter(finding => finding.disposition === 'open') : []
   return {
@@ -306,14 +316,14 @@ export function summaryInput(loaded: LoadedRun, workflowId: string, read: RunGit
       verdict: review.verdict, reviewers: review.reviewers.map(reviewer => reviewer.reviewer_id),
       open: { p0: open.filter(finding => finding.severity === 'P0').length, p1: open.filter(finding => finding.severity === 'P1').length, p2: open.filter(finding => finding.severity === 'P2').length },
     } : null,
-    lanes: (loaded.inputs?.workers ?? []).map(worker => ({ lane: worker.node_id, summary: worker.completion?.summary ?? null, team: null })),
+    lanes: (loaded.inputs?.workers ?? []).map(worker => ({ lane: worker.node_id, summary: worker.completion?.summary ?? null, team: laneTeam(teams, worker.node_id) })),
     costUsd: loaded.claudeUsd,
     pr: read?.pr ? { number: read.pr.number, url: read.pr.url, state: read.pr.state, draft: read.pr.draft } : null,
   }
 }
 
-export function summaryDefaults(loaded: LoadedRun, workflowId: string, read: RunGithub | null): { title: string; body: string } {
-  const input = summaryInput(loaded, workflowId, read)
+export function summaryDefaults(loaded: LoadedRun, workflowId: string, read: RunGithub | null, teams: Teams | null = null): { title: string; body: string } {
+  const input = summaryInput(loaded, workflowId, read, teams)
   const title = runSummaryTitle(input, redactText).replace(/[\r\n]+/g, ' ').slice(0, TITLE_MAX)
   const body = runSummaryMarkdown(input, redactText)
   return { title, body: body.length > BODY_MAX ? `${body.slice(0, BODY_MAX - 2)}…\n` : body }

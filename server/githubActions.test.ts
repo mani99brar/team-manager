@@ -514,3 +514,17 @@ test('[pure] the state token follows the branch and the pull request; names, bra
   assert.equal(urlOf(['nothing']), null)
   assert.deepEqual(reviewerSuggestions(readOf('draft'), ['mani99brar', 'renovate[bot]', 'carol']), ['kleros/vea-maintainers', 'jaybuidl', 'gitguardian', 'carol'])
 })
+
+test('the default PR body says when a lane worked as a team (worker session records found), and nothing for a single-session lane', async () => {
+  const { summaryInput } = await import('./githubActions.ts')
+  const { teams } = await import('../contracts/projects/teamExamples.ts')
+  const loaded = {
+    detail: { summary: { run_id: 'run-001', status: 'succeeded', activity: null } },
+    review: null, claudeUsd: null,
+    inputs: { feature: null, source_branch: 'feature/x/run-001', base_commit: null, workers: [{ node_id: 'ui', completion: null }, { node_id: 'server', completion: null }] },
+  } as unknown as Parameters<typeof summaryInput>[0]
+  const input = summaryInput(loaded, 'feature-implementation', null, teams)
+  assert.deepEqual(input.lanes.find(lane => lane.lane === 'ui')?.team, { workflows: 2, agents: 8, failed: 1 })
+  assert.equal(input.lanes.find(lane => lane.lane === 'server')?.team, null)
+  assert.equal(summaryInput(loaded, 'feature-implementation', null).lanes[0].team, null, 'without a team read every lane is single-session')
+})

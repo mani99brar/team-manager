@@ -245,16 +245,18 @@ class PushTest(GithubCase):
         self.assertIsNone(self.rig.remote())
 
     def test_actor_rules_and_a_missing_run(self):
-        self.assertBlocked(self.rig.call("push", "--sha", self.rig.head, by=""), r"requires --by operator\|maintainer")
-        self.assertBlocked(self.rig.call("push", "--sha", self.rig.head, by="panel"), r"refused for --by panel")
+        self.assertBlocked(self.rig.call("push", "--sha", self.rig.head, by=""), r"requires --by operator")
+        self.assertBlocked(self.rig.call("push", "--sha", self.rig.head, by="panel"), r"--by panel is refused")
+        # Publishing is the operator's decision (actor.OPERATOR_ONLY): a maintainer session may not push or open a PR.
+        self.assertBlocked(self.rig.call("push", "--sha", self.rig.head, by="maintainer"), r"--by maintainer is refused")
         self.assertEqual(self.rig.records(), [], "an actor refusal records nothing")
         (self.rig.run / "plan.json").unlink()
         self.assertBlocked(self.rig.call("push", "--sha", self.rig.head), r"not a run directory")
         self.assertFalse((self.rig.run / "github-actions.jsonl").exists())
         (self.rig.run / "plan.json").write_text(json.dumps({"source_branch": BRANCH, "repository": str(self.rig.repo)}))
-        code, _out, err, _ = self.rig.call("push", "--sha", self.rig.head, by="maintainer")
+        code, _out, err, _ = self.rig.call("push", "--sha", self.rig.head, by="operator")
         self.assertEqual(code, 0, err)
-        self.assertEqual(self.rig.records()[-1]["actor"], "maintainer")
+        self.assertEqual(self.rig.records()[-1]["actor"], "operator")
 
     def test_a_second_action_is_refused_while_the_lock_is_held(self):
         import fcntl
