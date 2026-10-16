@@ -33,7 +33,9 @@
 }
 .panel-seat { scroll-margin: 12px; }
 .panel-seat:focus-visible, .panel-seat:target { outline: 2px solid var(--focus); outline-offset: 2px; }
-.panel-seat-facts { display: flex; flex-wrap: wrap; gap: 2px 14px; margin: 4px 0 0; font-size: 0.85rem; font-variant-numeric: tabular-nums; }
+/* A seat's status ("unavailable: disabled in the reviewer list") is longer than a phone line at the type floor: it wraps. */
+.projects-shell .ui-chip.panel-seat-status { white-space: normal; overflow-wrap: anywhere; max-width: 100%; min-width: 0; }
+.panel-seat-facts { display: flex; flex-wrap: wrap; gap: 2px 14px; margin: 4px 0 0; font-size: max(0.85rem, var(--type-floor)); font-variant-numeric: tabular-nums; }
 .panel-seat-facts > div { display: inline-flex; gap: 5px; min-width: 0; }
 .panel-seat-facts dt { color: var(--muted); }
 .panel-seat-facts dd { margin: 0; overflow-wrap: anywhere; }
@@ -44,7 +46,7 @@
 .judge-group > h6 { margin: 6px 0 0; font-size: 0.8rem; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
 .judge-ruling { display: grid; gap: 6px; }
 .judge-ruling-id { font-family: var(--font-mono); }
-.judge-ruling-where { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; font-size: 0.85rem; }
+.judge-ruling-where { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; font-size: max(0.85rem, var(--type-floor)); }
 .judge-ruling-where code { overflow-wrap: anywhere; white-space: normal; }
 .judge-ruling-fact { font-size: 0.9rem; }
 .judge-ruling-fact > .projects-muted { font-weight: 600; margin-right: 4px; }
@@ -56,7 +58,7 @@
 .judge-source {
   display: inline-flex; align-items: center; justify-content: center; min-height: 44px; min-width: 44px; padding: 0 14px; box-sizing: border-box;
   border: 1px solid var(--border-strong); border-radius: 999px; background: var(--surface);
-  color: var(--fg); font-family: var(--font-mono); font-size: 13px; text-decoration: none;
+  color: var(--fg); font-family: var(--font-mono); font-size: max(13px, var(--type-floor)); text-decoration: none;
 }
 a.judge-source { text-decoration: underline; text-decoration-color: var(--border-strong); text-underline-offset: 3px; }
 a.judge-source:hover { border-color: var(--accent); background: var(--accent-soft); text-decoration-color: var(--accent); }

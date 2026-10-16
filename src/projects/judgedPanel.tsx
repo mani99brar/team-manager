@@ -87,7 +87,7 @@ function SeatLine({ seat, panel }: { seat: PanelSeat; panel: JudgedPanelEntry })
       <p className="panel-provider-head">
         <strong data-testid="panel-seat-name">{seat.name}</strong>
         <Chip tone="idle" plain data-testid="panel-seat-prefix" aria-label={`prefix ${seat.prefix}`}>{seat.prefix}</Chip>
-        <Chip tone={SEAT_TONE[seat.status]} live={seat.status === 'running'} data-testid="panel-seat-status">{seatStatusText(seat)}</Chip>
+        <Chip tone={SEAT_TONE[seat.status]} live={seat.status === 'running'} className="panel-seat-status" data-testid="panel-seat-status">{seatStatusText(seat)}</Chip>
       </p>
       <dl className="panel-seat-facts">
         <div><dt>transport</dt><dd data-testid="panel-seat-transport">{seat.transport}</dd></div>

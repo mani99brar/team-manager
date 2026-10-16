@@ -2671,6 +2671,9 @@ class JudgedPanelLaunch(PanelLaunchGuards):
         gpt = settings["panels"][0]["seats"][1]
         self.assertEqual((gpt["name"], gpt["status"], gpt["error"]), ("gpt", "unavailable", "`pi --version` failed: exit 1"))
         self.assertIsNone(settings["pi_bin"])
+        # A managed caller pane: HERDR_ENV=1 and a `herdr pane current --current` that succeeds (RUNBOOK §2).
+        (self.bin / "herdr").write_text("#!/bin/sh\n[ \"$*\" = \"pane current --current\" ] && exit 0\nexit 2\n")
+        (self.bin / "herdr").chmod(0o755)
         with patch.dict(os.environ, {"HERDR_ENV": "1"}):
             code, out, err = pipeline_cli(*commands[0][3:])
         self.assertEqual(code, 0, err)

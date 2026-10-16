@@ -169,6 +169,10 @@ test(`[scenario:panel-review-section] On the judged run the review section shows
   await expect(legend).toContainText('Each ruling\'s Reviewer is the judge, and its [J<n> from …] prefix names the findings it merged.')
   await expect(legend).not.toContainText('from any reviewer')
   const findings = result.getByTestId('finding')
+  // The list opens on the Open P0/P1 filter (ux-critique-fixes): the J1 P1 ruling only, then All shows both rulings.
+  await expect(findings).toHaveCount(1)
+  await expect(findings.first()).toContainText('[J1 from general-1, C1, M1]')
+  await result.getByTestId('findings-filters').locator('button[data-filter="all"]').click()
   await expect(findings).toHaveCount(2)
   expect(await attributes(findings, 'data-reviewer')).toEqual(['judge', 'judge'])
   const messages = await texts(findings)
@@ -205,6 +209,9 @@ test(`[scenario:panel-review-section] On the judged run the review section shows
   }
   const judgeRow = panelRow('panel:0:judge')
   await expect(judgeRow).toContainText('Panel · review · judge')
+  // The resume command stays behind the row's Show command toggle (run-sessions P2).
+  await expect(judgeRow.getByTestId('session-resume-command')).toHaveCount(0)
+  await judgeRow.getByTestId('session-resume-toggle').click()
   await expect(judgeRow.getByTestId('session-resume-command')).toHaveText(`claude --resume ${JUDGE_SESSION}`)
   expect(await judgeRow.getByTestId('session-resume-command').innerText()).not.toContain('cd ')
   // C2: the judge's worktree is removed, so its note never says to run it there.
