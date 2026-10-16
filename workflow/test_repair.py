@@ -2332,10 +2332,11 @@ class CandidateAttribution(unittest.TestCase):
         self.assertEqual(automatic.candidate_chain(self.runtime, [("polish", polish)]), {"polish": None})
         self.assertIsNone(automatic.fix_decision(self.runtime, self.state))
 
-    def test_a_check_the_run_ran_once_for_two_lanes_is_each_declaring_lanes(self):
-        """run-checks-once: one execution of an argv two lanes declare, cited by both packets under their own check ids
-        (checks.cite_execution). Its failure stays attributed: to each declaring lane, and a failed test of a lane's own
-        browser check to its spec's owner."""
+    def test_a_failed_argv_two_lanes_declare_is_attributed_to_each_declaring_lane_whatever_the_packets_cite(self):
+        """Two lanes declare one argv and both packets name a `shared_record`: candidate_chain reads only each packet's own
+        checks, never the record (whose digest here is a placeholder), so the failure goes to each declaring lane under its
+        own check id, and a failed test of a lane's own browser check to its spec's owner. The shared execution itself and
+        its citation (checks.cite_execution, shared_checks.cited_record) are test_run_checks'."""
         self.runtime.worker_policy("polish")["checks"][0]["argv"] = self.runtime.worker_policy("server")["checks"][0]["argv"]
         server = self.packet("server", [1])
         polish = self.packet("polish", [1, 1], [("projects.spec.ts", "unexpected")])

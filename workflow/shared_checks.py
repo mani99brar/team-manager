@@ -19,9 +19,11 @@ policy, attempt and lanes is reused; anything else is refused, and a new attempt
 lockstep while a run has shared records (decisions [L2]): the step first raises every lane's candidate attempt to the
 highest, so one attempt has one record and every packet of it cites that record.
 
-**Run checks** gate once every lane's own checks passed (SharedCandidate.finish). A memory-killed run check makes every
-lane's packet transient (repair.transient_packet) unless another run check failed for real beside it: then the kill is
-only listed, as for lane checks. Any other failure is attributed (attribute): its failing test ids are
+**Run checks** gate once every lane's own checks passed (SharedCandidate.finish). A run check whose execution recorded a
+transient kind (checks.TRANSIENT_KINDS: killed for memory, out of disk, timed out under host load) makes every lane's
+packet transient (repair.transient_packet), its kind kept in the marker's `transients` for the waits
+(repair.transient_kinds), unless another run check failed for real beside it: then the transient one is only listed, as
+for lane checks. Any other failure is attributed (attribute): its failing test ids are
 rerun one target at a time on the candidate, the base and each lane snapshot, and the outcome blocks one lane, or every
 lane with an `unattributed` marker that the fix loop never repairs (repair.unattributed_block).
 """
@@ -37,7 +39,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
-from .checks import (check_env, execute, now, prune_attempt, registered_worktree, remove_tree, remove_worktree,
+from .checks import (TRANSIENT_KINDS, check_env, execute, now, prune_attempt, registered_worktree, remove_tree, remove_worktree,
                      text_test_counts, transient_kind)
 from .sessions import git, read_json, save_json
 from .verification import SLOW_SHARE, owns, policy_digest
@@ -49,6 +51,8 @@ ATTRIBUTION = "attribution.json"
 MARKER = "run_check_block"  # The structured marker on a packet a failed run check blocked; the reasons are for display.
 RECORD_VERSION = "1.0.0"
 TEST_KINDS = frozenset({"unit", "integration", "contract"})
+# How a candidate event names a transient run check's kind (checks.TRANSIENT_KINDS).
+TRANSIENT_TEXT = {"memory": "killed for memory", "disk": "out of disk", "load": "timed out under host load"}
 SHOWN_IDS = 5  # Ids a reason lists before `and <n> more`.
 NOT_RUN = "not run"  # An id a target was never asked to rerun, or one an interrupted rerun never reached (decisions [L7]).
 
@@ -252,7 +256,9 @@ def cited_record(packet: dict, policy: dict, run: Path, lane_checks: bool = True
 
 def run_check_gates(policy: dict, record: dict) -> list[dict]:
     """Each run check's gate on the record, in policy order, recomputed from its execution as evaluate_worker gates a lane
-    check (PRD 6.2): its own timeout, exit 0, and for a test kind parsed counts with passed >= 1 and failed == 0."""
+    check (PRD 6.2): its own timeout, exit 0, and for a test kind parsed counts with passed >= 1 and failed == 0. A failed
+    one's `transient` is its execution's recorded kind (checks.TRANSIENT_KINDS: "memory", "disk" or "load"), as
+    checks.transient_checks reads a lane check's, else None."""
     gates = []
     by_argv = {tuple(item["argv"]): index for index, item in enumerate(record["executions"])}
     for check in policy.get("run_checks", []):
@@ -272,7 +278,8 @@ def run_check_gates(policy: dict, record: dict) -> list[dict]:
             if execution.get("modified"):
                 reasons.append(f"{check['id']}: Verification modified the tested source revision")
         gates.append({**check, "execution": index, "reasons": reasons,
-                      "transient": bool(reasons) and execution is not None and execution.get("transient") == "memory"})
+                      "transient": execution.get("transient") if reasons and execution is not None
+                      and execution.get("transient") in TRANSIENT_KINDS else None})
     return gates
 
 
@@ -296,7 +303,8 @@ def slow_run_checks(policy: dict, record: dict) -> list[str]:
 def gate_run_checks(packet: dict, policy: dict, run: Path, record: dict, run_checks: bool = True) -> dict:
     """A citing packet's run-check gate (PRD 6.3), reproduced from the record and its attribution, never read back from
     the packet: nothing when every run check passed (or `run_checks` is False); every lane blocked as transient when each
-    failed one was killed for memory; else the attribution of the ones that failed for real blocks its lane, or every
+    failed one recorded a transient kind (killed for memory, out of disk, timed out under host load; the marker's
+    `transients` maps each id to its kind); else the attribution of the ones that failed for real blocks its lane, or every
     lane, marked `unattributed`, with any kill only listed (result.transient_checks and its reasons). A packet that
     recorded an attribution's digest must find it unchanged."""
     saved = packet.pop(MARKER, None)
@@ -315,9 +323,11 @@ def gate_run_checks(packet: dict, policy: dict, run: Path, record: dict, run_che
     if killed:
         result["transient_checks"] = transient + [gate["id"] for gate in killed]
     if not real:
-        # A memory kill takes the transient path first and gets no attribution reruns (PRD 7.1): every lane reruns free.
+        # A transient run check takes the transient path first and gets no attribution reruns (PRD 7.1): every lane reruns
+        # free, once the controller waited on each recorded kind (repair.transient_kinds reads `transients`).
         reasons = [reason for gate in killed for reason in gate["reasons"]]
-        marker = {"kind": "transient", "lane": None, "checks": [gate["id"] for gate in killed], "attribution": None}
+        marker = {"kind": "transient", "lane": None, "checks": [gate["id"] for gate in killed], "attribution": None,
+                  "transients": {gate["id"]: gate["transient"] for gate in killed}}
     else:
         # A real failure beside a kill makes the attempt a real failure, as for lane checks (repair.transient_packet):
         # the real ones are attributed, and the kill is only listed after them.
@@ -760,7 +770,7 @@ class SharedCandidate:
         killed = [gate for gate in failed if gate["transient"]]
         real = [gate for gate in failed if not gate["transient"]]
         for gate in killed:
-            runtime.event("candidate", "blocked", f"Run check {gate['id']} failed; killed for memory: "
+            runtime.event("candidate", "blocked", f"Run check {gate['id']} failed; {TRANSIENT_TEXT[gate['transient']]}: "
                           + ("transient, rerun without attribution" if not real else "listed beside the real failure, not attributed"))
         if real:
             attribution = self.attribution(real)

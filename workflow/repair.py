@@ -75,23 +75,34 @@ def attempt_floor(directory: Path, phase: str, node: str) -> int:
 MAX_TRANSIENT_RERUNS = 3
 
 
+def run_check_transients(packet: dict) -> dict[str, str]:
+    """The kind of each run check a transient `run_check_block` marker lists (`transients`, shared_checks.gate_run_checks);
+    empty for any other packet and for a marker written before the field, whose run checks were memory kills."""
+    from .shared_checks import MARKER
+    marker = packet.get(MARKER) if isinstance(packet, dict) else None
+    recorded = marker.get("transients") if isinstance(marker, dict) and marker.get("kind") == "transient" else None
+    return {key: value for key, value in recorded.items() if value in TRANSIENT_KINDS} if isinstance(recorded, dict) else {}
+
+
 def transient_packet(path: Path, kinds: tuple[str, ...] = ("memory",)) -> bool:
     """A blocked packet whose every gate reason is a check recorded transient with one of `kinds` (result.transient_checks
     and the execution's `transient`: "memory", "disk" or "load"; a memory kill by default, which `automatic` waits on memory
     for): its id's reasons, or `Executed check failed: <its command>`. A real failure beside one makes the attempt a real
-    failure; the transient check is only listed. A listed check whose execution records no kind is a memory kill, the only
-    kind recorded before "disk" and "load"."""
+    failure; the transient check is only listed. A run check (shared_checks.gate_run_checks) has no execution in the packet:
+    its kind is the one its transient `run_check_block` marker records under `transients`. A listed check whose kind is
+    recorded nowhere is a memory kill, the only kind recorded before "disk" and "load"."""
     if not path.is_file():
         return False
     packet = read_json(path)
     result, gate = packet.get("result", {}), packet.get("gate", {})
     checks = result.get("checks", [])
     indexes = {receipt.get("id"): receipt.get("worker_check_index") for receipt in (packet.get("evidence") or {}).get("checks", [])}
+    run_checks = run_check_transients(packet)
 
     def kind(check_id: str) -> str:
         index = indexes.get(check_id)
         recorded = checks[index].get("transient") if isinstance(index, int) and 0 <= index < len(checks) else None
-        return recorded or "memory"
+        return recorded or run_checks.get(check_id) or "memory"
     killed = [check_id for check_id in result.get("transient_checks") or [] if kind(check_id) in kinds]
     if gate.get("status") != "blocked" or not killed or not gate.get("reasons"):
         return False
@@ -191,10 +202,13 @@ def transient_kinds(path: Path) -> set[str]:
     """The `transient` kinds ("memory", "disk", "load") its checks recorded, for a packet transient over every kind
     (transient_packet with TRANSIENT_KINDS), each of which `automatic` waits on before the rerun; empty for any other packet.
     The kinds are read from result.checks, not through the evidence's indexes, so a reused candidate packet, which keeps no
-    evidence, reads a full disk as "disk", never as "memory". A packet whose checks record no kind is a memory kill."""
+    evidence, reads a full disk as "disk", never as "memory", and a run check's from its marker (run_check_transients). A
+    packet whose checks record no kind is a memory kill."""
     if not transient_packet(path, TRANSIENT_KINDS):
         return set()
-    return {check["transient"] for check in read_json(path)["result"].get("checks", []) if check.get("transient") in TRANSIENT_KINDS} or {"memory"}
+    packet = read_json(path)
+    recorded = {check["transient"] for check in packet["result"].get("checks", []) if check.get("transient") in TRANSIENT_KINDS}
+    return recorded | set(run_check_transients(packet).values()) or {"memory"}
 
 
 def attempt_limit(directory: Path, policy: dict, phase: str, node: str, through: int) -> int:

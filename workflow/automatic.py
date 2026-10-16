@@ -17,8 +17,10 @@ to `plan.automatic.fix_rounds` times, then stops with "fix loop exhausted". Find
 attributed to several lanes (`candidate_chain`: a failing test to the lane that owns its spec), repair each lane in turn, each
 with its own share, before the run continues (`chain_next`). A review round that leaves as many open P0/P1 as the one before,
 or brings one back, stops the loop ("fix loop stopped: no progress", `no_progress`). A review round is archived first
-(`review-rounds.json`, `archive_review`) and the next review's delta runs from that round's candidate. A check killed under
-memory pressure is rerun after a wait for memory without spending the attempt budget (`wait_for_memory`).
+(`review-rounds.json`, `archive_review`) and the next review's delta runs from that round's candidate. A transient check is
+rerun without spending the attempt budget after a wait on each kind it recorded: killed under memory pressure, for memory
+(`wait_for_memory`); timed out under host load, for a quieter host (`wait_for_quiet`); out of disk, for the disk floors
+(`wait_for_disk`); a lane's own check and a run check alike (`advance_failed_checks`, repair.transient_kinds).
 
 A plan with a judged review panel (feature.json 2.11.0; RUNBOOK "Judged review panel (feature.json 2.11.0)") waits for every
 built-in reviewer to its verdict or failure on both transports, with no early decision and no grace (`wait_reviews`/

@@ -38,7 +38,8 @@ PY = sys.executable
 
 # A fake check: `fake.py <label> [flag ...]`. Flags act in the candidate phase only, so the worker phase passes:
 # sleep=<s>, fail, vary (exit 2, 3, ... on its successive candidate runs), write=<file> (a tracked file), kill (SIGKILL),
-# fail-if=<file>:<text> (any phase), fail-once=<marker> (fails while the marker exists, and removes it).
+# fail-if=<file>:<text> (any phase), fail-once=<marker> (fails while the marker exists, and removes it), enospc (exit 1 on a
+# full disk: `No space left on device` in its log).
 FAKE = """
 import os, pathlib, signal, sys, time
 counter = pathlib.Path(COUNTER)
@@ -51,6 +52,9 @@ for flag in flags:
     if name == "sleep" and candidate:
         time.sleep(float(value))
     elif name == "fail" and candidate:
+        code = 1
+    elif name == "enospc" and candidate:
+        print("OSError: [Errno 28] No space left on device")
         code = 1
     elif name == "vary" and candidate:
         rows = counter.read_text().splitlines() if counter.exists() else []
@@ -699,6 +703,78 @@ class Attribution(Fixture):
             self.assertTrue(advance_failed_checks(self.runtime, state))
         self.assertIn(("controller", "running", "candidate/a killed under memory pressure: transient, rerun without spending an attempt"), self.events())
         self.assertFalse([start for start in self.sessions.starts if start.startswith("repair")])
+
+    def retry_waits(self) -> tuple[bool, dict]:
+        """advance_failed_checks on the current state with every wait patched: its return and which waits it called."""
+        with patch("workflow.automatic.wait_for_memory") as memory, patch("workflow.automatic.wait_for_quiet") as load, \
+                patch("workflow.automatic.wait_for_disk") as disk:
+            advanced = advance_failed_checks(self.runtime, self.state())
+        return advanced, {"memory": memory.called, "load": load.called, "disk": disk.called}
+
+    def test_a_run_check_out_of_disk_takes_the_transient_path_and_waits_for_disk(self):
+        """checks.TRANSIENT_KINDS: a shared execution recorded `transient: "disk"` is transient as a lane check's is, with no
+        attribution, and the retry path waits on disk only, never on memory."""
+        self.base()
+        value = self.run_policy(run_check=[PY, str(self.fake), "full", "enospc"], lanes=("a",), kind="build")
+        self.start(value, {"a": ("a.txt", "a1")})
+        self.assertRegex(str(self.freeze()), "Combined candidate failed a checks")
+        self.assertEqual([item.get("transient") for item in self.record()["executions"]][-1], "disk")
+        packet = self.packet("a")
+        self.assertEqual((packet[MARKER]["kind"], packet["result"].get("transient_checks")), ("transient", ["full"]))
+        self.assertEqual(packet[MARKER]["transients"], {"full": "disk"})
+        self.assertFalse((self.directory / "shared-checks/0/1" / ATTRIBUTION).exists())
+        self.assertEqual((repair.transient_packet(self.packet_path("a"), ("disk",)), repair.transient_packet(self.packet_path("a"))),
+                         (True, False))
+        self.assertEqual(repair.transient_kinds(self.packet_path("a")), {"disk"})
+        self.assertIn(("candidate", "blocked", "Run check full failed; out of disk: transient, rerun without attribution"), self.events())
+        self.assertIsNone(fix_decision(self.runtime, self.state()))
+        self.assertEqual(self.retry_waits(), (True, {"memory": False, "load": False, "disk": True}))
+        self.assertIn(("controller", "running", "candidate/a failed on a full disk: transient, rerun once the disk floor holds"), self.events())
+
+    def test_a_run_check_that_timed_out_under_host_load_takes_the_transient_path_and_waits_for_a_quieter_host(self):
+        """checks.overloaded_timeout: a shared execution that hit its timeout at a load average over twice the CPUs is
+        recorded `transient: "load"` and waits on load only."""
+        self.base()
+        value = self.run_policy(run_check=[PY, str(self.fake), "full", "sleep=30"], lanes=("a",), kind="build")
+        value["run_checks"][0]["timeout_seconds"] = 1
+        self.start(value, {"a": ("a.txt", "a1")})
+        with patch("workflow.checks.os.getloadavg", return_value=(1000.0, 1000.0, 1000.0)):
+            self.assertRegex(str(self.freeze()), "Combined candidate failed a checks")
+        self.assertEqual(self.record()["executions"][-1].get("transient"), "load")
+        packet = self.packet("a")
+        self.assertEqual((packet[MARKER]["kind"], packet["result"].get("transient_checks")), ("transient", ["full"]))
+        self.assertEqual(packet[MARKER]["transients"], {"full": "load"})
+        self.assertEqual(repair.transient_kinds(self.packet_path("a")), {"load"})
+        self.assertIsNone(fix_decision(self.runtime, self.state()))
+        self.assertEqual(self.retry_waits(), (True, {"memory": False, "load": True, "disk": False}))
+        self.assertIn(("controller", "running", "candidate/a timed out under host load: transient, rerun without spending an attempt"), self.events())
+
+    def test_a_deterministic_run_check_failure_stays_real_beside_the_transient_kinds(self):
+        """A plain exit 1 records no `transient`: it is attributed, never rerun free."""
+        self.base()
+        value = self.run_policy(run_check=[PY, str(self.fake), "full", "fail"], lanes=("a",), kind="build")
+        self.start(value, {"a": ("a.txt", "a1")})
+        self.assertRegex(str(self.freeze()), "Combined candidate failed a checks")
+        self.assertNotIn("transient", self.record()["executions"][-1])
+        packet = self.packet("a")
+        self.assertNotEqual(packet[MARKER]["kind"], "transient")
+        self.assertNotIn("transient_checks", packet["result"])
+        self.assertTrue((self.directory / "shared-checks/0/1" / ATTRIBUTION).exists())
+        self.assertFalse(repair.transient_attempt(self.packet_path("a")))
+        self.assertEqual(repair.transient_kinds(self.packet_path("a")), set())
+
+    def test_run_checks_killed_for_memory_and_out_of_disk_wait_on_each_kind(self):
+        """A packet whose run checks recorded several kinds waits on each, as a lane packet does (repair.transient_kinds)."""
+        self.base()
+        value = self.run_policy(run_check=[PY, str(self.fake), "oom", "kill"], lanes=("a",), kind="build")
+        value["run_checks"].append(check("second", [PY, str(self.fake), "second", "enospc"], "build"))
+        self.start(value, {"a": ("a.txt", "a1")})
+        self.assertRegex(str(self.freeze()), "Combined candidate failed a checks")
+        packet = self.packet("a")
+        self.assertEqual((packet[MARKER]["kind"], packet["result"].get("transient_checks")), ("transient", ["full", "second"]))
+        self.assertEqual(packet[MARKER]["transients"], {"full": "memory", "second": "disk"})
+        self.assertEqual(repair.transient_kinds(self.packet_path("a")), {"memory", "disk"})
+        self.assertEqual(self.retry_waits(), (True, {"memory": True, "load": False, "disk": True}))
 
     def test_a_memory_kill_beside_a_real_run_check_failure_makes_the_attempt_a_real_failure(self):
         """PRD 6.2: as for lane checks (repair.transient_packet), the real failure is attributed and the kill only listed."""
