@@ -59,6 +59,8 @@ function prepareRoot(): Record<string, string> {
     MD_MANAGER_WEB_PORT: String(webPort),
     WORKFLOW_VERIFICATION_PHASE: 'candidate',
     MD_MANAGER_PROJECTS_CONFIG: projectsConfig,
+    // The teams reader reads a folder under the test root, never the operator's ~/.claude.
+    MD_MANAGER_CLAUDE_HOME: join(root, 'claude-home'),
     ...controlsEnvironment(root, join(root, 'projects'), CRITIQUE_TOKEN),
   }
 }

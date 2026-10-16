@@ -63,7 +63,7 @@ export default defineConfig({
     {
       command: 'npm run start:api',
       url: `http://127.0.0.1:${process.env.MD_MANAGER_API_PORT ?? 3001}/api/entries`,
-      env: { MD_MANAGER_CONFIG: join(testRoot, 'sources.json'), MD_MANAGER_FIXTURE_ROOT: '' },
+      env: { MD_MANAGER_CONFIG: join(testRoot, 'sources.json'), MD_MANAGER_FIXTURE_ROOT: '', MD_MANAGER_CLAUDE_HOME: join(testRoot, 'claude-home') },
       reuseExistingServer: false,
       timeout: 30_000,
     },

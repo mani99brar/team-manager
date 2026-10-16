@@ -84,6 +84,8 @@ const apiEnv: Record<string, string> = {
   WORKFLOW_VERIFICATION_PHASE: phase,
   // run-sessions: the candidate server reads the night-shift folder the sessions seed wrote under the test root.
   MD_MANAGER_NIGHT_SHIFT_DIR: join(root, 'projects', 'night-shift'),
+  // run-teams: the teams reader reads Claude Code's records from a seeded folder under the test root, never the real ~/.claude.
+  MD_MANAGER_CLAUDE_HOME: join(root, 'claude-home'),
   ...(projectsConfig ? { MD_MANAGER_PROJECTS_CONFIG: projectsConfig } : {}),
   // The dispatch routes read GitHub from the fixture (never real `gh`) and cache under the test root ([P6], [P20]).
   ...(phase === 'candidate' ? { MD_MANAGER_GITHUB_FIXTURE: join(root, 'projects', 'github-fixture.json'), MD_MANAGER_GITHUB_CACHE: join(root, 'projects', 'github-cache.json') } : {}),
