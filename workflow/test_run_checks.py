@@ -8,6 +8,7 @@ import contextlib
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -27,7 +28,7 @@ from .clean import passed_attempts
 from .pipeline import ExportRuntime, build_pipeline, digest_file, export_run, graph_config
 from .run_report import failing_ids, failures
 from .sessions import git, prepare, read_json, save_json
-from .shared_checks import ATTRIBUTION, MARKER, RECORD, import_root, rerun, statuses, test_file
+from .shared_checks import ATTRIBUTION, MARKER, RECORD, import_root, rerun, statuses, test_file, tree_at
 from .test_browser_rules import FAKE_PLAYWRIGHT
 from .test_pipeline import FakeSessions, OfflinePipeline, by_operator, isolate_registry, stub_claude_cli
 from .verification import CONTRACTS, policy_digest, policy_lint, validate_policy
@@ -906,14 +907,83 @@ class Attribution(Fixture):
         self.assertEqual(attributed["outcomes"][test_id], {"candidate": "failed", "base": "passed", "lanes": {"a": "passed", "b": "failed"},
                                                            "result": "snapshot", "lane": "b"})
         self.assertEqual([(item["target"], item["import_root"], item["argv"]) for item in attributed["reruns"]],
-                         [(target, "tests", [PY, "-m", "unittest", test_id]) for target in ("candidate", "base", "lane-a", "lane-b")])
+                         [(target, "tests", [PY, "-P", "-m", "unittest", test_id]) for target in ("candidate", "base", "lane-a", "lane-b")])
         self.assertEqual(self.packet("b")["gate"]["reasons"], [f"run check full failed: 1 test(s) attributed to b: {test_id}"])
         self.assertEqual(self.packet("a")["gate"]["status"], "passed")
         self.assertEqual(fix_decision(self.runtime, self.state()), ("b", "candidate"))
         lines = "\n".join(repair.failing_checks(self.runtime, "b", {"path": "verification/candidate/b/1/packet.json", "reasons": []}))
-        self.assertIn(f"Rerun them: `PYTHONPATH=tests {PY} -m unittest {test_id}`", lines)
+        self.assertIn(f"Rerun them: `PYTHONPATH=tests:.${{PYTHONPATH:+:$PYTHONPATH}} {PY} -P -m unittest {test_id}`", lines)
         self.assertEqual(test_file(str(self.repo), self.candidate_commit(), test_id, import_root(argv)), "tests/test_b.py")
         self.assertIsNone(test_file(str(self.repo), self.candidate_commit(), test_id))  # Read from `.`, the id names no file.
+
+    def discover_run(self, files: dict, edits: dict, owned: dict | None = None) -> dict:
+        """A 1.5.0 run whose one run check is `unittest discover -s tests`, over `files` at base; lane checks always pass."""
+        Fixture.base(self, files)
+        owned = owned or {node: [f"{node}.txt", f"tests/test_{node}.py"] for node in ("a", "b")}
+        value = policy([lane(node, [check(f"{node}-unit", [PY, "-c", "print('Ran 1 test in 0.001s\\n\\nOK')", node])], owned[node])
+                        for node in ("a", "b")], version="1.5.0", run_checks=[check("full", [PY, "-m", "unittest", "discover", "-s", "tests"])])
+        self.start(value, edits)
+        return value
+
+    def brief_command(self, node: str) -> str:
+        lines = "\n".join(repair.failing_checks(self.runtime, node, {"path": f"verification/candidate/{node}/1/packet.json", "reasons": []}))
+        return re.search(r"Rerun them: `(.*)`", lines)[1]
+
+    def test_a_root_module_shadowing_a_discovered_test_never_hides_its_failure(self):
+        """f2 ([L15]): a root-level `test_b.py` that passes shadows `tests/test_b.py` unless the rerun imports from the discover
+        root first, as discover does; the lane-caused failure reproduces and is snapshot-attributed to b, never `did not
+        reproduce` (every lane blocked, no repair)."""
+        shadow = TEST_B.replace("self.assertNotEqual(Path('b.txt').read_text(), 'bad')", "pass")
+        self.discover_run({"tests/test_a.py": TEST_A, "tests/test_b.py": TEST_B, "test_b.py": shadow}, {"a": ("a.txt", "a1"), "b": ("b.txt", "bad")})
+        self.assertRegex(str(self.freeze()), "Combined candidate failed b checks")
+        test_id = "test_b.BTest.test_b_lane"
+        [attributed] = self.attribution()["checks"]
+        self.assertEqual(attributed["outcomes"][test_id], {"candidate": "failed", "base": "passed", "lanes": {"a": "passed", "b": "failed"},
+                                                           "result": "snapshot", "lane": "b"})
+        self.assertEqual(self.packet("b")["gate"]["reasons"], [f"run check full failed: 1 test(s) attributed to b: {test_id}"])
+        self.assertEqual(self.packet("a")["gate"]["status"], "passed")
+
+    def test_a_root_helper_shadowing_the_discover_roots_helper_never_blames_the_wrong_lane(self):
+        """f2 ([L15]): `tests/test_x.py` imports `helper`, which discover finds in `tests/` (b's file) and the worktree root
+        holds another (a's). Both lanes break their own helper; the failure is b's, and only b is blocked."""
+        helper = "from pathlib import Path\n\n\ndef ok():\n    return Path({!r}).read_text() != 'bad'\n"
+        test_x = "import unittest\n\nfrom helper import ok\n\n\nclass XTest(unittest.TestCase):\n    def test_helper(self):\n        self.assertTrue(ok())\n"
+        self.discover_run({"tests/helper.py": helper.format("b.txt"), "helper.py": helper.format("a.txt"), "tests/test_x.py": test_x},
+                          {"a": ("a.txt", "bad"), "b": ("b.txt", "bad")}, owned={"a": ["a.txt", "helper.py"], "b": ["b.txt", "tests/helper.py"]})
+        self.assertRegex(str(self.freeze()), "Combined candidate failed b checks")
+        test_id = "test_x.XTest.test_helper"
+        [attributed] = self.attribution()["checks"]
+        self.assertEqual(attributed["outcomes"][test_id], {"candidate": "failed", "base": "passed", "lanes": {"a": "passed", "b": "failed"},
+                                                           "result": "snapshot", "lane": "b"})
+        self.assertEqual(self.packet("a")["gate"]["status"], "passed")
+        self.assertEqual(fix_decision(self.runtime, self.state()), ("b", "candidate"))
+
+    def test_an_existing_pythonpath_stays_reachable_and_the_briefs_printed_command_reruns_the_discover_roots_test(self):
+        """f2 ([L15]): with PYTHONPATH already naming a directory the tests import from, the rerun keeps it after the root
+        and the worktree, and the brief's printed command, run through a shell from a checkout of the candidate with that
+        PYTHONPATH, fails the discover root's test rather than passing the root-level shadow."""
+        extra = self.root / "extra"
+        extra.mkdir()
+        (extra / "extra.py").write_text("NAME = 'extra'\n")
+        os.environ["PYTHONPATH"] = str(extra)
+        shadow = TEST_B.replace("self.assertNotEqual(Path('b.txt').read_text(), 'bad')", "pass")
+        self.discover_run({"tests/test_a.py": TEST_A, "tests/test_b.py": "import extra\n" + TEST_B, "test_b.py": shadow},
+                          {"a": ("a.txt", "a1"), "b": ("b.txt", "bad")})
+        self.assertRegex(str(self.freeze()), "Combined candidate failed b checks")
+        test_id = "test_b.BTest.test_b_lane"
+        [attributed] = self.attribution()["checks"]
+        self.assertEqual((attributed["outcomes"][test_id]["result"], attributed["outcomes"][test_id]["lane"]), ("snapshot", "b"))
+        command = self.brief_command("b")
+        self.assertEqual(command, "PYTHONPATH=tests:.${PYTHONPATH:+:$PYTHONPATH} " + shlex.join([PY, "-P", "-m", "unittest", test_id]))
+        checkout = self.root / "checkout"
+        subprocess.run(["git", "-C", str(self.repo), "worktree", "add", "-q", "--detach", str(checkout), self.candidate_commit()], check=True)
+        done = subprocess.run(["bash", "-c", command], cwd=checkout, env={**os.environ, "PYTHONPATH": str(extra)}, capture_output=True, text=True, timeout=60)
+        self.assertEqual(done.returncode, 1, done.stderr)
+        self.assertIn("FAIL: test_b_lane (test_b.BTest.test_b_lane)", done.stderr)
+        self.assertNotIn("No module named", done.stderr)
+        without = {key: value for key, value in os.environ.items() if key != "PYTHONPATH"}
+        done = subprocess.run(["bash", "-c", command], cwd=checkout, env=without, capture_output=True, text=True, timeout=60)
+        self.assertIn("No module named 'extra'", done.stderr)  # The existing entry is what made `extra` importable.
 
 
 class ImportRoot(unittest.TestCase):
@@ -930,6 +1000,34 @@ class ImportRoot(unittest.TestCase):
         for argv in ([PY, "-m", "unittest", "tests.test_x"], [PY, "-m", "unittest", "-s", "tests"], [PY, "-m", "workflow.run_tests", "tests"],
                      ["npm", "run", "test:contracts"]):
             self.assertEqual(import_root(argv), ".", argv)
+
+    def test_g3_discover_matches_any_case_and_a_start_that_is_no_directory_is_the_worktree_root(self):
+        """G3 ([L15]): unittest reads `discover` case-insensitively, and a start that is not a directory at the commit (a
+        dotted `pkg.tests`) is imported as a module from the top level, the worktree root, so its root is `.`; `-t` still
+        wins, and with no commit to look at a start is taken as a directory."""
+        for word in ("Discover", "DISCOVER"):
+            self.assertEqual(import_root([PY, "-m", "unittest", word, "-s", "tests"]), "tests", word)
+        only_tests = lambda path: path == "tests"
+        discover = [PY, "-m", "unittest", "discover"]
+        cases = {("-s", "pkg.tests"): ".", ("pkg.tests",): ".", ("-s", "tests"): "tests", ("-t", "src", "-s", "pkg.tests"): "src"}
+        for arguments, root in cases.items():
+            self.assertEqual(import_root([*discover, *arguments], only_tests), root, arguments)
+        self.assertEqual(import_root([*discover, "-s", "pkg.tests"]), "pkg.tests")
+        with tempfile.TemporaryDirectory() as temp:
+            repository = Path(temp)
+            (repository / "pkg/tests").mkdir(parents=True)
+            for name in ("pkg/__init__.py", "pkg/tests/__init__.py"):
+                (repository / name).write_text("")
+            (repository / "pkg/tests/test_x.py").write_text(TEST_X)
+            for args in (["init", "-q"], ["add", "."], ["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "Base"]):
+                subprocess.run(["git", "-C", str(repository), *args], check=True)
+            commit = subprocess.check_output(["git", "-C", str(repository), "rev-parse", "HEAD"], text=True).strip()
+            at = tree_at(str(repository), commit)
+            self.assertEqual(import_root([*discover, "-s", "pkg.tests"], at), ".")
+            self.assertEqual(import_root([*discover, "-s", "pkg/tests"], at), "pkg/tests")
+            # The owner fallback finds the file of a dotted-start id again (a regression since c451d93).
+            root = import_root([*discover, "-s", "pkg.tests"], at)
+            self.assertEqual(test_file(str(repository), commit, "pkg.tests.test_x.XTest.test_cross", root), "pkg/tests/test_x.py")
 
 
 class OneLaneRunChecks(Fixture):

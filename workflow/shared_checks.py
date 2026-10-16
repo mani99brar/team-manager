@@ -35,6 +35,7 @@ import shutil
 import subprocess
 from datetime import datetime
 from pathlib import Path
+from typing import Callable
 
 from .checks import (check_env, execute, now, prune_attempt, registered_worktree, remove_tree, remove_worktree,
                      text_test_counts, transient_kind)
@@ -359,14 +360,17 @@ def runner(argv: list[str]) -> tuple[str, int] | None:
     return None
 
 
-def import_root(argv: list[str]) -> str:
+def import_root(argv: list[str], is_dir: Callable[[str], bool] | None = None) -> str:
     """The directory, relative to the worktree, that a plain-unittest `discover` run check imports its tests from, so a
     rerun of its ids imports them the same way (decisions [L14]): the top-level directory (`-t`, `--top-level-directory`
     or the third positional), else the start directory (`-s`, `--start-directory` or the first positional), else `.`.
-    Options are read as unittest's discover parser reads them (`-stests`, `--start-directory=tests`). Any other run check,
-    and a root that is absolute or leaves the worktree, is `.`: a rerun never imports tests from outside its snapshot."""
+    Options are read as unittest's discover parser reads them (`-stests`, `--start-directory=tests`), and `discover` in
+    any case, as unittest matches it (G3, [L15]). A start that `is_dir` (the commit's view: tree_at, or a worktree's)
+    says is no directory, a dotted `pkg.tests`, is imported as a module from the top level, the worktree root, so it is
+    `.` (G3, [L15]); without `is_dir` a start is taken as a directory. Any other run check, and a root that is absolute or
+    leaves the worktree, is `.`: a rerun never imports tests from outside its snapshot."""
     mode = runner(argv)
-    if mode is None or mode[0] != "unittest" or argv[mode[1] + 2:mode[1] + 3] != ["discover"]:
+    if mode is None or mode[0] != "unittest" or [item.lower() for item in argv[mode[1] + 2:mode[1] + 3]] != ["discover"]:
         return "."
     parser = argparse.ArgumentParser(add_help=False, exit_on_error=False)
     for flags in (("-v", "--verbose"), ("-q", "--quiet"), ("-f", "--failfast"), ("-c", "--catch"), ("-b", "--buffer"), ("--locals",)):
@@ -382,18 +386,57 @@ def import_root(argv: list[str]) -> str:
     except (argparse.ArgumentError, SystemExit):
         return "."
     root = os.path.normpath(parsed.top or parsed.start or ".")
-    return "." if os.path.isabs(root) or root == ".." or root.startswith("../") else root
+    if os.path.isabs(root) or root == ".." or root.startswith("../"):
+        return "."
+    if not parsed.top and root != "." and is_dir is not None and not is_dir(root):
+        return "."  # unittest imports a start that is no directory as a module, top level implicit at the worktree root.
+    return root
 
 
-def rerun_argv(argv: list[str], ids: list[str], mode: tuple[str, int] | None, unittest_form: bool = False) -> list[str]:
+def tree_at(repository: str, commit: str) -> Callable[[str], bool]:
+    """import_root's `is_dir` for a commit: whether a path is a directory (a tree) there."""
+    return lambda path: subprocess.run(["git", "-C", repository, "cat-file", "-t", f"{commit}:{path}"],
+                                       capture_output=True, text=True).stdout.strip() == "tree"
+
+
+def safe_path(argv: list[str], mode: tuple[str, int] | None, cwd: Path, env: dict) -> bool:
+    """Whether the run check's own Python (argv before `-m`) takes `-P` (Python 3.11+), probed in the rerun's worktree
+    and environment: an older interpreter refuses the option, and its rerun keeps the working directory first."""
+    if mode is None:
+        return False
+    try:
+        return subprocess.run([*argv[:mode[1]], "-P", "-c", ""], cwd=cwd, env=env, capture_output=True, timeout=60).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def rooted_env(root: Path, worktree: Path, env: dict) -> str:
+    """The rerun's PYTHONPATH for a discover root ([L15], f2): `<worktree>/<root>:<worktree>[:existing]`, the order
+    discover's own sys.path has (the root it inserts first, then the working directory `-m` adds, which `-P` drops)."""
+    return os.pathsep.join([str(root), str(worktree), *([env["PYTHONPATH"]] if env.get("PYTHONPATH") else [])])
+
+
+def brief_command(argv: list[str], root: str) -> str:
+    """The repair brief's rerun command, run from the worktree root: rerun()'s PYTHONPATH order spelled relative, any
+    existing PYTHONPATH kept after it ([L15])."""
+    command = shlex.join(argv)
+    return command if root == "." else f"PYTHONPATH={shlex.quote(root)}:.${{PYTHONPATH:+:$PYTHONPATH}} {command}"
+
+
+def rerun_argv(argv: list[str], ids: list[str], mode: tuple[str, int] | None, unittest_form: bool = False, root: str = ".",
+               safe: bool = True) -> list[str]:
     """The command that reruns only `ids` with the run check's own Python: `-m workflow.run_tests --tests <ids>`, or
-    `-m unittest <ids>` (plain unittest, or a commit whose run_tests has no --tests); the whole run check without ids."""
+    `-m unittest <ids>` (plain unittest, or a commit whose run_tests has no --tests); the whole run check without ids.
+    Under a discover import root other than `.`, `-P` goes immediately before `-m` (f2, [L15]): the working directory
+    then never shadows the root's modules, which rerun() puts first on PYTHONPATH. `safe` is false for a Python before
+    3.11 (safe_path), which has no `-P`."""
     if mode is None:
         return list(argv)
     name, index = mode
+    flag = ["-P"] if root != "." and safe else []
     if name == "run_tests" and not unittest_form:
-        return [*argv[:index], "-m", "workflow.run_tests", "--tests", *ids]
-    return [*argv[:index], "-m", "unittest", *ids]
+        return [*argv[:index], *flag, "-m", "workflow.run_tests", "--tests", *ids]
+    return [*argv[:index], *flag, "-m", "unittest", *ids]
 
 
 def loader_errors(text: str) -> list[tuple[str, str]]:
@@ -470,7 +513,9 @@ def rerun(plan: dict, policy: dict, folder: Path, name: str, commit: str, check:
     """One attribution rerun: a fresh worktree of `commit` at `<attempt folder>/attribution/<index>/<name>/`, setup, then
     only `ids`, capped at the run check's timeout; the worktree and caches are removed after, the logs kept. Never
     concurrent. `index` is the run check's policy index, so one failed run check's reruns never replace another's logs.
-    A discover run check's import root goes first on PYTHONPATH and into the entry's `import_root` ([L14]).
+    A discover run check's import root (read at this commit) goes first on PYTHONPATH, then the worktree, then any
+    existing entries, the interpreter runs with `-P` (f2: the working directory never shadows the root), and the root
+    goes into the entry's `import_root` ([L14], [L15]).
     A setup step that fails or times out runs no id: each is `not run` (decisions [L7]), never `failed`, so an
     environmental setup failure neither names a lane nor makes an id pre-existing at base."""
     target = folder / "attribution" / str(index) / name
@@ -486,11 +531,12 @@ def rerun(plan: dict, policy: dict, folder: Path, name: str, commit: str, check:
     target.mkdir(parents=True, mode=0o700)
     git_worktree(plan["repository"], "add", "--detach", str(worktree), commit)
     env, _, tmpdir = check_env(target, "candidate")
-    argv = rerun_argv(check["argv"], ids, mode)
-    root = import_root(check["argv"]) if mode is not None else "."
+    root = import_root(check["argv"], lambda path: (worktree / path).is_dir()) if mode is not None else "."
+    safe = root == "." or safe_path(check["argv"], mode, worktree, env)
+    argv = rerun_argv(check["argv"], ids, mode, root=root, safe=safe)
     if root != ".":
         # discover put the root first on sys.path; ids are dotted from it ([L14]). Children inherit it, unlike discover's.
-        env["PYTHONPATH"] = os.pathsep.join([str(worktree / root), *([env["PYTHONPATH"]] if env.get("PYTHONPATH") else [])])
+        env["PYTHONPATH"] = rooted_env(worktree / root, worktree, env)
     try:
         for step, item in enumerate(policy.get("setup", [])):
             setup_log = target / f"setup-{step}.log"
@@ -502,7 +548,7 @@ def rerun(plan: dict, policy: dict, folder: Path, name: str, commit: str, check:
         code, _, _ = execute(argv, worktree, log, check["timeout_seconds"], env)
         text = log.read_text(errors="replace")
         if mode is not None and mode[0] == "run_tests" and code == 2 and "unrecognized arguments: --tests" in text:
-            argv = rerun_argv(check["argv"], ids, mode, unittest_form=True)  # A commit before run_tests --tests.
+            argv = rerun_argv(check["argv"], ids, mode, unittest_form=True, root=root, safe=safe)  # A commit before run_tests --tests.
             log = target / "check-unittest.log"
             code, _, _ = execute(argv, worktree, log, check["timeout_seconds"], env)
             text = log.read_text(errors="replace")
@@ -587,7 +633,8 @@ def attribute_check(plan: dict, policy: dict, record: dict, folder: Path, gate: 
             if len(failing) == 1:
                 outcome.update(result="snapshot", lane=failing[0])
             else:
-                path = None if whole else test_file(plan["repository"], record["commit"], test_id, import_root(gate["argv"]))
+                root = import_root(gate["argv"], tree_at(plan["repository"], record["commit"]))  # G3: a dotted start is `.`.
+                path = None if whole else test_file(plan["repository"], record["commit"], test_id, root)
                 owners = [lane for lane in lanes if path and any(owns(path, prefix.rstrip("/")) for prefix in workers[lane]["owned_paths"])]
                 outcome.update(file=path, **({"result": "owner", "lane": owners[0]} if len(owners) == 1 else {"result": "unattributed", "lane": None}))
         outcomes[test_id] = outcome
@@ -770,8 +817,9 @@ class SharedCandidate:
 
 def brief_lines(run: Path, policy: dict, packet_path: Path) -> list[str]:
     """The repair brief's lines for a packet a run check blocked (challenge note 6): each failed run check's attributed
-    ids, the command that reruns them from the worktree root (behind a relative `PYTHONPATH=<root>` for a discover run
-    check, import_root), and the tail of its log copied beside the packet as `run-check-<i>.log`."""
+    ids, the command that reruns them from the worktree root (for a discover run check, the candidate rerun's import
+    root and `-P` behind a relative `PYTHONPATH=<root>:.` that keeps any existing entries: brief_command, [L15]), and
+    the tail of its log copied beside the packet as `run-check-<i>.log`."""
     from .repair import LOG_TAIL_LINES, log_tail
     packet = read_json(packet_path)
     marker = packet.get(MARKER)
@@ -785,12 +833,16 @@ def brief_lines(run: Path, policy: dict, packet_path: Path) -> list[str]:
         argv = policy["run_checks"][index]["argv"]
         mine = [test_id for test_id in check["ids"] if check["outcomes"][test_id].get("lane") == packet["expected"]["node_id"]]
         mode = runner(argv) if check["mode"] != "whole" else None
-        root = import_root(argv) if mode else "."
-        command = shlex.join(rerun_argv(argv, mine or check["ids"], mode))
+        # The candidate rerun's root and `-P` (read at that commit, with that interpreter), else the argv's own.
+        done = next((item for item in check.get("reruns", []) if item.get("target") == "candidate" and "import_root" in item), None)
+        root = (done["import_root"] if done else import_root(argv)) if mode else "."
+        found = runner(done["argv"]) if done else None
+        safe = found is None or "-P" in done["argv"][:found[1]]
+        command = rerun_argv(argv, mine or check["ids"], mode, root=root, safe=safe)
         log = packet_path.parent / f"run-check-{index}.log"
         lines += ["", f"### run check {check['id']} ({policy['run_checks'][index]['kind']}): {shlex.join(argv)}", "",
                   f"Failing tests attributed to this lane: {', '.join(mine) or 'none'}",
-                  f"Rerun them: `{command if root == '.' else f'PYTHONPATH={shlex.quote(root)} {command}'}`", "",
+                  f"Rerun them: `{brief_command(command, root)}`", "",
                   f"Last {LOG_TAIL_LINES} lines of {log}:", "```", log_tail(log), "```"]
     return lines
 
