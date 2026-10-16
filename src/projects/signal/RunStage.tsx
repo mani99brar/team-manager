@@ -7,6 +7,7 @@ import { stageExecutor } from './executor.ts'
 import { toneClass, type Tone } from '../tone.ts'
 import { formatSpan } from '../time.ts'
 import { shortStepLabel } from '../steps.ts'
+import { stageTeamName } from '../teams/model.ts'
 
 export type StageHandle = {
   /** Centres a step (zooming in from the overview) and opens it. */
@@ -64,13 +65,16 @@ function StepCard({ node, position, current, selected, now }: { node: StageNode;
   const executor = stageExecutor(node)
   // The accessible name keeps the definition graph's order (label, kind, status, attempt, the meta line, the executor), then
   // what the card adds: the lane, the duration and a projected session card's cost.
+  // A step that ran an agent team (docs/PRD_RUN_TEAMS.md 5) adds its team to the name, the stacked deck, the counts and the
+  // running agent's line; without one the card is exactly as before.
+  const team = node.team
   const name = [
     node.label, node.repair ? 'repair' : KIND_LABEL[node.kind].toLowerCase(), node.word, `attempt ${node.attempt}`, node.round,
-    `executed by ${executor.phrase}`, node.lane ? `lane ${node.lane}` : null, duration, node.cost,
+    `executed by ${executor.phrase}`, node.lane ? `lane ${node.lane}` : null, duration, node.cost, team ? stageTeamName(team) : null,
   ].filter(Boolean).join(', ')
   const classes = [
     'node', toneClass(node.tone), `exec-${node.exec}`, node.exec === 'agent' ? 'is-agent' : 'is-controller', `is-${node.shown}`,
-    node.attention ? 'attn' : '', now ? 'now' : '', selected ? 'is-selected' : '',
+    team ? 'is-team' : '', node.attention ? 'attn' : '', now ? 'now' : '', selected ? 'is-selected' : '',
   ].filter(Boolean).join(' ')
   return (
     <button
@@ -95,16 +99,24 @@ function StepCard({ node, position, current, selected, now }: { node: StageNode;
         {node.attempt > 1 && <span>attempt <b>{node.attempt}</b></span>}
         {node.round && <span>{node.round}</span>}
       </span>
-      {(node.lane || duration || openP1 !== null || node.cost) && (
+      {(node.lane || duration || openP1 !== null || node.cost || team) && (
         <span className="n-meta">
           {node.lane && <span className="lane">{node.lane}</span>}
           {duration && <span><b>{duration}</b></span>}
+          {team && (
+            <span className="n-team" data-testid="stage-team-line">
+              <b>{team.agents}</b> agents
+              {team.running > 0 && <span className="n-team-run"> · <b>{team.running}</b> running</span>}
+              {team.failed > 0 && <span className="n-team-fail"> · <Glyph tone="fail" className="n-team-g" /><b>{team.failed}</b> failed</span>}
+            </span>
+          )}
+          {team && team.outside > 0 && <span className="n-team-fail" data-testid="stage-team-outside"><b>{team.outside}</b> outside paths</span>}
           {openP1 !== null && <span><b>{openP1}</b> open P0/P1</span>}
           {node.cost && <span className="n-cost">{node.cost}</span>}
         </span>
       )}
-      <span className="n-last">{last ? `${last.at.slice(11, 16)} · ${last.text}` : node.did ?? 'No event recorded yet.'}</span>
-      <span className="n-chip"><span className="c1"><Glyph tone={node.tone} /><span data-chip-label>{chipLabelOf(node)}</span></span><span className="c2">{node.facts}</span></span>
+      <span className="n-last">{team?.agentLine ? team.agentLine : last ? `${last.at.slice(11, 16)} · ${last.text}` : node.did ?? 'No event recorded yet.'}</span>
+      <span className="n-chip"><span className="c1"><Glyph tone={node.tone} /><span data-chip-label>{chipLabelOf(node)}</span></span><span className="c2">{team && team.running > 0 ? `${node.facts} · team · ${team.running} running` : node.facts}</span></span>
     </button>
   )
 }
@@ -132,6 +144,7 @@ export const RunStage = forwardRef<StageHandle, Props>(function RunStage({ nodes
   const levelRef = useRef(1)
 
   const pending = useMemo(() => new Set(nodes.filter(node => node.shown === 'pending').map(node => node.id)), [nodes])
+  const hasTeam = nodes.some(node => node.team !== null)
   const returns = useMemo(() => nodes.flatMap(node => (node.returnTo ? [{ from: node.id, to: node.returnTo }] : [])), [nodes])
   const inputs = useMemo(() => nodes.map(node => ({ id: node.id, dep: node.dep, rank: node.repair ? 1 : 0 })), [nodes])
   const layout: StageLayout = useMemo(() => layoutStage(inputs, { dir, pending, returns }), [inputs, dir, pending, returns])
@@ -459,6 +472,7 @@ export const RunStage = forwardRef<StageHandle, Props>(function RunStage({ nodes
           <li className="li"><span className="sw" style={{ borderStyle: 'dashed' }} />trusted verifier</li>
           <li className="li"><span className="sw" style={{ borderStyle: 'dotted', borderWidth: 2 }} />controller</li>
           <li className="li"><svg viewBox="0 0 26 10" style={{ width: 26 }} aria-hidden="true"><path d="M1 5h24" stroke="var(--ok)" strokeWidth="2.4" strokeDasharray="3 5" /></svg>repair re-entry</li>
+          {hasTeam && <li className="li" data-testid="legend-team"><span className="sw sw-team" />Stacked edge · a lead session with a team of agents</li>}
         </ul>
       </div>
       <div className="sb-dock">
