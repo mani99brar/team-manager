@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import { artifactSchema, runSnapshotSchema } from '../workflow/v1.js'
 import { sessionsSchema } from './sessions.js'
+import { teamsSchema } from './teams.js'
 
 const id = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/)
 const version = z.literal('1.0.0')
@@ -1078,6 +1079,8 @@ export const schemas = {
   fixLoop: fixLoopSchema,
   /** 1.13.0 (docs/PRD_RUN_SESSIONS.md Appendix A): every session of a run, its lane reviews and its night-shift decisions. */
   sessions: sessionsSchema,
+  /** docs/PRD_RUN_TEAMS.md Appendix A: the agent teams (Workflow-tool runs) of the run's Claude sessions, metadata only. */
+  teams: teamsSchema,
 }
 
 export type Project = z.infer<typeof projectSchema>

@@ -1151,3 +1151,50 @@ test('validateReviewResult: a fallback record on a judged run (no judge entry) v
   approved.findings = []
   assert.throws(() => validateReviewResult(judged.servedReview(approved), { judgedPanel: true }), /every reviewer/)
 })
+
+test('teams 1.0.0: the Appendix A example validates against the schema and the cross-field rules', async () => {
+  const { validateTeams } = await import('./teams.js')
+  const teams = validateTeams(examples.teams)
+  assert.equal(teams.contract_version, '1.0.0')
+  assert.ok(teams.sessions.some(session => session.records === 'found' && session.workflows.some(workflow => workflow.status === 'running' && workflow.record === 'live')))
+  assert.ok(teams.sessions.some(session => session.records === 'none' && session.workflows.length === 0))
+  assert.ok(teams.sessions.some(session => session.records === 'unreadable' && session.reason !== null))
+  const dupKey = structuredClone(examples.teams)
+  dupKey.sessions.push({ ...dupKey.sessions[1] })
+  assert.throws(() => validateTeams(dupKey), /Duplicate team session keys/)
+  const wrongTotals = structuredClone(examples.teams)
+  wrongTotals.totals.running += 1
+  assert.throws(() => validateTeams(wrongTotals), /Team totals: running/)
+  const noneWithWorkflows = structuredClone(examples.teams)
+  noneWithWorkflows.sessions[1].workflows = structuredClone(examples.teams.sessions[0].workflows.slice(1))
+  assert.throws(() => validateTeams(noneWithWorkflows), /exactly when its records are found/)
+  const dupIndex = structuredClone(examples.teams)
+  dupIndex.sessions[0].workflows[0].agents[1].index = 1
+  assert.throws(() => validateTeams(dupIndex), /Duplicate agent indexes/)
+  const pathLeak = structuredClone(examples.teams)
+  pathLeak.sessions[0].workflows[0].agents[0].agent_id = 'not-an-agent-id'
+  assert.throws(() => validateTeams(pathLeak))
+})
+
+test('run GitHub 1.0.0: the read and the actions examples validate, with the actions in order and a reason exactly when unavailable', async () => {
+  const github = await import('./github.js')
+  const { runGithub, runGithubActions } = await import('./teamExamples.js')
+  for (const [name, schema] of Object.entries(github.githubSchemas)) {
+    const exported = JSON.parse(readFileSync(new URL(`./${name}.schema.json`, import.meta.url), 'utf8'))
+    assert.deepEqual(exported, z.toJSONSchema(schema))
+  }
+  github.runGithubSchema.parse(runGithub)
+  const actions = github.runGithubActionsSchema.parse(runGithubActions)
+  assert.deepEqual(actions.actions.map(action => action.id), [...github.GITHUB_ACTION_IDS])
+  const reordered = structuredClone(runGithubActions)
+  reordered.actions.reverse()
+  assert.throws(() => github.runGithubActionsSchema.parse(reordered))
+  const reasonless = structuredClone(runGithubActions)
+  reasonless.actions[0].reason = null
+  assert.throws(() => github.runGithubActionsSchema.parse(reasonless))
+  const badRepo = structuredClone(runGithub)
+  badRepo.repo.owner_name = '/home/agentops/dev/vea'
+  assert.throws(() => github.runGithubSchema.parse(badRepo))
+  github.githubActionRequestSchema.parse({ request_id: '1b4e28ba-2fa1-4d3b-8b2c-6a1f0e9d8c7b', state_token: 'gh-1', params: { reviewers: ['jaybuidl', 'kleros/vea-maintainers'] } })
+  assert.throws(() => github.githubActionRequestSchema.parse({ request_id: 'x', state_token: 'gh-1', params: {} }))
+})

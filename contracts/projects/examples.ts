@@ -4,6 +4,8 @@ import type { AttackRecord, AttackResult, FixLoop, PanelRecord, PanelResults, Re
 import type { DispatchOverview, HomeRuns, ProjectSteps, GithubRepoRead, RegistryRuns } from './dispatch.js'
 import type { Sessions } from './sessions.js'
 
+export { teams } from './teamExamples.js'
+
 /**
  * A run as contract 1.5.0 serves it: the summary carries the run's `activity` (a list row reads it without further requests)
  * and the detail its `run_dir`, served home-relative because the registry lists the project in `viewer.expose_run_dir`.
