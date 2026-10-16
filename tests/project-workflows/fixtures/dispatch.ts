@@ -15,6 +15,7 @@ import { createHash } from 'node:crypto'
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Project, RunDetail, RunSummary, WorkflowDefinition } from '../../../contracts/projects/v1.ts'
+import type { RunPr } from '../../../contracts/projects/github.ts'
 import { done, runDetail, type NodeState } from '../fixtures.ts'
 import type { DispatchOverview, GithubRepoRead, GithubState, ProjectDispatch, ProjectSteps, ProjectStepsRun } from '../../../src/projects/dispatch/types.ts'
 
@@ -674,11 +675,18 @@ function writeM2Run(runsRootDir: string, run: M2Run): void {
   writeFileSync(join(dir, 'plan.json'), `${JSON.stringify({ run_id: run.runId, base_commit: RUN_BASE }, null, 2)}\n`)
 }
 
+/** One run branch as the GitHub fixture's optional `branches` map holds it (`server/dispatchGithub.ts` `githubBranchReadSchema`). */
+export type FixtureBranchRead = {
+  read_at: string | null; visibility: GithubRepoRead['visibility']; viewer_permission: 'ADMIN' | 'MAINTAIN' | 'WRITE' | 'TRIAGE' | 'READ' | null
+  default_branch: string | null; github_sha: string | null; pr: RunPr | null
+  earlier_prs: { number: number; title: string; url: string; state: 'OPEN' | 'MERGED' | 'CLOSED'; updated_at: string }[]
+}
+
 export type DispatchSeed = {
   /** Registry project entries to append (`project_id`, `name`, `repository`, `workflows`). */
   projects: { project_id: string; name: string; repository: string; workflows: { workflow_id: string; runs_root: string; definition: { name: string; nodes: unknown[] } }[] }[]
   /** The GitHub fixture `{ viewer_login, repos }` for `MD_MANAGER_GITHUB_FIXTURE`. */
-  githubFixture: { viewer_login: string; repos: Record<string, GithubRepoRead> }
+  githubFixture: { viewer_login: string; repos: Record<string, GithubRepoRead>; branches: Record<string, FixtureBranchRead> }
 }
 
 /**
@@ -779,6 +787,26 @@ export function seedDispatchCandidate(root: string): DispatchSeed {
     'acme/noorigin': { read_at: READ_AT, visibility: 'PUBLIC', default_branch: 'main', pushed_at: '2026-10-10T10:00:00Z', head: { sha: sha('ghhead'), committed_at: '2026-10-10T09:30:00Z' }, open_prs: 0, open_issues: 0, prs: [], issues: [] },
     'acme/busy': { read_at: READ_AT, visibility: 'PUBLIC', default_branch: 'main', pushed_at: '2026-10-10T10:00:00Z', head: { sha: sha('ghhead'), committed_at: '2026-10-10T09:30:00Z' }, open_prs: 0, open_issues: 0, prs: [], issues: [] },
   }
+  // The run GitHub view's branch read (docs/PRD_RUN_TEAMS.md "GitHub read"): PR #43's head, an open ready PR whose one
+  // check is pending. Keyed `owner/name#<branch>`; the run branch is only served for runs whose export records it.
+  const branches: Record<string, FixtureBranchRead> = {
+    'acme/widgets#feature/ui-polish-002': {
+      read_at: READ_AT, visibility: 'PUBLIC', viewer_permission: 'WRITE', default_branch: 'main', github_sha: sha('ghbranch'),
+      pr: {
+        number: 43, title: 'Land the verify fix', url: 'https://github.com/acme/widgets/pull/43', state: 'OPEN', draft: false, author: 'octocat',
+        head_ref: 'feature/ui-polish-002', base_ref: 'main', head_sha: sha('ghbranch'), updated_at: '2026-10-10T11:00:00Z', merged_at: null,
+        review_decision: 'REVIEW_REQUIRED', mergeable: 'MERGEABLE', comments: 1, review_threads: 0, unresolved_threads: 0,
+        requested_reviewers: [{ kind: 'user', login: VIEWER_LOGIN }], latest_reviews: [],
+        checks: { state: 'PENDING', passing: 3, failing: 0, pending: 1, skipped: 0, total: 4, items: [
+          { name: 'e2e', kind: 'check_run', status: 'IN_PROGRESS', conclusion: null, bucket: 'pending', url: null },
+          { name: 'build', kind: 'check_run', status: 'COMPLETED', conclusion: 'SUCCESS', bucket: 'pass', url: null },
+          { name: 'lint', kind: 'check_run', status: 'COMPLETED', conclusion: 'SUCCESS', bucket: 'pass', url: null },
+          { name: 'unit', kind: 'check_run', status: 'COMPLETED', conclusion: 'SUCCESS', bucket: 'pass', url: null },
+        ] },
+      },
+      earlier_prs: [],
+    },
+  }
   // Trio lists its three readable workflows plus the unlistable one, whose `runs_root` is a regular file ([P34], V18).
   const trioWorkflows = [
     ...workflowsFor(DISPATCH_TRIO, ['alpha-feature', 'beta-feature', 'gamma-feature']),
@@ -795,6 +823,6 @@ export function seedDispatchCandidate(root: string): DispatchSeed {
       { project_id: DISPATCH_UNREADABLE, name: 'Unreadable', repository: unreadable, workflows: workflowsFor(DISPATCH_UNREADABLE, ['x']) },
       { project_id: DISPATCH_SPEND, name: 'Spend', repository: spendRepo, workflows: workflowsFor(DISPATCH_SPEND, [SPEND_WORKFLOW, SPEND_BROKEN_WORKFLOW, REUSE_WORKFLOW]) },
     ],
-    githubFixture: { viewer_login: VIEWER_LOGIN, repos },
+    githubFixture: { viewer_login: VIEWER_LOGIN, repos, branches },
   }
 }
