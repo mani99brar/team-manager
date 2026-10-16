@@ -41,8 +41,8 @@
       ]
     },
     "actions": {
-      "minItems": 5,
-      "maxItems": 5,
+      "minItems": 4,
+      "maxItems": 4,
       "type": "array",
       "items": {
         "type": "object",
@@ -53,8 +53,7 @@
               "push_branch",
               "open_pr",
               "mark_ready",
-              "request_reviewers",
-              "comment_summary"
+              "request_reviewers"
             ]
           },
           "label": {
@@ -299,8 +298,7 @@
               "push_branch",
               "open_pr",
               "mark_ready",
-              "request_reviewers",
-              "comment_summary"
+              "request_reviewers"
             ]
           },
           "params": {

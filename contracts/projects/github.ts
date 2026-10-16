@@ -12,9 +12,9 @@ import { z } from 'zod'
  * `github.status: 'pending'` until the next tick. No field carries an absolute path or a credential; reasons are fixed texts.
  *
  * **Actions** (`runGithubActionsSchema`, 1.0.0): mounted in the run-control scope (`/api/run-controls/:project_id/:workflow_id/
- * :run_id/github`), so every route inherits its browser guards and pairing token (docs/PRD_RUN_CONTROLS.md 5.2). Five actions on
+ * :run_id/github`), so every route inherits its browser guards and pairing token (docs/PRD_RUN_CONTROLS.md 5.2). Four actions on
  * the repository, never on the run: push the run branch (never forced, never the default branch), open a draft pull request,
- * mark it ready for review, request reviewers (users or `org/team`), and comment the run summary. As every run control, each
+ * mark it ready for review, and request reviewers (users or `org/team`). The run summary is copied, never posted. As every run control, each
  * maps to one fixed controller argv, `python -m workflow github <action> <run> ... --by operator` (PRD_RUN_CONTROLS principle
  * 1); the controller checks the branch and sha again and runs git or gh without a shell. Each publishes something, so each
  * states what becomes visible, and an action on a PUBLIC repository (or one whose visibility is unknown) is confirmed by typing
@@ -62,7 +62,8 @@ export const runGithubStateSchema = z.strictObject({
   viewer_permission: z.enum(PERMISSIONS).nullable(),
 })
 
-export const unpublishedCommitSchema = z.strictObject({ sha, subject: z.string(), committed_at: ts })
+/** `author` is the commit's `Name <email>` exactly as a push would publish it, so the preview shows what becomes public. */
+export const unpublishedCommitSchema = z.strictObject({ sha, subject: z.string(), author: z.string(), committed_at: ts })
 
 export const runBranchSchema = z.strictObject({
   /** `inputs.source_branch`; null when the run records none. */
@@ -171,7 +172,7 @@ export type PushState = (typeof PUSH_STATES)[number]
 // ---- Actions -------------------------------------------------------------------------------------------------------------
 
 /** In the order the GitHub view lists them. */
-export const GITHUB_ACTION_IDS = ['push_branch', 'open_pr', 'mark_ready', 'request_reviewers', 'comment_summary'] as const
+export const GITHUB_ACTION_IDS = ['push_branch', 'open_pr', 'mark_ready', 'request_reviewers'] as const
 export const GITHUB_RECORD_STATUSES = ['running', 'succeeded', 'failed', 'refused', 'lost'] as const
 
 export const githubActionIdSchema = z.enum(GITHUB_ACTION_IDS)

@@ -20,8 +20,7 @@
             "push_branch",
             "open_pr",
             "mark_ready",
-            "request_reviewers",
-            "comment_summary"
+            "request_reviewers"
           ]
         },
         "params": {

@@ -306,6 +306,9 @@
               "subject": {
                 "type": "string"
               },
+              "author": {
+                "type": "string"
+              },
               "committed_at": {
                 "type": "string",
                 "format": "date-time",
@@ -315,6 +318,7 @@
             "required": [
               "sha",
               "subject",
+              "author",
               "committed_at"
             ],
             "additionalProperties": false
