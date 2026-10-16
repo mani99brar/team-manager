@@ -1113,7 +1113,26 @@ class JudgedGraphTests:
         self.assertIn("Review blocked by judge (1 confirmed P0/P1: J1)", [e["message"] for e in self.events() if e["status"] == "blocked"])
         self.assertEqual(read_json(f.directory / "run-state.json")["review"]["verdict"], "blocked")
         state = SimpleNamespace(tasks=[SimpleNamespace(name="review", error="blocked")], next=("review",))
-        self.assertEqual(review_block(f.runtime, state), ("adapter", review["findings"]))  # The fix loop repairs the J1 lane.
+        self.assertEqual(review_block(f.runtime, state), (["adapter"], review["findings"]))  # The fix loop repairs the J1 lane.
+
+    def test_confirmed_rulings_on_two_lanes_route_through_finding_lane_to_a_round_on_both(self):
+        """A judged review's confirmed P0/P1 reach the multi-lane fix loop through automatic.finding_lane: each ruling's lane
+        is its file's owner, and the round repairs both lanes in the run's lane order (ui, then adapter), the first one first."""
+        from .automatic import finding_lane, fix_decision, review_block
+        f = self.fixture
+        ui = {**self.BLOCKING[1], "ruling": "confirmed", "severity": "P1", "title": "The empty state crashes", "detail": "It throws.",
+              "reason": "Read ui.txt.", "sources": ["general-1"]}
+        self.control(rulings=[self.BLOCKING[0], ui])
+        self.set_findings([self.P2], [self.P1])
+        self.drive(blocked=True)
+        review = read_json(f.directory / "review.json")
+        self.assertEqual([(finding["worker"], finding["reviewer"]) for finding in review["findings"]], [("adapter", "judge"), ("ui", "judge")])
+        self.assertEqual([finding_lane(f.runtime, finding) for finding in review["findings"]], ["adapter", "ui"])
+        state = SimpleNamespace(tasks=[SimpleNamespace(name="review", error="blocked")], next=("review",))
+        self.assertEqual(f.runtime.workers, ["ui", "adapter"])
+        self.assertEqual(review_block(f.runtime, state), (["ui", "adapter"], review["findings"]))
+        f.runtime.plan["automatic"]["fix_rounds"] = 3
+        self.assertEqual(fix_decision(f.runtime, state), ("ui", "review"))
 
     def test_a_built_in_p1_the_judge_refutes_no_longer_blocks(self):
         f = self.fixture

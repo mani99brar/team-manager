@@ -46,9 +46,9 @@ test('requires join evidence fields, durable output and referenced logs', () => 
   assert.throws(() => validateWorkerResult({ ...examples.workerResult, status: 'failed', error: null }))
 })
 
-test('a check records why it was transient: memory or disk, nothing else', () => {
+test('a check records why it was transient: memory, disk or load, nothing else', () => {
   const check = examples.workerResult.checks[0]
-  for (const transient of ['memory', 'disk'] as const) {
+  for (const transient of ['memory', 'disk', 'load'] as const) {
     const result = validateWorkerResult({ ...examples.workerResult, status: 'failed', error: { code: 'VERIFICATION_BLOCKED', message: 'unit: exit 1', retryable: true },
       checks: [{ ...check, exit_code: 1, transient }], transient_checks: ['unit'] })
     assert.equal(result.checks[0].transient, transient)

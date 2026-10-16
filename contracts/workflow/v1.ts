@@ -38,10 +38,11 @@ export const checkSchema = z.strictObject({
   exit_code: z.number().int(),
   log_artifact_id: id,
   /**
-   * "memory": the check's process ended on a signal or its log's tail says the system ran out of memory; "disk": it failed
-   * and its log's tail says the disk or the quota was full (memory wins when both hold); absent otherwise.
+   * "memory": the check's process ended on a signal or its log's tail says the system ran out of memory. "disk": it failed and
+   * its log's tail says the disk or the quota was full. "load": the check hit its timeout while the host's load average was at
+   * least twice its CPU count. Memory wins over disk, and disk over load, when several hold. Absent otherwise.
    */
-  transient: z.enum(['memory', 'disk']).optional(),
+  transient: z.enum(['memory', 'disk', 'load']).optional(),
 })
 
 /**
@@ -69,7 +70,7 @@ export const workerResultSchema = z.strictObject({
   deferred_checks: z.array(deferredCheckSchema).optional(),
   /** Changed paths the worker-phase capture did not copy as `file` artifacts, with the reason; absent on older results and candidate-phase captures. */
   files_not_captured: z.array(fileNotCapturedSchema).optional(),
-  /** The ids of the gating checks whose failure was transient (killed under memory pressure); absent when none was. */
+  /** The ids of the gating checks whose failure was transient (`transient` on their execution); absent when none was. */
   transient_checks: z.array(id).optional(),
 })
 

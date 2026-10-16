@@ -667,7 +667,7 @@ def main(argv=None):
     parser.add_argument("--reviewer-transport", choices=["native", "print"], help="Automatic mode: native attachable reviewer session (default) or headless claude --print")
     parser.add_argument("--profile", choices=["attended", "unattended"], help="Automatic mode: the run's profile (default unattended), pinned at prepare")
     parser.add_argument("--fix-rounds", type=int, metavar="N", help="Automatic mode: repair sessions per lane in the in-run fix loop before "
-                                                                    "attention (default 2, 0 disables), pinned at prepare")
+                                                                    "attention (default 10, at most 10, 0 disables), pinned at prepare")
     parser.add_argument("--worker-model", help="The workers' model, pinned at prepare (default: claude-opus-5-5, sessions.DEFAULT_WORKER_MODEL)")
     parser.add_argument("--worker-effort", choices=EFFORT_LEVELS, help="The workers' effort, pinned at prepare (default: WORKFLOW_WORKER_EFFORT)")
     parser.add_argument("--judge-model", help="The model of the design challenge, the reviewers and the review sidecar, pinned at prepare "
