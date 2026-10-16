@@ -70,10 +70,70 @@ VITEST_HEADER = re.compile(r"^\s*FAIL\s+\S")
 VITEST_END = re.compile(r"^\s*(?:FAIL\s|⎯{3,}|Test Files\s)")
 TAP_NOT_OK = re.compile(r"^\s*not ok \d+\b(?!.*#\s*(?:TODO|SKIP)\b)", re.IGNORECASE)
 TAP_ANY = re.compile(r"^\s*(?:not )?ok \d+\b")
+# workflow.run_tests echoes a failed class's output indented by RUN_TESTS_INDENT under its `FAIL <module.Class> (N tests)` line.
+RUN_TESTS_INDENT = "    "
+RUN_TESTS_CLASS = re.compile(r"^FAIL (\S+) \(\d+ tests?\)$")
+# `FAIL: test_x (module.Class.test_x)`, with an optional subtest suffix; before Python 3.11 the parentheses held the class only.
+UNITTEST_ID = re.compile(r"^(?:FAIL|ERROR|UNEXPECTED SUCCESS): (\S+) \(([^)\s]+)\)")
+LOADER_FAILURE = "unittest.loader._FailedTest"  # The class unittest gives a name it failed to import or find.
+
+
+def unittest_lines(text: str) -> list[tuple[str, int]]:
+    """Each line with the indent run_tests gave it removed, and that indent's width (0 or 4)."""
+    return [(line[len(RUN_TESTS_INDENT):], len(RUN_TESTS_INDENT)) if line.startswith(RUN_TESTS_INDENT) else (line, 0)
+            for line in ANSI.sub("", text).splitlines()]
+
+
+def failing_ids(text: str) -> list[str]:
+    """The failing test ids of a Python unittest-family log, in log order (run-checks-once PRD 8.2).
+
+    Plain unittest (`FAIL:`/`ERROR:` headers at column 0) and workflow.run_tests (the same headers indented under a
+    `FAIL <module.Class> (N tests)` line). A method id wherever a header names one; a class's id only for a failed
+    class with no method-level header (it crashed, failed to import or failed in setUpClass), so a class with passing
+    and failing methods gives only its failing methods. A module the loader failed to import gives the name it tried
+    (never the loader's `unittest.loader._FailedTest` pseudo-id). An unknown `--tests` id comes back as given.
+    """
+    found, current, covered = [], None, set()
+
+    def add(value):
+        if value not in found:
+            found.append(value)
+
+    classes = []
+    for line, indent in unittest_lines(text):
+        if indent == 0 and RUN_TESTS_CLASS.match(line):
+            current = RUN_TESTS_CLASS.match(line)[1]
+            classes.append(current)
+            continue
+        if indent == 0 and current is not None and not line.startswith(("FAIL ", "ok ")) and line.strip():
+            current = None  # The summary after the last class's echo.
+        match = UNITTEST_ID.match(line)
+        if not match:
+            continue
+        name, inside = match[1], match[2]
+        if inside == f"{LOADER_FAILURE}.{name}":
+            add(name)  # A module or name the loader could not load: `ERROR: pkg.test_x (unittest.loader._FailedTest.pkg.test_x)`.
+            covered.add(current)
+            continue
+        if name in {"setUpClass", "tearDownClass", "setUpModule", "tearDownModule"}:
+            if current:
+                continue  # The class line already names it.
+            add(inside)
+            continue
+        test_id = inside if inside.endswith(f".{name}") else f"{inside}.{name}"
+        add(test_id)
+        covered.add(current)
+    for name in classes:
+        if name not in covered:
+            add(name)
+    return found
 
 
 def failures(text: str) -> list[tuple[str, str | None]]:
-    """Each failing test the log names, in log order, with its first assertion or error line when the format gives one."""
+    """Each failing test the log names, in log order, with its first assertion or error line when the format gives one.
+
+    unittest headers count at column 0 and, under workflow.run_tests' class lines, at its indent; a run_tests class that
+    failed with no such header (failing_ids gives its class id) is listed as its `FAIL <class>` line."""
     lines = ANSI.sub("", text).splitlines()
     found, seen = [], set()
 
@@ -83,11 +143,14 @@ def failures(text: str) -> list[tuple[str, str | None]]:
             found.append((name, detail))
 
     for index, line in enumerate(lines):
-        if UNITTEST_HEADER.match(line) and index > 0 and lines[index - 1].startswith("======"):
+        indent = RUN_TESTS_INDENT if line.startswith(RUN_TESTS_INDENT) and UNITTEST_HEADER.match(line[len(RUN_TESTS_INDENT):]) else ""
+        header = line[len(indent):]
+        if UNITTEST_HEADER.match(header) and index > 0 and lines[index - 1][len(indent):].startswith("======"):
             # The traceback runs to the next rule after the one under the header; the exception line is its first
             # unindented line (the source lines of each frame are indented).
             detail, traceback = None, False
-            for following in lines[index + 2:]:
+            for raw in lines[index + 2:]:
+                following = raw[len(indent):] if raw.startswith(indent) else raw
                 if UNITTEST_RULE.match(following):
                     break
                 if following.startswith("Traceback ("):
@@ -96,8 +159,8 @@ def failures(text: str) -> list[tuple[str, str | None]]:
                         ("During handling", "The above exception")):
                     detail = following
                     break
-            add(line.strip(), detail)
-        elif VITEST_HEADER.match(line):
+            add(header.strip(), detail)
+        elif VITEST_HEADER.match(line) and not RUN_TESTS_CLASS.match(line):
             detail = None
             for following in lines[index + 1:]:
                 if VITEST_END.match(following):
@@ -115,6 +178,10 @@ def failures(text: str) -> list[tuple[str, str | None]]:
                     detail = following.strip()
                     break
             add(line.strip(), detail)
+    named = " ".join(name for name, _ in found)
+    for test_id in failing_ids(text):
+        if test_id not in named and RUN_TESTS_CLASS.match(next((line for line in lines if line.startswith(f"FAIL {test_id} (")), "")):
+            add(f"FAIL {test_id}", None)
     return found
 
 

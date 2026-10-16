@@ -9,7 +9,10 @@ a C56 run's plan.repository is that source checkout; with none left, leftovers G
 pruned, while a folder whose .git file names a gitdir that still exists is refused: Git cannot run there. The
 source checkout goes last, only once every other removal succeeded, and never while it holds uncommitted changes or a
 rebase or merge in progress (the operator integrates there when --ff-only refuses). Failed attempts are kept whole, and so
-are repair workspaces (an operator's fix may sit uncommitted in one), packets, logs, artifacts and every run file.
+are repair workspaces (an operator's fix may sit uncommitted in one), packets, logs, artifacts and every run file. A shared
+candidate attempt (`shared-checks/<generation>/<attempt>/`, shared_checks) is pruned like a passed check attempt when all its
+executions passed every declaring check's gate (shared_checks.execution_passed), and an attribution rerun's leftover
+worktree always; its record.json, attribution.json and logs, which the lane packets cite, are never removed.
 
 It refuses while the run's controller or supervisor lock is held, while a receipt cannot be read, or while `claude agents`
 lists a live session of the run: by a receipt's IDs, by the ID a never-bound receipt's launch log printed, or by one of
@@ -166,6 +169,19 @@ def passed_attempts(directory: Path) -> tuple[list[tuple[Path, list[str]]], list
         except (OSError, ValueError, KeyError, TypeError):
             status = None
         if status != "passed":
+            kept.append(folder)
+            continue
+        names = [path.name for path in prunable(folder)]
+        if names:
+            prune.append((folder, names))
+    from .shared_checks import passed_record, shared_attempts
+    for folder in shared_attempts(directory):
+        # An attribution rerun removes its own worktree when it ends; one an interrupted controller left is pruned whatever the outcome.
+        for rerun in sorted(path for path in (folder / "attribution").glob("*/*") if path.is_dir()):
+            names = [path.name for path in prunable(rerun)]
+            if names:
+                prune.append((rerun, names))
+        if not passed_record(folder):
             kept.append(folder)
             continue
         names = [path.name for path in prunable(folder)]

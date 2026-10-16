@@ -8,15 +8,29 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import ExitStack, redirect_stderr, redirect_stdout
 from pathlib import Path
+from unittest.mock import patch
 
 from .checks import Capture, browser_evidence, check_report_main, verify_revision
 from .guardrails import brief_problems, pinned_task
 from .scaffold import feature_files
 from .sessions import git, save_json
+from .test_env import isolate_browser_queue
 
 TOOL = Path(__file__).resolve().parents[1]
+MODULE = ExitStack()
+
+
+def setUpModule():
+    # Every browser check here takes a slot of this module's own queue, never the operator's (test_env).
+    temp = MODULE.enter_context(tempfile.TemporaryDirectory())
+    MODULE.enter_context(patch.dict(os.environ))  # Restored, the queue variable with it, by tearDownModule.
+    isolate_browser_queue(temp)
+
+
+def tearDownModule():
+    MODULE.close()
 PNG = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89"
 
 

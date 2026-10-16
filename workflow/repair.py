@@ -171,12 +171,30 @@ def transient_attempt(path: Path) -> bool:
     return transient_packet(path, TRANSIENT_KINDS) or disk_packet(path)
 
 
+def unattributed_block(packet: dict) -> bool:
+    """A blocked candidate packet whose block is a run check failure no single lane caused (shared_checks: pre-existing at
+    base, did not reproduce, not run, several lanes, no owner): it carries the `unattributed` marker. The fix loop never
+    repairs it, on a one-lane run too (decisions [G5], [L1]): automatic.fix_decision returns None, and the block takes
+    check_retries."""
+    from .shared_checks import MARKER
+    marker = packet.get(MARKER) if isinstance(packet, dict) else None
+    return (isinstance(marker, dict) and marker.get("kind") == "unattributed" and packet.get("phase") == "candidate"
+            and packet.get("gate", {}).get("status") == "blocked")
+
+
 def attempt_limit(directory: Path, policy: dict, phase: str, node: str, through: int) -> int:
     """The first attempt past the budget of the lane's current revision: its floor plus max_verification_attempts plus its
-    transient attempts (memory or disk) from the floor up to `through` (at most MAX_TRANSIENT_RERUNS)."""
+    transient attempts (memory or disk, transient_attempt) from the floor up to `through` (at most MAX_TRANSIENT_RERUNS).
+    While the run's candidate attempts move in lockstep (shared_checks), a candidate attempt any lane lost to a memory kill or
+    a full disk is transient for every lane, so the lanes' budgets stay equal (challenge note 1)."""
+    from .shared_checks import lockstep
     floor = attempt_floor(directory, phase, node)
     folder = directory / "verification" / phase / node
-    transient = sum(transient_attempt(folder / str(attempt) / "packet.json") for attempt in range(floor, through + 1))
+    if phase == "candidate" and lockstep(directory):
+        transient = sum(any(transient_attempt(path) for path in (directory / "verification" / phase).glob(f"*/{attempt}/packet.json"))
+                        for attempt in range(floor, through + 1))
+    else:
+        transient = sum(transient_attempt(folder / str(attempt) / "packet.json") for attempt in range(floor, through + 1))
     return floor + policy.get("max_verification_attempts", 3) + min(transient, MAX_TRANSIENT_RERUNS)
 
 
@@ -526,12 +544,19 @@ def derive(runtime, lanes: list[str], source: str, phase: str, previous: dict) -
 def attempt_targets(directory: Path, lanes: list[str], workers: list[str]) -> dict:
     """The worker phase of each repaired lane and the candidate phase of every lane that has a candidate attempt directory
     start past their counter and past every existing attempt: nothing is moved, and no attempt directory is reused."""
+    from .shared_checks import lockstep
     targets = {}
     for phase, nodes in (("worker", lanes), ("candidate", workers)):
         for node in nodes:
             existing = attempt_directories(directory, phase, node)
             if phase == "worker" or existing:
                 targets[f"{phase}:{node}"] = max(raw_attempt(directory, phase, node), max(existing, default=0) + 1)
+    if lockstep(directory):
+        # Lockstep candidate attempts (decisions [L2]): every lane gets the same floor, the highest, so the lanes' limits
+        # stay equal and raising a lane to its peers' attempt never passes its own budget (challenge note 1).
+        floor = max([max(raw_attempt(directory, "candidate", node), max(attempt_directories(directory, "candidate", node), default=0) + 1)
+                     for node in workers], default=1)
+        targets.update({f"candidate:{node}": floor for node in workers})
     return targets
 
 
@@ -721,6 +746,8 @@ def packet_evidence(directory: Path, packet: dict) -> tuple[Path, list[Path]]:
     reused = read_json(directory / packet["path"]).get("reused_from")
     folder = (directory / (reused["path"] if reused else packet["path"])).parent
     evidence = ([folder / "packet.json"] if reused else []) + sorted(folder.glob("setup-*.log")) + sorted(folder.glob("check-*.log")) + sorted(folder.glob("browser-report-*.json"))
+    # A failed run check's log, copied beside the candidate packet it blocked (shared_checks.SharedCandidate.finish).
+    evidence += sorted((directory / packet["path"]).parent.glob("run-check-*.log"))
     return folder, evidence
 
 
@@ -805,6 +832,8 @@ def failing_checks(runtime, lane: str, packet: dict) -> list[str]:
                   f"Last {LOG_TAIL_LINES} lines of {log}:", "```", log_tail(log), "```"]
     for log in sorted(folder.glob("setup-*.log")) if any(reason.startswith("Setup ") for reason in packet["reasons"]) else []:
         lines += ["", f"### Setup log {log.name}", "", f"Last {LOG_TAIL_LINES} lines of {log}:", "```", log_tail(log), "```"]
+    from .shared_checks import brief_lines
+    lines += brief_lines(directory, runtime.policy, directory / packet["path"])  # A run check attributed to this lane.
     return lines
 
 

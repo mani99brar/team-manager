@@ -336,7 +336,9 @@ class ThreeLaneRun(LaneRun):
                 graph.invoke(None, self.config)
         second = read_json(self.directory / "verification/candidate/ui/2/packet.json")
         self.assertNotIn("reused_from", second)
-        self.assertTrue((self.directory / "verification/candidate/ui/2/worktree").is_dir())
+        # The ui build runs in the attempt's shared worktree (run-checks-once), kept whole since it failed.
+        self.assertTrue((self.directory / "shared-checks/0/2/worktree").is_dir())
+        self.assertEqual(second["result"]["checks"][0]["cwd"], str(self.directory / "shared-checks/0/2/worktree"))
         self.assertEqual(second["result"]["checks"][0]["exit_code"], 1)
 
     def test_two_lanes_run_the_candidate_checks_even_when_one_lane_changes_nothing(self):
@@ -907,10 +909,11 @@ class LegacyFeatureAndRun(LaneRun):
         """Scenario legacy-feature-refused: a 1.0.0 feature.json is refused with a message to use 2.x; nothing runs."""
         self.two_lane_features()
         _, commands_new, notes_new = launch_commands(self.repo, "new", "r1", self.run_root, herdr=False, automatic=True)
-        # Its ui lane has a browser check: the one note is C7's tryout migration hint.
-        self.assertEqual((commands_new[1], notes_new), (["git", "worktree", "add", "-b", "feature/two/r1", str(self.run_root / "r1.source"), "HEAD"],
-                                                        ['Lane ui has a browser check: to have each run tried before the merge to main, move '
-                                                         'feature.json to 2.4.0 and set "tryout": true.']))
+        # Its ui lane has a browser check: C7's tryout migration hint; both lanes declare `npm run build`: the run-checks-once note.
+        self.assertEqual((commands_new[1], notes_new[0]), (["git", "worktree", "add", "-b", "feature/two/r1", str(self.run_root / "r1.source"), "HEAD"],
+                                                           'Lane ui has a browser check: to have each run tried before the merge to main, move '
+                                                           'feature.json to 2.4.0 and set "tryout": true.'))
+        self.assertEqual([note.split(":")[0] for note in notes_new[1:]], ["lanes ui, adapter declare npm run build", "lanes ui, adapter declare npm run test"])
         with self.assertRaisesRegex(ValueError, r"version 1\.0\.0 .*no longer supported: rewrite it as version 2\.x"):
             launch_commands(self.repo, "old", "r1", self.run_root, herdr=False, automatic=True)
         with patch("workflow.launch.run_command") as command, contextlib.redirect_stdout(io.StringIO()) as output, contextlib.redirect_stderr(io.StringIO()) as errors:

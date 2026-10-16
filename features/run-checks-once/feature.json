@@ -1,0 +1,54 @@
+{
+  "version": "2.10.0",
+  "name": "Run each verification check once: candidate checks shared across lanes on one combined revision, policy 1.5.0 run-level checks that run once per candidate attempt, and attribution of a run-level failure to one lane by rerunning only its failing tests on the base, the candidate and each lane snapshot",
+  "branch_prefix": "feature/run-checks-once",
+  "prd": "features/run-checks-once/prd.md",
+  "policy": "policy.json",
+  "workers": [
+    {
+      "node_id": "engine",
+      "task": "engine-task.md",
+      "lane_review": {
+        "reviewers": [
+          {
+            "transport": "pi",
+            "model": "openai-codex/gpt-6.1-sol"
+          }
+        ],
+        "rounds": 1,
+        "timeout_minutes": 15
+      },
+      "model": "claude-opus-5-5",
+      "effort": "high"
+    }
+  ],
+  "reviewers": [
+    {
+      "reviewer_id": "general",
+      "prompt": "builtin:general"
+    },
+    {
+      "reviewer_id": "coverage",
+      "prompt": "builtin:coverage"
+    }
+  ],
+  "panels": [
+    {
+      "id": "review",
+      "stage": "review",
+      "providers": [
+        {
+          "transport": "pi",
+          "model": "openai-codex/gpt-6-astra"
+        }
+      ],
+      "prompt": "builtin:review",
+      "report_only": true,
+      "budget_usd": 5,
+      "timeout_minutes": 30
+    }
+  ],
+  "challenge": true,
+  "critical": false,
+  "tryout": false
+}

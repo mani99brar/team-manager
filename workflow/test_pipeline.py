@@ -24,6 +24,7 @@ from .costs import record_session_cost
 from .guardrails import completion_version
 from .pipeline import Pipeline, build_pipeline, check_review, digest_file, report, validate_pipeline_policy
 from .sessions import git, plan_workers, prepare, read_json, review_node, reviewer_ids, run_lock, save_json
+from .test_env import isolate_browser_queue
 from .verification import CONTRACTS, policy_digest
 
 # What each fake lane writes into its worktree: the two classic lanes edit fixture files the checks read;
@@ -49,6 +50,7 @@ def isolate_registry() -> None:
                                           "CLAUDE_CONFIG_DIR": str(Path(temp.name) / "claude"),
                                           "WORKFLOW_REVIEWERS_FILE": str(Path(temp.name) / "no-reviewer-list.json")})
     environment.start()
+    isolate_browser_queue(temp.name)  # Browser checks take this module's own queue, never the operator's (test_env).
     unittest.addModuleCleanup(temp.cleanup)
     unittest.addModuleCleanup(environment.stop)
     isolate_statvfs()
@@ -1229,8 +1231,9 @@ class RecordTests(unittest.TestCase):
         commit = read_json(f.directory / "candidate.json")["commit"]
         self.assertEqual(self.events("candidate_adapter")[-2:], [("passed", f"Combined revision {commit}"),
                                                                 ("passed", "Candidate gate passed on attempt 2 after attempt 1 failed")])
-        self.assertEqual(self.events("candidate_ui"), [("running", f"Attempt 1; combined revision {commit}"),
-                                                       ("passed", f"Combined revision {commit}")] * 2)  # Restated by the rerun step, which runs the checks again; not a retry.
+        # Restated by the rerun step at adapter's raised attempt: lockstep candidate attempts (run-checks-once [L2]).
+        self.assertEqual(self.events("candidate_ui"), [("running", f"Attempt {attempt}; combined revision {commit}") if index == 0 else ("passed", f"Combined revision {commit}")
+                                                       for attempt in (1, 2) for index in (0, 1)])
 
     def test_a_check_over_sixty_percent_of_its_timeout_is_named_in_its_verify_and_candidate_events(self):
         f = self.fixture
@@ -1941,7 +1944,7 @@ class CandidateRefTests(unittest.TestCase):
             packets[lane].parent.mkdir(parents=True)
             save_json(packets[lane], {"gate": {"status": "passed"}, "expected": {"output_commit": sha}})
 
-        def verified(directory, plan, policy, node, commit_, changed, session, phase="worker", attempt=1):
+        def verified(directory, plan, policy, node, commit_, changed, session, phase="worker", attempt=1, shared=None):
             # A packet with no checks: the candidate step reads its result and evidence for C27's slow note.
             packet = {"gate": {"status": "passed", "reasons": []}, "expected": {"output_commit": commit_}, "result": {"checks": []}, "evidence": {"checks": []}}
             path = directory / "verification" / phase / node / str(attempt) / "packet.json"
