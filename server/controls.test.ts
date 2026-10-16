@@ -357,7 +357,7 @@ test('[L5] a disabled setup serves status enabled:false and 404 CONTROLS_DISABLE
     assert.equal(r.setup.enabled, false)
     const status = await r.app.inject({ method: 'GET', url: '/api/run-controls/status' })
     assert.equal(status.statusCode, 200)
-    assert.deepEqual(status.json(), { version: '1.1.0', enabled: false, paired: false })
+    assert.deepEqual(status.json(), { version: '1.2.0', enabled: false, paired: false })
   })
 })
 
@@ -375,7 +375,7 @@ test('[disabled] controls off: every control route is 404 CONTROLS_DISABLED, not
         assert.equal(errorOf(response).code, 'CONTROLS_DISABLED')
       }
       const status = await app.inject({ method: 'GET', url: '/api/run-controls/status' })
-      assert.deepEqual(status.json(), { version: '1.1.0', enabled: false, paired: false })
+      assert.deepEqual(status.json(), { version: '1.2.0', enabled: false, paired: false })
       const projects = await app.inject({ method: 'POST', url: `/api/projects/${PROJECT}/workflows/${WORKFLOW}/runs/r1`, payload: {} })
       assert.equal(projects.statusCode, 405)
       assert.equal((await app.inject({ method: 'GET', url: '/api/projects' })).statusCode, 200)
@@ -388,8 +388,8 @@ test('[enabled] the Projects API still answers 405 to a POST and status reports 
   await withRig({ seeds: { r1: SEEDS.stopped } }, async r => {
     assert.equal((await r.app.inject({ method: 'POST', url: `/api/projects/${PROJECT}/workflows/${WORKFLOW}/runs/r1`, payload: {} })).statusCode, 405)
     assert.equal((await r.app.inject({ method: 'POST', url: '/api/projects', payload: {} })).statusCode, 405)
-    assert.deepEqual((await r.app.inject({ method: 'GET', url: '/api/run-controls/status' })).json(), { version: '1.1.0', enabled: true, paired: false })
-    assert.deepEqual((await r.app.inject({ method: 'GET', url: '/api/run-controls/status', headers: { 'x-mdm-control-token': TOKEN } })).json(), { version: '1.1.0', enabled: true, paired: true })
+    assert.deepEqual((await r.app.inject({ method: 'GET', url: '/api/run-controls/status' })).json(), { version: '1.2.0', enabled: true, paired: false })
+    assert.deepEqual((await r.app.inject({ method: 'GET', url: '/api/run-controls/status', headers: { 'x-mdm-control-token': TOKEN } })).json(), { version: '1.2.0', enabled: true, paired: true })
     assert.equal(((await r.app.inject({ method: 'GET', url: '/api/run-controls/status', headers: { 'x-mdm-control-token': 'x'.repeat(40) } })).json() as { paired: boolean }).paired, false)
   })
 })
@@ -1455,15 +1455,73 @@ test('[recovery] a confirmed relaunch runs relaunch alone: the record holds the 
   })
 })
 
-test('[recovery] the 14 controls in order, retry_all and relaunch after clean; the recovery example is what the server serves', async () => {
+test('[recovery] the 15 controls in order, retry_all and relaunch after clean, note last; the recovery example is what the server serves', async () => {
   await withRig({ seeds: { rec: { ...twoFailed, next: ['verify_ui', 'verify_adapter', 'launch_ui'], files: { 'ui.interactive.json': { status: 'needs_reconciliation' } } } } }, async r => {
     const controls = await r.controls('rec')
-    assert.equal(controls.version, '1.1.0')
-    assert.equal(controls.controls.length, 14)
+    assert.equal(controls.version, '1.2.0')
+    assert.equal(controls.controls.length, 15)
     assert.deepEqual(controls.controls.map(control => control.id), [...CONTROL_IDS])
-    assert.deepEqual(controls.controls.slice(12).map(control => control.id), ['retry_all', 'relaunch'])
+    assert.deepEqual(controls.controls.slice(12).map(control => control.id), ['retry_all', 'relaunch', 'note'])
     assert.deepEqual(controls.controls, examples.runControlsStates.recovery.controls)
     assert.throws(() => runControlsSchema.parse({ ...controls, controls: controls.controls.slice(0, 13) }))
     assert.throws(() => runControlsSchema.parse({ ...controls, controls: [...controls.controls.slice(0, 12), controls.controls[13], controls.controls[12]] }))
+  })
+})
+
+// ---- 1.2.0: Send a note to the lead (docs/PRD_RUN_TEAMS.md "Steering") ------------------------------------------------------
+
+const working = (extra: Record<string, unknown> = {}): Seed => ({
+  next: ['launch_ui'], files: { 'ui.interactive.json': { status: 'attached_session_available' }, 'terminals.json': { ui: { pane_id: 'p-1' } }, ...extra },
+})
+
+test('[note] offered for a working lane with a pane while the supervisor runs; one argv, the text after --', async () => {
+  await withRig({ env: { HERDR_ENV: '1' }, seeds: { n1: working() } }, async r => {
+    const runDir = join(r.runsRoot, 'n1')
+    await r.proc.hold(join(runDir, 'automatic-supervisor.lock'), 4343, ['/usr/bin/python3', '-m', 'workflow', 'automatic', runDir, '--live', '--by', 'operator'], { pgrp: 4300 })
+    const controls = await r.controls('n1')
+    const note = byId(controls, 'note')
+    assert.equal(note.available, true, note.reason ?? '')
+    assert.deepEqual(note.params, [{ name: 'lane', kind: 'choice', choices: ['ui'], required: true }, { name: 'text', kind: 'text', min_length: 1, max_length: 2000, required: true }])
+    assert.equal(note.command, '$PY -m workflow note "$RUN" <lane> --by operator -- "<text>"')
+    assert.equal(note.label, 'Send a note to the lead')
+    const text = '--help: also cover the empty state\nsecond line'
+    r.spawner.auto.code = 0
+    const response = await r.post('n1', 'note', { lane: 'ui', text }, { token: controls.run_state_token })
+    assert.equal(response.statusCode, 200, response.body)
+    const call = r.spawner.calls.at(-1)!
+    assert.equal(call.command, PY(r))
+    assert.deepEqual(call.args, ['-m', 'workflow', 'note', runDir, 'ui', ...BY, '--', text])
+    assert.equal(call.shell, false)
+    const record = controlResponseSchema.parse(response.json()).record
+    assert.equal(record.command, `$PY -m workflow note "$RUN" ui --by operator -- ${JSON.stringify(text)}`)
+    assert.deepEqual(record.params, { lane: 'ui', text })
+  })
+})
+
+test('[note] the refusals workflow note would give are reasons, and the text is bounded', async () => {
+  const question = { 'ui.questions.json': { node_id: 'ui', questions: [{ n: 1, question: 'Which port?', asked_at: T0, answer: null, answered_at: null }] } }
+  await withRig({ env: { HERDR_ENV: '1' }, seeds: {
+    ok: working(), none: { next: ['verify_ui'] }, done: working({ 'ui.completion.json': {} }), frozen: working({ 'snapshots.json': {} }),
+    ledger: working({ 'sidecar.ledger.json': { closed_at: T0 } }), asking: working(question), abandoned: { ...working(), files: { ...working().files, 'abandon.json': { reason: 'x' } } },
+  } }, async r => {
+    const reason = async (run: string) => byId(await r.controls(run), 'note').reason
+    assert.equal(await reason('ok'), null)
+    assert.equal(await reason('none'), 'No lane\'s worker is launched and still working')
+    assert.equal(await reason('done'), 'No lane\'s worker is launched and still working')
+    assert.equal(await reason('frozen'), 'The workers are frozen: a note reaches a lead only before freeze')
+    assert.equal(await reason('ledger'), 'The workers are frozen: a note reaches a lead only before freeze')
+    assert.equal(await reason('asking'), 'Every working lane waits on a question; answer it instead')
+    assert.equal(await reason('abandoned'), 'The run was abandoned')
+    for (const params of [{ lane: 'ui', text: 'x'.repeat(2001) }, { lane: 'ui', text: '   ' }, { lane: 'adapter', text: 'ok' }, { lane: 'ui', text: 'nul\0' }, { lane: 'ui' }]) {
+      const response = await r.act('ok', 'note', params)
+      assert.equal(response.statusCode, 400, JSON.stringify(params))
+      assert.equal(errorOf(response).code, 'INVALID_PARAMS')
+    }
+    assert.equal(r.spawner.calls.length, 0)
+    const blocked = await r.act('asking', 'note', { lane: 'ui', text: 'ok' })
+    assert.equal(blocked.statusCode, 422)
+  })
+  await withRig({ seeds: { nopane: working() } }, async r => {
+    assert.equal(byId(await r.controls('nopane'), 'note').reason, 'Typing a note needs the lane\'s Herdr pane; send it in your terminal')
   })
 })

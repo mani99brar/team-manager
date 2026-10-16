@@ -174,7 +174,7 @@ test(`[scenario:controls-unavailable] The Controls list greys what is unavailabl
   test.slow()
   await open(page, RUN_RUNNING)
   await openControls(page)
-  await expect(page.locator('[data-testid="controls-list"] > li')).toHaveCount(14)
+  await expect(page.locator('[data-testid="controls-list"] > li')).toHaveCount(15)
   await expect(page.getByTestId('control-pause')).toHaveAttribute('data-available', 'true')
   await expect(page.getByTestId('control-pause')).toContainText('workers keep running')
   for (const id of ['restart', 'retry', 'reconcile', 'abandon', 'clean']) {
@@ -362,7 +362,7 @@ test(`[scenario:controls-recovery] Retry all failed checks reruns both failed la
   // Two worker lanes failed their checks: Retry all is offered, names the controller's command, and records its lines.
   await open(page, RUN_RETRY_ALL)
   await openControls(page)
-  await expect(page.locator('[data-testid="controls-list"] > li')).toHaveCount(14)
+  await expect(page.locator('[data-testid="controls-list"] > li')).toHaveCount(15)
   await expect(page.getByTestId('control-retry_all')).toHaveAttribute('data-available', 'true')
   await expect(page.getByTestId('control-retry_all')).toContainText('Retry all failed checks')
   await page.getByTestId('control-retry_all-button').click()
@@ -381,7 +381,7 @@ test(`[scenario:controls-recovery] Retry all failed checks reruns both failed la
   // One failed lane: unavailable, with the reason.
   await open(page, RUN_REPAIR)
   await openControls(page)
-  await expect(page.locator('[data-testid="controls-list"] > li')).toHaveCount(14)
+  await expect(page.locator('[data-testid="controls-list"] > li')).toHaveCount(15)
   await expect(page.getByTestId('control-retry_all')).toHaveAttribute('data-available', 'false')
   await expect(page.getByTestId('control-retry_all').getByTestId('control-reason')).toHaveText('Fewer than two worker checks failed')
   await page.keyboard.press('Escape')
@@ -427,7 +427,7 @@ test(`An older controller without retry --all-failed and relaunch: both controls
   for (const runId of [RUN_RETRY_ALL, RUN_RELAUNCH]) {
     await open(page, runId)
     await openControls(page)
-    await expect(page.locator('[data-testid="controls-list"] > li')).toHaveCount(14)
+    await expect(page.locator('[data-testid="controls-list"] > li')).toHaveCount(15)
     for (const id of ['retry_all', 'relaunch'] as const) {
       await expect(page.getByTestId(`control-${id}`)).toHaveAttribute('data-available', 'false')
       await expect(page.getByTestId(`control-${id}`).getByTestId('control-reason')).toHaveText(OLDER_CONTROLLER_REASONS[id]!)

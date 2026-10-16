@@ -422,9 +422,10 @@ const CATALOG: Record<ControlId, Spec> = {
   clean: { label: 'Clean worktrees', runs: 'short', confirm: 'typed_run_id', command: `${PY} clean "$RUN" --by operator`, effect: 'Removes the run\'s worktrees; the dry run below lists them.', not_effect: 'Evidence and the run\'s records stay.' },
   retry_all: { label: 'Retry all failed checks', runs: 'short', confirm: 'plain', command: `${PY} retry "$RUN" --phase worker --all-failed --by operator`, effect: 'Raises the attempt of every lane whose worker check failed or was left without a verdict, in one command; Restart supervisor then reruns them.', not_effect: 'It runs no check itself and never retries a combined (candidate) check.' },
   relaunch: { label: 'Relaunch a lane', runs: 'short', confirm: 'plain', command: `${PY} relaunch "$RUN" <lane> --by operator`, effect: 'Relaunches the lane\'s worker session once, after its dry run shows the controller allows it; continue with Reconcile launches and then Restart supervisor.', not_effect: 'It reconciles and restarts nothing itself, and relaunches a lane at most once.' },
+  note: { label: 'Send a note to the lead', runs: 'short', confirm: 'plain', command: `${PY} note "$RUN" <lane> --by operator -- "<text>"`, effect: 'Types your note into the lane\'s lead session between its turns and records it in <lane>.notes.json.', not_effect: 'It does not interrupt a running tool call; a team workflow that is running takes no input until it returns.' },
 }
 
-const ORDER: ControlId[] = ['restart', 'pause', 'retry', 'reconcile', 'resume', 'accept_challenge', 'release_hold', 'answer', 'approve', 'repair_session', 'abandon', 'clean', 'retry_all', 'relaunch']
+const ORDER: ControlId[] = ['restart', 'pause', 'retry', 'reconcile', 'resume', 'accept_challenge', 'release_hold', 'answer', 'approve', 'repair_session', 'abandon', 'clean', 'retry_all', 'relaunch', 'note']
 /** The reasons of a controller without the two 1.1.0 commands (the server's capability read failed closed). */
 export const OLDER_CONTROLLER_REASONS: Partial<Record<ControlId, string>> = {
   retry_all: 'This controller has no `retry --all-failed` (workflow-collected-fixes is not merged)',
@@ -435,7 +436,7 @@ const REASONS: Record<ControlId, string> = {
   restart: 'The run is finished', pause: 'No supervisor of this run is running', retry: 'No lane\'s check failed or was interrupted without a verdict', reconcile: 'The run does not need reconciling',
   resume: 'No design challenge is paused or held', accept_challenge: 'No design challenge is paused', release_hold: 'No design challenge is held', answer: 'No lane has an unanswered question',
   approve: 'The run is not waiting for approval', repair_session: 'No lane is blocked at a check after the freeze', abandon: 'The run is already integrated', clean: 'The run is not finished or abandoned',
-  retry_all: 'Fewer than two worker checks failed', relaunch: 'No lane launch is waiting to be relaunched',
+  retry_all: 'Fewer than two worker checks failed', relaunch: 'No lane launch is waiting to be relaunched', note: 'No lane\'s worker is launched and still working',
 }
 const WITH_SUPERVISOR: ControlId[] = ['restart', 'retry', 'reconcile', 'resume', 'accept_challenge', 'release_hold', 'repair_session', 'abandon', 'clean', 'retry_all', 'relaunch']
 const OFFERED: Record<Fixture['kind'], ControlId[]> = {
@@ -447,6 +448,7 @@ const paramsOf = (id: ControlId, fixture: Fixture): Control['params'] => {
   switch (id) {
     case 'retry': return [{ name: 'lane', kind: 'choice', choices: [...lanesOf(fixture)], required: true }, { name: 'phase', kind: 'choice', choices: fixture.kind === 'retryAll' ? ['worker'] : ['worker', 'candidate'], required: true }]
     case 'relaunch': return [{ name: 'lane', kind: 'choice', choices: fixture.kind === 'relaunch' ? ['ui'] : [], required: true }]
+    case 'note': return [{ name: 'lane', kind: 'choice', choices: [], required: true }, { name: 'text', kind: 'text', min_length: 1, max_length: 2000, required: true }]
     case 'answer': return [{ name: 'lane', kind: 'choice', choices: ['ui'], required: true }, { name: 'text', kind: 'text', min_length: 1, max_length: 4000, required: true }]
     case 'accept_challenge': return [{ name: 'reason', kind: 'text', min_length: 10, max_length: 500, required: true }]
     case 'release_hold': return [{ name: 'drop', kind: 'multi', choices: [1, 2], required: false }]
@@ -463,7 +465,7 @@ export function controlsFor(runId: string, token: string, records: ControlRecord
   if (!fixture) return null
   const running = fixture.kind === 'running'
   return {
-    version: '1.1.0', run_state_token: token, supervisor: running ? 'running' : 'not_running', supervisor_since: running ? SUPERVISOR_SINCE : null,
+    version: '1.2.0', run_state_token: token, supervisor: running ? 'running' : 'not_running', supervisor_since: running ? SUPERVISOR_SINCE : null,
     controls: ORDER.map((id): Control => {
       const absent = options.older ? OLDER_CONTROLLER_REASONS[id] : undefined
       const available = absent === undefined && OFFERED[fixture.kind].includes(id)

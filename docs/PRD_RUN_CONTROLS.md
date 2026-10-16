@@ -260,3 +260,20 @@ type ControlRecord = {
 | `MD_MANAGER_CONTROLS_PROC` | the `/proc` root the lock probe reads (tests only) |
 
 The fake controller for browser checks and the critique app (`tests/project-workflows/fake-controller.py`, standard library) is set as `MD_MANAGER_WORKFLOW_PYTHON`: it appends its argv to `$MD_MANAGER_FAKE_CONTROLLER_LOG`, prints a canned line per action (`Automatic by the operator`, or `Blocked: <text>` for a run id containing `refuse`), sleeps 3 seconds for `automatic` so a `running` record is visible, and exits 0 or 1 accordingly. It never touches a run directory.
+
+## Amendment (2026-10-16, docs/PRD_RUN_TEAMS.md "Steering" and "GitHub actions"): `note` and the GitHub family
+
+**Contract 1.2.0** appends a fifteenth control, `note` ("Send a note to the lead"), after `relaunch`; the first fourteen keep their order.
+
+- It runs `$PY -m workflow note "$RUN" <lane> --by operator -- "<text>"` (short, plain confirm). The text is 1 to 2000 characters and travels after `--`, one argv element.
+- Effect: "Types your note into the lane's lead session between its turns and records it in <lane>.notes.json." Not: "It does not interrupt a running tool call; a team workflow that is running takes no input until it returns."
+- Offered for the lanes `workflow note` would accept as far as the server can see (workflow/sidecar.py `refusal`): a launch receipt and no stop, handoff or completion file, before freeze (no `snapshots.json`, no closed sidecar ledger), no unanswered question (answer it instead), the run neither abandoned nor accepted, and, like Answer, a Herdr pane for the lane (`HERDR_ENV=1` and `terminals.json`). It needs no quiet run: a note reaches a lead while the supervisor runs. The controller still decides; a pane that is busy or detached is recorded `undeliverable` by `note` itself and shown as a failed record.
+
+**The GitHub family** (`contracts/projects/github.ts`, `runGithubActionsSchema` 1.0.0, `server/githubActions.ts`) lives in the same scope, so guards 1 to 4 apply unchanged, and shares the one-in-flight-per-run rule (409 `BUSY`) with the controls:
+
+- `GET /api/run-controls/:p/:w/:r/github` serves the four actions (`push_branch`, `open_pr`, `mark_ready`, `request_reviewers`), a `state_token` (a digest of the branch's local, tracking and GitHub shas and the pull request's number, state, draft flag and head) and the last 20 records.
+- `POST .../github/:action_id` takes `{ request_id, state_token, params }`: a repeated `request_id` answers the first record; a stale token is 409 `STATE_CHANGED`; an unavailable action is 422 `NOT_AVAILABLE`; parameters outside the offered spec, or a typed `confirm_repo` that is not exactly the repository's `owner/name`, are 400 `INVALID_PARAMS`.
+- Principle 1 holds: each action maps to one fixed argv, `$PY -m workflow github push|pr|ready|reviewers "$RUN" --repo <registered repository> ... --by operator` (workflow/github.py, RUNBOOK "GitHub actions"). The server never runs git or gh for a write. The sha and the pull request number come from the run's GitHub read, never from the request; the controller checks them again.
+- Off unless the API starts with `MD_MANAGER_GITHUB_ACTIONS=on` (A.3) and run controls are on. Off, every action is unavailable with "GitHub actions are off on this dashboard: start it with MD_MANAGER_GITHUB_ACTIONS=on".
+- A PUBLIC repository, or one whose visibility is unknown, asks for its `owner/name` typed before a push or a pull request; mark ready and request reviewers are plain.
+- The `open_pr` body is written to a mode-600 file beside the records for `--body-file` and removed when the command ends; records keep `body_chars`, never the body. Records are `<MD_MANAGER_CONTROLS_STATE>/<p>/<w>/<run>.github.jsonl`; output is capped at 40 lines with home as `~`, the pairing token as `[token]`, and URL credentials (`https://user:token@`) cut, which now applies to every control's output.

@@ -132,9 +132,12 @@ export async function holderIsSupervisorOf(holder: Holder, runDir: string): Prom
 
 // ---- Records (PRD 5.5) --------------------------------------------------------------------------------------------------
 
-/** Replaces the home directory with `~` and the pairing token with `[token]`; cuts a line at 1000 characters. */
+/** A credential in a URL (`https://user:token@host`, as git and gh may print a remote): the user and secret are cut. */
+const URL_CREDENTIAL = /(\b[a-z][a-z0-9+.-]*:\/\/)[^/\s@]+@/gi
+
+/** Replaces the home directory with `~`, the pairing token with `[token]` and cuts URL credentials; cuts a line at 1000 characters. */
 export function redactLine(line: string, secrets: { home: string; token: string | null }): string {
-  let text = line
+  let text = line.replace(URL_CREDENTIAL, '$1')
   if (secrets.token) text = text.split(secrets.token).join('[token]')
   if (secrets.home && secrets.home !== '/') text = text.split(secrets.home).join('~')
   return text.length > LINE_LIMIT ? `${text.slice(0, LINE_LIMIT)}…` : text

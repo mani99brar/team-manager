@@ -4,14 +4,18 @@ import { z } from 'zod'
  * The run-control API (docs/PRD_RUN_CONTROLS.md Appendix A, contract 1.1.0), mounted at /api/run-controls. The server validates
  * every payload it sends against these schemas; the viewer mirrors the types. decisions.md [L1] 3 and [L4] add the status route's
  * `enabled: false` form and the clean-preview route (`{ exitCode, output }`, the two camelCase keys); 1.1.0 adds the relaunch
- * preview (`{ exitCode, line }`: the dry run's first line, the controller's verdict on the chosen lane).
+ * preview (`{ exitCode, line }`: the dry run's first line, the controller's verdict on the chosen lane). 1.2.0 appends `note` (steering, docs/PRD_RUN_TEAMS.md "Steering":
+ * a note typed into a lane's lead session, `workflow note`). The run's GitHub actions are a separate family in the same scope (`github.ts`).
  */
-export const CONTROLS_VERSION = '1.1.0'
+export const CONTROLS_VERSION = '1.2.0'
 
-/** 1.1.0 appends `retry_all` and `relaunch` (the controller's `retry --all-failed` and `relaunch`); the first twelve keep their order. */
+/**
+ * 1.1.0 appends `retry_all` and `relaunch` (the controller's `retry --all-failed` and `relaunch`); the first twelve keep their order.
+ * 1.2.0 appends `note` (the controller's `note`); the first fourteen keep their order.
+ */
 export const CONTROL_IDS = [
   'restart', 'pause', 'retry', 'reconcile', 'resume', 'accept_challenge', 'release_hold', 'answer', 'approve', 'repair_session', 'abandon', 'clean',
-  'retry_all', 'relaunch',
+  'retry_all', 'relaunch', 'note',
 ] as const
 
 export const CONTROL_RUNS = ['short', 'long', 'signal'] as const
