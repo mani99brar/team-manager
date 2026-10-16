@@ -1,4 +1,4 @@
-"""`python -m workflow` exposes the complete operator-driven pipeline CLI, plus `launch`, `init`, `resume`, `answer`, `note`, `sidecar-pass`, `repair`, `brief`, `relaunch`, `abandon`, `accept`, `check-report`, `run-report`, `browser-queue`, `clean`, `ledger`, `tryout`, `attention-notify` and `presence`. RUNBOOK "Command reference"."""
+"""`python -m workflow` exposes the complete operator-driven pipeline CLI, plus `launch`, `init`, `resume`, `answer`, `note`, `sidecar-pass`, `repair`, `brief`, `relaunch`, `abandon`, `accept`, `check-report`, `run-report`, `browser-queue`, `clean`, `ledger`, `tryout`, `attention-notify`, `presence` and `github` (operator-confirmed push, draft pull request, ready and reviewers on a run's branch). RUNBOOK "Command reference"."""
 import os
 import sys
 
@@ -73,6 +73,9 @@ if __name__ == "__main__":
     elif len(sys.argv) > 1 and sys.argv[1] == "presence":
         from .attention_notify import presence_main
         presence_main(sys.argv[2:])
+    elif len(sys.argv) > 1 and sys.argv[1] == "github":
+        from .github import github_main
+        github_main(sys.argv[2:])
     else:
         from .pipeline import main
         main()
