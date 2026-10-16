@@ -90,7 +90,8 @@
             "type": "string",
             "enum": [
               "memory",
-              "disk"
+              "disk",
+              "load"
             ]
           }
         },

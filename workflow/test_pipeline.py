@@ -1732,7 +1732,7 @@ class RecordTests(unittest.TestCase):
 
     def test_the_fix_rounds_are_pinned_bounded_and_absent_from_older_plans(self):
         from .automatic import FIX_ROUNDS, fix_rounds, repair_timeout, validate_automatic
-        self.assertEqual(FIX_ROUNDS, 2)
+        self.assertEqual(FIX_ROUNDS, 10)
         settings = automatic_settings(fix_rounds=0)
         self.assertEqual((settings["fix_rounds"], settings["repair_timeout_seconds"]), (0, 2700))
         self.assertNotIn("fix_rounds", automatic_settings())  # Only prepare pins it (FIX_ROUNDS when --fix-rounds is not given).
@@ -1741,8 +1741,8 @@ class RecordTests(unittest.TestCase):
         older = {"automatic": {key: value for key, value in automatic_settings().items() if key != "repair_timeout_seconds"}, "source_branch": "feature/x"}
         validate_automatic(older)
         self.assertEqual((fix_rounds(older), repair_timeout(older), fix_rounds({})), (0, 2700, 0))
-        for value in (-1, 6, "2", True):
-            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "fix_rounds must be a whole number from 0 to 5"):
+        for value in (-1, 11, "2", True):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "fix_rounds must be a whole number from 0 to 10"):
                 validate_automatic({"automatic": {**automatic_settings(), "fix_rounds": value}, "source_branch": "feature/x"})
 
     def test_the_role_flags_and_the_profile_are_refused_on_every_action_but_prepare(self):

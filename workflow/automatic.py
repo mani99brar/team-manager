@@ -11,9 +11,12 @@ lanes' work. The restriction is by path, not ancestry, so the delta may also hol
 between the runs (the operator's trade-off; the prompt says so). Reviewers read it first, beside the full `review.diff`;
 its digest is bound like the diff's.
 
-The in-run fix loop (RUNBOOK "In-run fix loop"): when a lane's verify gate, the candidate gate of one lane, or a review whose
-every open P0/P1 names one lane blocks, the controller runs `repair.repair_session` for that lane (`fix_decision`,
-`fix_round`) up to `plan.automatic.fix_rounds` times, then stops with "fix loop exhausted". A review round is archived first
+The in-run fix loop (RUNBOOK "In-run fix loop"): when a lane's verify gate, the candidate gate, or a review whose every open
+P0/P1 names a lane of the run blocks, the controller runs `repair.repair_session` for that lane (`fix_decision`, `fix_round`) up
+to `plan.automatic.fix_rounds` times, then stops with "fix loop exhausted". Findings on several lanes, and a candidate failure
+attributed to several lanes (`candidate_chain`: a failing test to the lane that owns its spec), repair each lane in turn, each
+with its own share, before the run continues (`chain_next`). A review round that leaves as many open P0/P1 as the one before,
+or brings one back, stops the loop ("fix loop stopped: no progress", `no_progress`). A review round is archived first
 (`review-rounds.json`, `archive_review`) and the next review's delta runs from that round's candidate. A check killed under
 memory pressure is rerun after a wait for memory without spending the attempt budget (`wait_for_memory`).
 """
@@ -49,8 +52,8 @@ DEFAULTS = {"finish": "verified-feature-branch", "permission_mode": "bypassPermi
             "repair_timeout_seconds": 45 * 60}
 # The in-run fix loop (RUNBOOK, In-run fix loop): repair sessions per lane before attention. Pinned at prepare (`--fix-rounds`,
 # default FIX_ROUNDS); a plan pinned without it has no loop, as before.
-FIX_ROUNDS = 2
-MAX_FIX_ROUNDS = 5
+FIX_ROUNDS = 10
+MAX_FIX_ROUNDS = 10
 OPTIONAL_KEYS = ("fix_rounds",)
 TIMEOUT_KEYS = ("worker_timeout_seconds", "review_timeout_seconds")
 REVIEWER_TRANSPORTS = ("native", "print")
@@ -693,6 +696,11 @@ def review_rounds(directory: Path) -> list[dict]:
     return read_json(path)["rounds"] if path.exists() else []
 
 
+def round_lanes(record: dict) -> list[str]:
+    """The lanes a review round repairs, in order: `lanes` since rounds on several lanes, else its one `lane`."""
+    return record.get("lanes") or [record["lane"]]
+
+
 def last_round(runtime) -> dict | None:
     """The previous review round, once it is archived and a later candidate is being reviewed: the base of this round's delta."""
     rounds = review_rounds(runtime.directory)
@@ -711,7 +719,7 @@ def delta_base(runtime, cwd: Path) -> tuple[str, list[str]] | None:
     A review round of the in-run fix loop takes precedence: (the previous round's candidate, the repaired lane's owned paths)."""
     previous = last_round(runtime)
     if previous is not None:
-        return previous["candidate"], lane_paths(runtime, previous["lane"])
+        return previous["candidate"], [path for lane in round_lanes(previous) for path in lane_paths(runtime, lane)]
     follows = runtime.plan.get("follows")
     commit = follows.get("candidate_commit") if isinstance(follows, dict) else None
     if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{7,64}", commit):
@@ -749,7 +757,8 @@ def delta_line(runtime) -> str:
         findings = "; ".join(json.dumps(finding, ensure_ascii=False) for finding in previous["findings"])
         return (f"Round {previous['round'] + 1} of the in-run fix loop: the previous round's P0/P1 findings were: {findings}; check they "
                 f"are resolved and read the delta first: {delta} (the previous round's candidate {previous['candidate']} to this one, "
-                f"limited to lane {previous['lane']}'s owned paths). The full diff below is the whole candidate for context. ")
+                f"limited to {'lanes ' + listing(round_lanes(previous)) if len(round_lanes(previous)) > 1 else 'lane ' + previous['lane']}'s "
+                "owned paths). The full diff below is the whole candidate for context. ")
     if not isinstance(follows, dict) or not delta.is_file():
         return ""
     return (f"Delta since the followed run {follows.get('run_id')}'s candidate {follows.get('candidate_commit')} "
@@ -1843,9 +1852,9 @@ def same_revision(previous: Path, packet: Path) -> bool:
 
 
 def previous_failure(runtime, phase: str, node: str, attempt: int) -> Path | None:
-    """The packet of the latest earlier attempt of the lane's revision that was not transient (killed for memory, or a full
-    disk): the identical-failure rule compares real failures only, so a transient attempt between two identical failures does
-    not hide them."""
+    """The packet of the latest earlier attempt of the lane's revision that was not transient (killed for memory, timed out
+    under host load, or a full disk): the identical-failure rule compares real failures only, so a transient attempt between
+    two identical failures does not hide them."""
     from .repair import transient_attempt
     for earlier in range(attempt - 1, 0, -1):  # same_revision, the caller's, tells another revision's attempt apart.
         path = runtime.directory / "verification" / phase / node / str(earlier) / "packet.json"
@@ -1924,7 +1933,7 @@ def check_retries(runtime, state) -> tuple[list, list] | None:
         targets.extend(stage_targets)
         requested.extend(stage_requested)
     # Check all bounds before changing any counters. The limit counts from the floor of the lane's revision, and an attempt
-    # killed for memory, or failed on a full disk, does not spend it (repair.attempt_limit).
+    # killed for memory, timed out under host load or failed on a full disk does not spend it (repair.attempt_limit).
     if any(runtime.attempt(p, n) >= attempt_limit(runtime.directory, runtime.policy, p, n, runtime.attempt(p, n)) - 1 for p, n in targets):
         raise RuntimeError("Verification retry limit exhausted; work and evidence retained")
     return targets, requested
@@ -1992,27 +2001,55 @@ def wait_for_disk(runtime, *, clock=time.monotonic, sleep=time.sleep) -> None:
         sleep(DISK_POLL_SECONDS)
 
 
+LOAD_WAIT_SECONDS = 1800  # A browser suite beside it takes 15-25 min on vea-vps.
+LOAD_POLL_SECONDS = 30
+LOAD_EVENT_SECONDS = 300
+
+
+def wait_for_quiet(runtime, *, read=None, cores=None, clock=time.monotonic, sleep=time.sleep) -> None:
+    """Before rerunning a check that timed out under host load (checks.overloaded_timeout): wait until the 5-minute load average
+    is below the CPU count or LOAD_WAIT_SECONDS pass, polling every LOAD_POLL_SECONDS, with one `running` event at most every
+    LOAD_EVENT_SECONDS. The rerun follows either way; a load that cannot be read waits for nothing."""
+    read = read or os.getloadavg
+    cpus = (cores or os.cpu_count)() or 1
+    started, said = clock(), None
+    while True:
+        try:
+            five = read()[1]
+        except OSError:
+            return
+        if five < cpus or clock() - started >= LOAD_WAIT_SECONDS:
+            return
+        if said is None or clock() - said >= LOAD_EVENT_SECONDS:
+            said = clock()
+            runtime.event("controller", "running", f"waiting for a quieter host: load average {five:.1f} on {cpus} CPUs")
+        sleep(LOAD_POLL_SECONDS)
+
+
 def advance_failed_checks(runtime, state) -> bool:
     """Retry only recorded failing verification packets, and attempts `retry` raised, never launches or review. A check killed
-    for memory is rerun once the machine has memory again (wait_for_memory), without spending the attempt budget. An attempt
-    that failed on a full disk (repair.disk_packet), and a raised attempt whose step failed with errno 28, are rerun once the
-    disk floors hold again (wait_for_disk); a full-disk packet spends no attempt either. A packet whose checks were killed
-    both for memory and out of disk waits on both."""
-    from .checks import TRANSIENT_KINDS
-    from .repair import disk_full_error, disk_packet, transient_packet
+    for memory is rerun once the machine has memory again (wait_for_memory), and one that timed out under host load once the host
+    is quieter (wait_for_quiet), without spending the attempt budget. An attempt that failed on a full disk (repair.disk_packet),
+    and a raised attempt whose step failed with errno 28, are rerun once the disk floors hold again (wait_for_disk); a full-disk
+    packet spends no attempt either. A packet whose checks recorded several kinds (repair.transient_kinds) waits on each:
+    memory, then load, then disk."""
+    from .repair import disk_full_error, disk_packet, transient_kinds
     retries = check_retries(runtime, state)
     if retries is None:
         return False
     targets, requested = retries
     packet = lambda phase, node: runtime.directory / "verification" / phase / node / str(runtime.attempt(phase, node)) / "packet.json"
-    mixed = [f"{phase}/{node}" for phase, node in targets if transient_packet(packet(phase, node), TRANSIENT_KINDS)
-             and not transient_packet(packet(phase, node)) and not transient_packet(packet(phase, node), ("disk",))]
-    killed = [f"{phase}/{node}" for phase, node in targets if transient_packet(packet(phase, node))] + mixed
+    kinds = [(f"{phase}/{node}", transient_kinds(packet(phase, node))) for phase, node in targets]
+    killed = [name for name, found in kinds if "memory" in found]
+    loaded = [name for name, found in kinds if "load" in found]
     if killed:
         runtime.event("controller", "running", f"{', '.join(killed)} killed under memory pressure: transient, rerun without spending an attempt")
         wait_for_memory(runtime)
+    if loaded:
+        runtime.event("controller", "running", f"{', '.join(loaded)} timed out under host load: transient, rerun without spending an attempt")
+        wait_for_quiet(runtime)
     errors = {task.name: task.error for task in state.tasks if task.error and task.name in state.next}
-    full = mixed + [f"{phase}/{node}" for phase, node in targets if f"{phase}/{node}" not in killed and disk_packet(packet(phase, node))]
+    full = [name for (name, found), (phase, node) in zip(kinds, targets) if "disk" in found or not found and disk_packet(packet(phase, node))]
     full += [key.replace(":", "/") for key in requested
              if disk_full_error(errors.get("candidate" if key.startswith("candidate:") else f"verify_{key.split(':', 1)[1]}"))]
     if full:
@@ -2034,7 +2071,7 @@ def advance_failed_checks(runtime, state) -> bool:
 
 def blocked_lanes(runtime, phase: str, nodes: list[str]) -> list[tuple[str, Path]] | None:
     """The lanes of `nodes` whose packet at their current attempt is blocked, with the packet; None when one has no verdict yet
-    (an interrupted check, a raised attempt) or was transient (killed for memory, a full disk): those are the retry path's."""
+    (an interrupted check, a raised attempt) or was transient (memory, load, a full disk): those are the retry path's."""
     from .repair import transient_attempt
     found = []
     for node in nodes:
@@ -2079,9 +2116,18 @@ def finding_lines(findings: list[dict]) -> list[str]:
     return [f"{finding.get('severity')} ({finding.get('reviewer') or 'reviewer'}): {finding.get('message')}" for finding in findings]
 
 
-def review_block(runtime, state) -> tuple[str | None, list[dict]] | None:
-    """A review node that failed on its recorded block, every reviewer stopped: (the one lane every open P0/P1 names, or None
-    when a finding names none, several or no lane, or none blocks; the open P0/P1 findings). None for any other review failure."""
+def finding_lane(runtime, finding: dict) -> str | None:
+    """The lane a blocking review finding belongs to: its `worker` when that is a lane of this run, else None (`multiple`,
+    `none`, anything else). The one place the fix loop reads a finding's lane, so findings that carry it elsewhere (a judge's
+    merged ruling) are mapped here."""
+    lane = finding.get("worker") if isinstance(finding, dict) else None
+    return lane if lane in lanes(runtime) else None
+
+
+def review_block(runtime, state) -> tuple[list[str] | None, list[dict]] | None:
+    """A review node that failed on its recorded block, every reviewer stopped: (the lanes the open P0/P1 name, in the run's
+    lane order, or None when one names no lane of the run or none blocks; the open P0/P1 findings). None for any other review
+    failure. The findings are review.json's blocking ones, whichever reviewer recorded them."""
     if [task.name for task in state.tasks if task.error and task.name in state.next] != ["review"]:
         return None
     directory = runtime.directory
@@ -2094,9 +2140,8 @@ def review_block(runtime, state) -> tuple[str | None, list[dict]] | None:
     if combined.get("transport", "native") == "native" and not all(reviewer_stopped(runtime, rid) for rid in reviewer_ids(runtime.plan)):
         return None  # A reviewer stop still owed is the review node's to retry.
     findings = open_blockers(review)
-    named = {finding.get("worker") for finding in findings}
-    lane = next(iter(named)) if findings and len(named) == 1 and next(iter(named)) in lanes(runtime) else None
-    return lane, findings
+    named = [finding_lane(runtime, finding) for finding in findings]
+    return (None if not findings or None in named else [lane for lane in lanes(runtime) if lane in named]), findings
 
 
 def pending_review_round(runtime) -> dict | None:
@@ -2146,9 +2191,10 @@ def archive_review(runtime, k: int) -> None:
         git_worktree(runtime.plan["repository"], "remove", "--force", str(worktree))
 
 
-def start_review_round(runtime, lane: str, findings: list[dict]) -> dict:
-    """The review round the fix loop repairs: recorded in review-rounds.json (round, verdict, reviewed candidate, lane, the open
-    P0/P1 findings verbatim, the reviewers' sessions), then archived (archive_review), its review_blocked attention resolved."""
+def start_review_round(runtime, named: list[str], findings: list[dict]) -> dict:
+    """The review round the fix loop repairs: recorded in review-rounds.json (round, verdict, reviewed candidate, its first lane
+    and `lanes`, the open P0/P1 findings verbatim, the reviewers' sessions), then archived (archive_review), its review_blocked
+    attention resolved."""
     directory = runtime.directory
     rounds = review_rounds(directory)
     record = rounds[-1] if rounds and not rounds[-1].get("archived") and not rounds[-1].get("restored_at") else None
@@ -2158,7 +2204,7 @@ def start_review_round(runtime, lane: str, findings: list[dict]) -> dict:
             return record  # Archived by a controller that died before its session launched.
         review, bundle = read_json(directory / "review.json"), read_json(directory / "review-bundle.json")
         k = len(rounds) + 1
-        record = {"round": k, "verdict": review["verdict"], "candidate": bundle["candidate_commit"], "lane": lane, "findings": findings,
+        record = {"round": k, "verdict": review["verdict"], "candidate": bundle["candidate_commit"], "lane": named[0], "lanes": named, "findings": findings,
                   "reviewer_sessions": [entry["session_id"] for entry in review.get("reviewers") or [] if entry.get("session_id")],
                   "archived": False, "started_at": now()}
         save_json(directory / REVIEW_ROUNDS, {"version": "1.0.0", "rounds": rounds + [record]})
@@ -2166,16 +2212,227 @@ def start_review_round(runtime, lane: str, findings: list[dict]) -> dict:
     record["archived"] = True
     save_json(directory / REVIEW_ROUNDS, {"version": "1.0.0", "rounds": [*review_rounds(directory)[:-1], record]})
     attention_record.resolved(directory, "review_blocked", node="review")
-    runtime.event("review", NOTE, f"Review round {record['round']} blocked on lane {lane}: archived as review.round-{record['round']}.json "
-                                  f"and review-round-{record['round']}/; the fix loop repairs {lane}, then fresh reviewers review the new candidate")
+    named = round_lanes(record)
+    which = f"lane {named[0]}" if len(named) == 1 else f"lanes {listing(named)}"
+    repairs = f"{named[0]}," if len(named) == 1 else f"{', then '.join(named)}, each with its own findings,"
+    runtime.event("review", NOTE, f"Review round {record['round']} blocked on {which}: archived as review.round-{record['round']}.json "
+                                  f"and review-round-{record['round']}/; the fix loop repairs {repairs} then fresh reviewers review the new candidate")
     return record
+
+
+def spent(runtime, lane: str) -> bool:
+    """The lane's fix-loop rounds are used, or its last one ended blocked. Lane-review repairs count against `lane_review.rounds`,
+    not `--fix-rounds`: they are left out of the count and the last-blocked test ([O5], [L1](d), [L2](b)), or a lane that used its
+    lane-review round could no longer be repaired when the run's reviewers or its candidate block on it."""
+    from .repair import session_entries
+    sessions = [entry for entry in session_entries(runtime.directory, lane) if entry.get("origin") != "lane-review"]
+    return len(sessions) >= fix_rounds(runtime.plan) or bool(sessions and sessions[-1]["status"] == "blocked")
+
+
+def session_reasons(runtime, entry: dict) -> list[str]:
+    """What a fix-loop session was given, as its lane's exhausted() stop says it: its review findings, its attributed candidate
+    failures, or its packets' gate reasons."""
+    from .repair import attributed_lines
+    brief = entry.get("brief") or {}
+    if brief.get("findings") is not None:
+        return finding_lines(brief["findings"])
+    if entry.get("attributed") is not None:
+        return attributed_lines(entry["attributed"])
+    return [reason for packet in entry["blocked"]["packets"] for reason in packet["reasons"]]
+
+
+# A `path:line` a finding's message names, such as `server/projects.ts:1927` or `StepChart.tsx:305-307`.
+CITED = re.compile(r"(?<![\w./-])((?:[\w.-]+/)*[\w.-]+\.[A-Za-z]{1,5}):(\d+)")
+
+
+def finding_marks(finding: dict) -> set[str]:
+    """What makes two blocking findings of different review rounds the same one (no_progress): the message, or a `title` when a
+    reviewer gives one, with spacing and case folded; each `path:line` the message names, or the finding's own `file` and `line`."""
+    marks = {"says:" + " ".join(str(text).split()).lower() for text in (finding.get("message"), finding.get("title")) if text}
+    marks |= {f"at:{path}:{line}" for path, line in CITED.findall(str(finding.get("message") or ""))}
+    if isinstance(finding.get("file"), str) and type(finding.get("line")) is int:
+        marks.add(f"at:{finding['file']}:{finding['line']}")
+    return marks
+
+
+def no_progress(runtime, findings: list[dict]) -> None:
+    """The fix loop's stop when a review round did not help (RUNBOOK "In-run fix loop"), raised before anything is archived so
+    review.json stays the record: RuntimeError when this review's open P0/P1 are not fewer than the archived round's before it,
+    or one comes back on its lane (the same message or title, or the same `path:line`) after that round repaired it. Nothing
+    before a first archived round, or while review-bundle.json is still that round's candidate."""
+    rounds = [record for record in review_rounds(runtime.directory) if record.get("archived") and not record.get("restored_at")]
+    bundle = runtime.directory / "review-bundle.json"
+    if not rounds or not bundle.exists() or read_json(bundle).get("candidate_commit") == rounds[-1]["candidate"]:
+        return
+    previous = rounds[-1]
+    back = [finding for finding in findings if any(finding_lane(runtime, finding) == finding_lane(runtime, old)
+                                                    and finding_marks(finding) & finding_marks(old) for old in previous["findings"])]
+    if back:
+        why = f"{len(back)} came back after review round {previous['round']} repaired {'it' if len(back) == 1 else 'them'}"
+    elif len(findings) >= len(previous["findings"]):
+        why = f"{len(findings)} open P0/P1 after review round {previous['round']} had {len(previous['findings'])}"
+    else:
+        return
+    raise RuntimeError(f"fix loop stopped, no progress: {why}: {'; '.join(finding_lines(back or findings)).rstrip('.')}. "
+                       f"A hand fix: python -m workflow brief {shlex.quote(str(runtime.directory))} and a --follows run")
+
+
+def failing_specs(report: Path, cwd: str | None) -> list[dict] | None:
+    """The failed tests of a Playwright JSON report, `{file, line, title}` each, the spec file relative to the repository: the
+    report's files are relative to its config.rootDir, inside the check's working directory (the attempt's worktree). None when
+    the report cannot be read or its rootDir lies outside `cwd`."""
+    found = []
+    def walk(suite):
+        for spec in suite.get("specs", []):
+            if any(test.get("status") not in ("expected", "skipped") for test in spec.get("tests", [])):
+                found.append({"file": (root / spec["file"]).as_posix(), "line": spec.get("line"), "title": spec.get("title")})
+        for child in suite.get("suites", []):
+            walk(child)
+    try:
+        data = json.loads(report.read_text())
+        root = Path(data["config"]["rootDir"]).relative_to(cwd)
+        walk(data)
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return None
+    return found
+
+
+def candidate_attribution(runtime, node: str, path: Path) -> dict[str, list[dict]] | None:
+    """Whose a blocked candidate packet's failures are: each failed test of a browser check is the lane's that owns its spec file
+    (repair.lane_owner), any other failing check is the packet's own lane's. None when that is unclear: a failed browser check
+    whose report names no failed test, a failing spec no lane of this run owns, or no failing check at all."""
+    from .repair import lane_owner
+    packet = read_json(path)
+    reused = packet.get("reused_from")
+    folder = (runtime.directory / reused["path"]).parent if isinstance(reused, dict) and reused.get("path") else path.parent
+    executions = packet.get("result", {}).get("checks", [])
+    reasons = " ".join(packet["gate"]["reasons"])
+    owners: dict[str, list[dict]] = {}
+    for index, check in enumerate(runtime.worker_policy(node)["checks"]):
+        ran = executions[index] if index < len(executions) else {}
+        if ran.get("exit_code", 0) == 0 and f"{check['id']}:" not in reasons and f"{check['id']}/" not in reasons:
+            continue
+        if check["kind"] != "browser":
+            owners.setdefault(node, []).append({"check": check["id"]})
+            continue
+        specs = failing_specs(folder / f"browser-report-{index}.json", ran.get("cwd"))
+        if not specs:
+            return None
+        for spec in specs:
+            owner = lane_owner(runtime, spec["file"])
+            if owner not in lanes(runtime):
+                return None
+            owners.setdefault(owner, []).append({"check": check["id"], **spec})
+    return owners or None
+
+
+def candidate_chain(runtime, found: list[tuple[str, Path]]) -> dict[str, list[dict] | None] | None:
+    """The lanes a candidate block repairs, in the run's lane order, each with its attributed failures (candidate_attribution).
+    `{lane: None}`, that lane's round as before, when one lane's packet blocked and its failures are its own or unclear; None,
+    the run's stop as before, when several lanes' packets blocked and one is unclear."""
+    chain: dict[str, list[dict]] = {}
+    for node, path in found:
+        parts = candidate_attribution(runtime, node, path)
+        if parts is None:
+            return {node: None} if len(found) == 1 else None
+        for lane, items in parts.items():
+            chain.setdefault(lane, []).extend(items)
+    if len(found) == 1 and list(chain) == [found[0][0]]:
+        return {found[0][0]: None}
+    return {lane: chain[lane] for lane in lanes(runtime) if lane in chain} or None
+
+
+def chain_lanes(entries: list[dict], last: dict) -> list[str]:
+    """The lanes a fix-loop round on several lanes repaired so far: `last`'s, then each repair it followed (`after_repair`)."""
+    by_n = {entry["n"]: entry for entry in entries}
+    done, entry = [], last
+    while entry is not None:
+        done.append(next(iter(entry["lanes"])))
+        entry = by_n.get(entry.get("after_repair"))
+    return done
+
+
+def chain_head(runtime, state, n: int) -> bool:
+    """Repair `n` is the latest applied and still the run's head: nothing has run or failed from its fork."""
+    from .repair import applied_repairs
+    applied = applied_repairs(runtime.directory)
+    return (bool(applied) and applied[-1]["n"] == n and state.config["configurable"]["checkpoint_id"] == applied[-1]["head_after"]
+            and not any(task.error for task in state.tasks))
+
+
+def chain_next(runtime, state) -> tuple[dict, str] | None:
+    """Between two lanes of a fix-loop round on several lanes: (the round's last applied repair session, the next lane), while
+    that repair is the run's head. A controller that stopped there goes on with the next lane, never with the run."""
+    from .repair import session_entries
+    entries = session_entries(runtime.directory)
+    last = entries[-1] if entries else None
+    if last is None or last.get("by") != "controller" or last["status"] != "applied" or len(last.get("chain") or []) < 2:
+        return None
+    left = [lane for lane in last["chain"] if lane not in chain_lanes(entries, last)]
+    return (last, left[0]) if left and chain_head(runtime, state, last["n"]) else None
+
+
+def chain_stopped(runtime, state) -> dict | None:
+    """A later lane of a fix-loop round on several lanes whose session ended blocked while the lane before it is still the run's
+    head: the run stops there (fix_decision), whichever controller asks."""
+    from .repair import session_entries
+    entries = session_entries(runtime.directory)
+    last = entries[-1] if entries else None
+    if last is None or last.get("by") != "controller" or last["status"] != "blocked" or not last.get("after_repair"):
+        return None
+    return last if chain_head(runtime, state, last["after_repair"]) else None
+
+
+def chain_open(runtime, state) -> bool:
+    """A fix-loop round on several lanes the run must not continue past: a next lane to repair, or a later lane that ended blocked."""
+    return chain_next(runtime, state) is not None or chain_stopped(runtime, state) is not None
+
+
+def make_room(runtime, named: list[str]) -> None:
+    """A round on several lanes starts only when the run's repair cap leaves one repair per lane: ValueError, a refused round,
+    before anything is archived or launched."""
+    from . import repair
+    applied = len(repair.applied_repairs(runtime.directory))
+    if len(named) > 1 and applied + len(named) > repair.MAX_REPAIRS:
+        raise ValueError(f"{applied} repairs are already applied to this run (at most {repair.MAX_REPAIRS}) and this round repairs "
+                         f"{len(named)} lanes")
+
+
+def review_keys(runtime, record: dict, lane: str) -> dict:
+    """A review round's session keys for `lane`: its own share of the round's findings, the round, the diff the reviewers read
+    and, on several lanes, the round's lanes."""
+    k, named = record["round"], round_lanes(record)
+    delta = runtime.directory / f"review.delta.round-{k}.diff"
+    return {"findings": [finding for finding in record["findings"] if finding_lane(runtime, finding) == lane], "review_round": k,
+            "delta": delta if delta.exists() else runtime.directory / f"review.round-{k}.diff", **({"chain": named} if len(named) > 1 else {})}
+
+
+def candidate_keys(runtime, lane: str) -> dict:
+    """A candidate round's session keys for its first lane: none for the blocked lane's own round, as before; else its
+    attributed failures and, on several lanes, the round's lanes (candidate_chain)."""
+    chain = candidate_chain(runtime, blocked_lanes(runtime, "candidate", lanes(runtime)) or [])
+    if not chain or chain.get(lane) is None:
+        return {}
+    make_room(runtime, list(chain))
+    return {**({"chain": list(chain)} if len(chain) > 1 else {}), "attributed": chain[lane]}
+
+
+def link_keys(runtime, previous: dict, lane: str) -> dict:
+    """The session keys of a round's next lane: the repair it follows, the round's lanes and its own share of the round."""
+    keys = {"after": previous, "chain": previous["chain"]}
+    if previous["trigger"] == "review":
+        record = next(record for record in review_rounds(runtime.directory) if record["round"] == previous["review_round"])
+        return {**review_keys(runtime, record, lane), **keys}
+    chain = candidate_chain(runtime, [(packet["node_id"], runtime.directory / packet["path"]) for packet in previous["blocked"]["packets"]])
+    return {**keys, "attributed": (chain or {}).get(lane) or []}
 
 
 def fix_decision(runtime, state) -> tuple[str, str] | None:
     """The in-run fix loop's decision, read only: `(lane, trigger)` when a repair session repairs that lane now (the one the
-    journal has open first); None when the loop does not apply (no rounds pinned, a step it does not repair, a memory kill or
-    an unverified check, which retry, a candidate block that names no single lane). RuntimeError (exhausted) once the lane
-    blocked again after its rounds, or its last round ended blocked."""
+    journal has open first, then a round's next lane); None when the loop does not apply (no rounds pinned, a step it does not
+    repair, a memory kill or an unverified check, which retry, a review finding on no lane of the run, a candidate block on
+    several lanes it cannot attribute). RuntimeError (exhausted) once a lane it would repair blocked again after its rounds, or
+    its last round ended blocked; RuntimeError (no progress) when a review round did not help (no_progress)."""
     from .attack import has_attack
     from .repair import open_session, session_entries
     rounds = fix_rounds(runtime.plan)
@@ -2187,27 +2444,31 @@ def fix_decision(runtime, state) -> tuple[str, str] | None:
     pending = pending_review_round(runtime)
     if pending is not None:
         return pending["lane"], "review"  # A round archived by a controller that died before its session launched.
+    link = chain_next(runtime, state)
+    if link is not None:
+        return link[1], link[0]["trigger"]  # A round on several lanes, between two of them.
+    stopped = chain_stopped(runtime, state)
+    if stopped is not None:
+        raise exhausted(runtime, next(iter(stopped["lanes"])), session_reasons(runtime, stopped), stopped["trigger"])
     previous = review_rounds(runtime.directory)
     failed = [task.name for task in state.tasks if task.error and task.name in state.next]
     sessions = [entry for entry in session_entries(runtime.directory) if previous and entry.get("review_round") == previous[-1]["round"]]
     if failed == ["review"] and sessions and sessions[-1]["status"] == "blocked" and not (runtime.directory / "review.json").exists():
         # The round's review is archived and its repair session ended without a repair: never a second review of that candidate.
-        raise exhausted(runtime, previous[-1]["lane"], finding_lines(previous[-1]["findings"]), "review")
+        raise exhausted(runtime, next(iter(sessions[-1]["lanes"])), session_reasons(runtime, sessions[-1]), "review")
     block = review_block(runtime, state)
     if block is not None:
         from .critique import has_critique
-        lane, findings = block
-        # Findings on no single lane end the run as before. An attack-only plan is not looped (PRD_ATTACK_PASS); a plan with
+        named, findings = block
+        # Findings on no lane of the run end the run as before. An attack-only plan is not looped (PRD_ATTACK_PASS); a plan with
         # critique (attack and critique together included) loops, so a critique P1 repairs its lane (PRD_USER_CRITIQUE 4.6).
-        if lane is None or (has_attack(runtime.plan) and not has_critique(runtime.plan)):
+        if named is None or (has_attack(runtime.plan) and not has_critique(runtime.plan)):
             return None
-        # Lane-review repairs count against `lane_review.rounds`, not `--fix-rounds`: leave them out of the ordinary count and
-        # the last-blocked test here too, as the verify branch does ([O5], [L1](d), [L2](b)). Otherwise a lane that used its
-        # lane-review round can no longer be repaired when the run's reviewers block on it.
-        sessions = [entry for entry in session_entries(runtime.directory, lane) if entry.get("origin") != "lane-review"]
-        if len(sessions) >= rounds or (sessions and sessions[-1]["status"] == "blocked"):
-            raise exhausted(runtime, lane, finding_lines(findings), "review")
-        return lane, "review"
+        no_progress(runtime, findings)
+        for lane in named:  # Every lane the round repairs has a round left, or none is repaired.
+            if spent(runtime, lane):
+                raise exhausted(runtime, lane, finding_lines([finding for finding in findings if finding_lane(runtime, finding) == lane]), "review")
+        return named[0], "review"
     workers = lanes(runtime)
     failures = [task.name for task in state.tasks if task.error and task.name in state.next]
     if not failures or (runtime.directory / RETRY_REQUESTS).exists():
@@ -2218,16 +2479,24 @@ def fix_decision(runtime, state) -> tuple[str, str] | None:
         trigger, found = "verify", blocked_lanes(runtime, "worker", [node for node in workers if f"verify_{node}" in failures])
     else:
         return None
-    if not found or (trigger == "candidate" and len(found) != 1):
+    if not found:
         return None
+    if trigger == "candidate":
+        from .repair import attributed_lines
+        chain = candidate_chain(runtime, found)
+        if chain is None:
+            return None
+        for lane, items in chain.items():
+            if spent(runtime, lane):
+                raise exhausted(runtime, lane, gate_reasons(found[0][1]) if items is None else attributed_lines(items))
+        return next(iter(chain)), trigger
     lane, path = found[0]
     from . import lane_review
-    if trigger == "verify" and lane_review.is_lane_review_block(read_json(path)):
+    if lane_review.is_lane_review_block(read_json(path)):
         # gate_allowed already ensured the lane has a lane-review round left and the repair cap leaves room; fix_round applies
         # lane_review.rounds and records origin "lane-review" (decisions.md [L3](c)). Never the ordinary exhausted test.
         return lane, trigger
-    sessions = [entry for entry in session_entries(runtime.directory, lane) if entry.get("origin") != "lane-review"]
-    if len(sessions) >= rounds or (sessions and sessions[-1]["status"] == "blocked"):
+    if spent(runtime, lane):
         raise exhausted(runtime, lane, gate_reasons(path))
     return lane, trigger
 
@@ -2235,7 +2504,10 @@ def fix_decision(runtime, state) -> tuple[str, str] | None:
 def fix_round(runtime, graph, config, lane: str, trigger: str) -> bool:
     """One controller round of the fix loop (repair.repair_session, `by: controller`): True once its repair is applied and
     the run forked at the freeze boundary; RuntimeError (exhausted) when it ended blocked or could not start. A review round
-    is archived only after the round's refusals passed (repair.session_refusals), and restored whenever no repair applies."""
+    is archived only after the round's refusals passed (repair.session_refusals), and restored whenever no repair applies.
+    A round on several lanes repairs them in turn before the run continues: each next lane's session works on the lane before's
+    captured fix and forks from its fork (chain_next, link_keys); a later lane that ends blocked or cannot start stops the run
+    with the round left archived, since the lanes before it are applied."""
     from . import lane_review
     from .repair import open_session, repair_session, session_refusals
     # feature.json 2.10.0: a verify block the lane review wrote is repaired with origin "lane-review"; a refusal or a blocked
@@ -2255,20 +2527,28 @@ def fix_round(runtime, graph, config, lane: str, trigger: str) -> bool:
                     origin, snapshot = "lane-review", packet["expected"]["output_commit"]
     if origin == "lane-review":
         return _lane_review_round(runtime, graph, config, lane, snapshot)
-    keys, archived = {}, False
+    keys, archived, link = {}, False, None
     try:
-        if trigger == "review" and open_session(runtime.directory) is None:
-            session_refusals(runtime, graph, config)  # A fourth repair, a moved source: refused before anything is archived.
-            block = review_block(runtime, graph.get_state(config))
-            pending = pending_review_round(runtime)
-            findings = block[1] if block else pending["findings"]
-            archived = True
-            record = start_review_round(runtime, lane, findings)
-            delta = runtime.directory / f"review.delta.round-{record['round']}.diff"
-            keys = {"findings": record["findings"], "review_round": record["round"],
-                    "delta": delta if delta.exists() else runtime.directory / f"review.round-{record['round']}.diff"}
+        if open_session(runtime.directory) is None:
+            link = chain_next(runtime, graph.get_state(config))
+            if link is not None:
+                keys = link_keys(runtime, *link)
+            elif trigger == "review":
+                session_refusals(runtime, graph, config)  # A fourth repair, a moved source: refused before anything is archived.
+                block = review_block(runtime, graph.get_state(config))
+                pending = pending_review_round(runtime)
+                named, findings = block if block else (round_lanes(pending), pending["findings"])
+                make_room(runtime, named)
+                archived = True
+                keys = review_keys(runtime, start_review_round(runtime, named, findings), lane)
+            elif trigger == "candidate":
+                keys = candidate_keys(runtime, lane)
         entry = repair_session(runtime, graph, config, lane, actor="controller", trigger=trigger, **keys)
     except ValueError as error:  # A state the round refuses (the repair limit, a run that moved): no session ran.
+        if link is not None:
+            from .repair import attributed_lines
+            given = finding_lines(keys["findings"]) if keys.get("findings") is not None else attributed_lines(keys.get("attributed") or [])
+            raise exhausted(runtime, lane, given + [f"the round could not start: {error}"], trigger) from error
         if trigger != "review":
             raise exhausted(runtime, lane, [str(error)]) from error
         rounds = review_rounds(runtime.directory)
@@ -2277,12 +2557,15 @@ def fix_round(runtime, graph, config, lane: str, trigger: str) -> bool:
         findings = rounds[-1]["findings"] if archived and rounds else (review_block(runtime, graph.get_state(config)) or (None, []))[1]
         raise exhausted(runtime, lane, finding_lines(findings) + [f"the round could not start: {error}"], "review") from error
     if entry["status"] != "applied":
+        if entry.get("after_repair"):
+            raise exhausted(runtime, lane, session_reasons(runtime, entry), trigger)
         if trigger == "review":
-            rounds = unarchive_round(runtime)
-            raise exhausted(runtime, lane, finding_lines(rounds[-1]["findings"]), "review")
+            unarchive_round(runtime)
+            raise exhausted(runtime, lane, session_reasons(runtime, entry), "review")
         path = entry["blocked"]["packets"][0]["path"] if entry.get("blocked", {}).get("packets") else None
         raise exhausted(runtime, lane, gate_reasons(runtime.directory / path) if path else [])
-    return True
+    link = chain_next(runtime, graph.get_state(config))
+    return fix_round(runtime, graph, config, link[1], link[0]["trigger"]) if link is not None else True
 
 
 def _lane_review_round(runtime, graph, config, lane: str, snapshot: str) -> bool:
@@ -2725,7 +3008,7 @@ def final_stop(runtime, state) -> tuple[str, bool] | None:
         return None
     if pending:
         return MANUAL_GATE, False
-    if not any(task.error for task in state.tasks):
+    if not any(task.error for task in state.tasks) and not chain_open(runtime, state):
         return None
     try:
         if fix_decision(runtime, state) is not None or check_retries(runtime, state) is not None:
@@ -2859,7 +3142,7 @@ def drive(runtime, *, single_step=False) -> str | None:
                 value = Command(resume={"freeze": True})
             elif pending:
                 raise stop_error(runtime, MANUAL_GATE)
-            elif controller_session_open(runtime):
+            elif controller_session_open(runtime) or chain_open(runtime, state):
                 advance_or_block(runtime, state, graph, config)  # A round a controller left: finished first, whatever the head shows.
             elif any(task.error for task in state.tasks) and not (advance_or_block(runtime, state, graph, config) or reviewer_stop_pending(runtime, state)
                                                                   or resume_interrupted_review(runtime, state)):
