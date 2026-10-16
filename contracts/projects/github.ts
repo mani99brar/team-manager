@@ -14,9 +14,12 @@ import { z } from 'zod'
  * **Actions** (`runGithubActionsSchema`, 1.0.0): mounted in the run-control scope (`/api/run-controls/:project_id/:workflow_id/
  * :run_id/github`), so every route inherits its browser guards and pairing token (docs/PRD_RUN_CONTROLS.md 5.2). Five actions on
  * the repository, never on the run: push the run branch (never forced, never the default branch), open a draft pull request,
- * mark it ready for review, request reviewers (users or `org/team`), and comment the run summary. Each is a fixed git or gh argv
- * run without a shell; each publishes something, so each states what becomes visible, and an action on a PUBLIC repository is
- * confirmed by typing the repository's `owner/name`. `MD_MANAGER_GITHUB_ACTIONS=off` turns them all off.
+ * mark it ready for review, request reviewers (users or `org/team`), and comment the run summary. As every run control, each
+ * maps to one fixed controller argv, `python -m workflow github <action> <run> ... --by operator` (PRD_RUN_CONTROLS principle
+ * 1); the controller checks the branch and sha again and runs git or gh without a shell. Each publishes something, so each
+ * states what becomes visible, and an action on a PUBLIC repository (or one whose visibility is unknown) is confirmed by typing
+ * the repository's `owner/name`. They are off unless the dashboard runs with `MD_MANAGER_GITHUB_ACTIONS=on` and run controls on;
+ * off, every action is unavailable with that reason and the GitHub view shows the commands to run by hand.
  *
  * This module imports only zod.
  */
@@ -193,7 +196,7 @@ export const githubActionSchema = z.strictObject({
   label: z.string().min(1),
   available: z.boolean(),
   reason: z.string().min(1).nullable(),
-  /** The exact command, redacted (home as `~`), with the server-filled values; params the operator types appear as `<title>`. */
+  /** The exact controller command, redacted (home as `~`), with the server-filled values; typed params appear as `<title>`. */
   command: z.string().min(1),
   confirm: z.enum(['plain', 'typed_repo']),
   params: z.array(githubParamSpecSchema),
@@ -229,7 +232,7 @@ export const githubActionRecordSchema = z.strictObject({
 
 export const runGithubActionsSchema = z.strictObject({
   version: z.literal(GITHUB_ACTIONS_VERSION),
-  /** False when `MD_MANAGER_GITHUB_ACTIONS=off`; every action is then unavailable with that reason. */
+  /** False unless the dashboard runs with `MD_MANAGER_GITHUB_ACTIONS=on`; every action is then unavailable with that reason. */
   enabled: z.boolean(),
   /** A digest of the facts the offers were computed from (branch shas, pull request state); a stale one is 409 STATE_CHANGED. */
   state_token: z.string().min(1).max(128),
