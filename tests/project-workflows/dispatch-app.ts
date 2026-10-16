@@ -62,6 +62,8 @@ function prepareRoot(): Record<string, string> {
     MD_MANAGER_PROJECTS_CONFIG: projectsConfig,
     MD_MANAGER_GITHUB_FIXTURE: join(root, 'projects', 'github-fixture.json'),
     MD_MANAGER_GITHUB_CACHE: join(root, 'projects', 'github-cache.json'),
+    // The teams reader reads a folder under the test root, never the operator's ~/.claude.
+    MD_MANAGER_CLAUDE_HOME: join(root, 'claude-home'),
   }
 }
 

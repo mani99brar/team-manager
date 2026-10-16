@@ -58,6 +58,8 @@ function prepareRoot(): Record<string, string> {
     MD_MANAGER_PROJECTS_CONFIG: projectsConfig,
     // The sessions seed wrote the night-shift records here, as playwright.config.ts points the browser server.
     MD_MANAGER_NIGHT_SHIFT_DIR: join(root, 'projects', 'night-shift'),
+    // The teams reader reads a folder under the test root, never the operator's ~/.claude.
+    MD_MANAGER_CLAUDE_HOME: join(root, 'claude-home'),
   }
 }
 

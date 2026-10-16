@@ -18,6 +18,8 @@ import { ID_PATTERN, publishDefinition, storedDefinitionSchema, type ProjectConf
 import { nightShiftDir, readNightShift } from './nightShift.ts'
 import { panelNodeStatus, projectSessionNodes, readLaneReviewFacts, readReviewerReceipts, readSessions, type ProjectedNode, type SessionNodeInput, type SessionsInput } from './sessions.ts'
 import type { Sessions } from '../contracts/projects/sessions.ts'
+import type { Teams } from '../contracts/projects/teams.ts'
+import { TeamReader, readSessionWorktrees, teamSessionRows } from './teams.ts'
 
 /**
  * Read-only access to persisted workflow runs. A run is a directory below a registered workflow's `runs_root`
@@ -1008,6 +1010,14 @@ export type RunStoreOptions = {
   /** The home directory a served `run_dir` is relative to; defaults to the server's `$HOME`. */
   home?: string
   /**
+   * Claude Code's config folder the teams route reads (`<claudeHome>/projects`, docs/PRD_RUN_TEAMS.md "Team reader");
+   * `server/index.ts` resolves it with `claudeHomeOf` (`MD_MANAGER_CLAUDE_HOME`, `CLAUDE_CONFIG_DIR`, `~/.claude`). Defaults to
+   * `<home>/.claude`.
+   */
+  claudeHome?: string
+  /** The teams reader's clock (epoch milliseconds); tests pin it. */
+  teamsNow?: () => number
+  /**
    * Whether `listRuns` keeps each run's summary between calls, keyed by the names, sizes and times of the files in its
    * directory (the export and the live files the activity reads are among them), so a list that is polled every few
    * seconds re-projects only the runs whose files changed. The controller's liveness is read afresh on every call. On by
@@ -1036,7 +1046,9 @@ export class RunStore {
   private current: ProjectsConfig
   private projectsById = new Map<string, ProjectConfig>()
   private syncing: Promise<void> | null = null
-  private readonly options: Required<Omit<RunStoreOptions, 'warn' | 'refresh'>> & Pick<RunStoreOptions, 'warn' | 'refresh'>
+  private readonly options: Required<Omit<RunStoreOptions, 'warn' | 'refresh' | 'claudeHome' | 'teamsNow'>> & Pick<RunStoreOptions, 'warn' | 'refresh'>
+  /** Reads Claude Code's workflow records for the teams route; keeps its folder index and transcript facts between requests. */
+  private readonly teamReader: TeamReader
   /** Run summaries by `<project>/<workflow>/<run>` (see `RunStoreOptions.summaryCache`). */
   private readonly summaries = new Map<string, CachedSummary>()
 
@@ -1053,6 +1065,7 @@ export class RunStore {
       warn: options.warn,
       refresh: options.refresh,
     }
+    this.teamReader = new TeamReader({ claudeHome: options.claudeHome ?? join(this.options.home, '.claude'), now: options.teamsNow })
   }
 
   get config(): ProjectsConfig {
@@ -1418,6 +1431,26 @@ export class RunStore {
         await directory.close()
       }
     })
+  }
+
+  /**
+   * The agent teams of the run's Claude sessions (docs/PRD_RUN_TEAMS.md "Team reader", contract `teams` 1.0.0): the sessions
+   * payload's Claude rows with their worktrees from the run directory, read against Claude Code's records by `server/teams.ts`.
+   * An unknown run is a 404 (from the sessions read); an unreadable session folder is a row's `records: 'unreadable'`.
+   */
+  async teams(scope: Scope, runId: string): Promise<Teams> {
+    const sessions = await this.sessions(scope, runId)
+    const rows = teamSessionRows(sessions.sessions)
+    const worktrees = await this.withRunsRoot(scope, async root => {
+      const directory = await openDirectory(root, runId)
+      if (!directory) throw new ProjectApiError(404, 'RUN_NOT_FOUND', 'No run with that ID exists in this workflow.')
+      try {
+        return await readSessionWorktrees(directory, rows)
+      } finally {
+        await directory.close()
+      }
+    })
+    return this.teamReader.read({ runId, rows, worktrees })
   }
 
   /**

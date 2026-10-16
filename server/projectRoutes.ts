@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyReply } from 'fastify'
 import { z } from 'zod'
 import { schemas, servedReviewContext, validateAttackResult, validatePanelResults, validateReviewResult, validateRunInputs, validateSidecarLedger } from '../contracts/projects/v1.ts'
 import { validateSessions } from '../contracts/projects/sessions.ts'
+import { validateTeams } from '../contracts/projects/teams.ts'
 import { eventSchema, workerResultSchema } from '../contracts/workflow/v1.ts'
 import { ID_PATTERN } from './projectsConfig.ts'
 import { DEFAULT_RUN_LIMIT, MAX_RUN_LIMIT, ProjectApiError, RunStore, compareRuns, decodeCursor, encodeCursor } from './projects.ts'
@@ -116,6 +117,7 @@ export async function projectRoutes(scope: FastifyInstance, options: ProjectRout
     attack: '/:project_id/workflows/:workflow_id/runs/:run_id/attack',
     panels: '/:project_id/workflows/:workflow_id/runs/:run_id/panels',
     sessions: '/:project_id/workflows/:workflow_id/runs/:run_id/sessions',
+    teams: '/:project_id/workflows/:workflow_id/runs/:run_id/teams',
   }
   for (const url of Object.values(paths)) {
     scope.route({
@@ -210,6 +212,13 @@ export async function projectRoutes(scope: FastifyInstance, options: ProjectRout
     const params = request.params as Params
     const sessions = await store.sessions(scopeOf(params), requireId(params.run_id, 'run'))
     return conform(schemas.sessions, crossChecked(() => validateSessions(sessions), log), log)
+  })
+
+  // docs/PRD_RUN_TEAMS.md "Team reader": the Workflow-tool teams of the run's Claude sessions, metadata only.
+  scope.get(paths.teams, async request => {
+    const params = request.params as Params
+    const teams = await store.teams(scopeOf(params), requireId(params.run_id, 'run'))
+    return conform(schemas.teams, crossChecked(() => validateTeams(teams), log), log)
   })
 
   scope.get(paths.artifact, async (request, reply) => {

@@ -1,9 +1,11 @@
+import { homedir } from 'node:os'
 import { createApp, type LocationStatus } from './app.ts'
 import { loadControlsConfig } from './controlsGuard.ts'
 import { ConfigError, loadConfig, type AppConfig } from './config.ts'
 import { ProjectsConfigError, loadProjectsConfig, projectsConfigReloader, type LoadedProjectsConfig } from './projectsConfig.ts'
 import { realGitRunner } from './dispatchGit.ts'
 import { GithubReader, githubReaderOptions } from './dispatchGithub.ts'
+import { claudeHomeOf } from './teams.ts'
 
 // Configuration is read once, before anything listens. A missing or invalid config is a startup failure
 // with a local diagnostic (which may name configured paths); there is no fallback to the fixtures.
@@ -45,6 +47,8 @@ const github = new GithubReader(githubReaderOptions(process.env, Date.now))
 const app = createApp(config.locations, {
   controls: { setup: controls }, projects, refreshProjects: projects.configPath === null ? undefined : projectsConfigReloader(projects.configPath),
   dispatch: { gitRunner, github },
+  // The teams route reads Claude Code's records here; tests and both browser harnesses point MD_MANAGER_CLAUDE_HOME at a seeded folder.
+  runStore: { claudeHome: claudeHomeOf(process.env, homedir()) },
 })
 try {
   await app.listen({ port: Number(process.env.MD_MANAGER_API_PORT ?? 3001), host: '127.0.0.1' })

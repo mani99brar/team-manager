@@ -26,7 +26,7 @@ export type AppOptions = {
   /** Re-reads the registry file when it changed (see projectsConfigReloader); omitted means the registry is fixed. */
   refreshProjects?: () => Promise<ProjectsConfig | null>
   /** Read limits for persisted run files; tests lower them to prove reads are bounded. */
-  runStore?: Pick<RunStoreOptions, 'exportByteLimit' | 'packetByteLimit' | 'artifactByteLimit'>
+  runStore?: Pick<RunStoreOptions, 'exportByteLimit' | 'packetByteLimit' | 'artifactByteLimit' | 'claudeHome' | 'teamsNow'>
   /**
    * The run controls (server/controls.ts), from `loadControlsConfig`. Omitted means off: `/api/run-controls/status` answers
    * `enabled: false` and every other control route is a 404 `CONTROLS_DISABLED`. `runner` and `now` are injected by tests.
