@@ -14,7 +14,7 @@ import {
   BLOCKED_FINDINGS, DONE_FINDINGS, REVAMP_NOW, REVAMP_PAGES_WORKFLOW_ID, REVAMP_QUESTION, RUN_REVAMP_BLOCKED, RUN_REVAMP_DONE, RUN_REVAMP_RUNNING,
 } from './fixtures/ux-revamp-pages.ts'
 import { mockResponse } from './mock.ts'
-import { attach, expectNoExecutionControls, graphNode, installHooks, liveDock, nodeDetail, openStepSheet, phase, runUrl, stepSheet, workspace } from './support.ts'
+import { attach, expectNoExecutionControls, graphNode, installHooks, liveDock, nodeDetail, openStepSheet, phase, runUrl, runViewLink, stepSheet, workspace } from './support.ts'
 
 installHooks()
 
@@ -650,7 +650,7 @@ test(`[scenario:findings-first-screen] At 1440x900 the first finding's head sent
   await attach(page, testInfo, 'findings-first-screen')
 })
 
-test(`[scenario:node-compact] Node pages reach their content: no tabs (an Assignment link in the one-line run bar), the step strip the only sticky band, the first finding in the first screen at 1440x900, the worker's figures on one row with the completion as a chip on the report (${phase})`, async ({ page }, testInfo) => {
+test(`[scenario:node-compact] Node pages reach their content: no tabs (the four view links in the one-line run bar), the step strip the only sticky band, the first finding in the first screen at 1440x900, the worker's figures on one row with the completion as a chip on the report (${phase})`, async ({ page }, testInfo) => {
   test.slow()
   await page.clock.install({ time: new Date(REVAMP_NOW) })
   await page.setViewportSize({ width: 1440, height: 900 })
@@ -658,15 +658,16 @@ test(`[scenario:node-compact] Node pages reach their content: no tabs (an Assign
   await expect(nodeDetail(page)).toHaveAttribute('data-node-id', 'review')
   await expect(cards(page)).toHaveCount(1)
 
-  // No tabs on a node page; the run bar carries an Assignment link and stays one line with its status, chip and switch.
+  // No tabs on a node page; the run bar carries the four views as plain links and stays one line with its status, chip and switch.
   await expect(page.getByRole('tablist')).toHaveCount(0)
   await expect(page.getByTestId('tab-run')).toHaveCount(0)
   const bar = page.locator('.run-bar')
   expect((await box(bar)).height).toBeLessThanOrEqual(48)
   for (const id of ['run-status', 'run-status-meaning', 'live-status', 'time-zone-toggle']) await expect(bar.getByTestId(id)).toBeVisible()
-  const assignment = bar.getByTestId('tab-assignment')
+  const assignment = runViewLink(bar, 'assignment')
   await expect(assignment).toHaveText('Assignment')
   await expect(assignment).toHaveAttribute('href', `${revampUrl(RUN_REVAMP_BLOCKED)}/assignment`)
+  await expect(bar.getByTestId('run-view-suffix')).toHaveCount(0)
 
   // Exactly one sticky band: the step strip; the section index scrolls with the page.
   const sticky = await page.locator('[data-testid="run-view"] *').evaluateAll(elements => elements
@@ -693,10 +694,11 @@ test(`[scenario:node-compact] Node pages reach their content: no tabs (an Assign
   await expect(page.getByTestId('worker-completion').locator('.worker-report-head').getByTestId('report-completion')).toHaveText('completed')
   await expect(page.getByTestId('report-completion')).toHaveClass(/\btone-ok\b/)
 
-  // The Assignment link opens the Assignment view, which keeps its tablist.
-  await bar.getByTestId('tab-assignment').click()
+  // The Assignment link opens the Assignment view, which keeps the view switcher on its identity line.
+  await runViewLink(bar, 'assignment').click()
   await expect(page).toHaveURL(new RegExp('/assignment$'))
-  await expect(page.getByRole('tablist', { name: 'Run views' })).toHaveCount(1)
+  await expect(page.getByRole('navigation', { name: 'Run views' })).toHaveCount(1)
+  await expect(runViewLink(page, 'assignment')).toHaveAttribute('aria-current', 'page')
 
   // At 390 px a node page has no tabs and does not scroll sideways.
   await page.setViewportSize({ width: 390, height: 844 })

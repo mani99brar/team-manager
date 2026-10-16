@@ -1,9 +1,9 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import {
   buildTimeline, deriveAttention, deriveNow, nowResultUris, textToString,
   type RunData, type Timeline,
 } from '../../contracts/projects/triage.ts'
-import { fetchAttackResult, fetchEvents, fetchPanelResults, fetchRunInputs, fetchSessions, fetchSidecarLedger, NOT_RECORDED, orNotRecorded, type RunDetail, type RunScope, type WorkflowDefinition } from './api.ts'
+import { fetchAttackResult, fetchEvents, fetchPanelResults, fetchRunGithub, fetchRunInputs, fetchSessions, fetchSidecarLedger, fetchTeams, NOT_RECORDED, orNotRecorded, type RunDetail, type RunScope, type WorkflowDefinition } from './api.ts'
 import { AssignmentPanel } from './Assignment.tsx'
 import { NodeDetail } from './NodeDetail.tsx'
 import { reviewerLead } from './node/model.ts'
@@ -11,8 +11,14 @@ import { isProjectedSessionNode, stageCardOf } from './sessions/model.ts'
 import { AttackPassBody } from './node/AttackSections.tsx'
 import { AppLink, ErrorPanel } from './panels.tsx'
 import { ProviderPanelBody } from './providerPanel.tsx'
-import { assignmentPathname, runPathname } from './routes.ts'
+import { EMPTY_TEAM_QUERY, runPathname, type RunTab, type TeamQuery, type TeamQueryMode } from './routes.ts'
 import { RunBar } from './RunHeader.tsx'
+import { RunViews } from './RunViews.tsx'
+import { GithubView } from './github/GithubView.tsx'
+import { githubSuffix } from './github/model.ts'
+import { GlyphDefs } from './signal/Glyph.tsx'
+import { teamSuffix } from './teams/model.ts'
+import { TeamView } from './teams/TeamView.tsx'
 import { IdentityLine } from './signal/IdentityLine.tsx'
 import { SignalRun } from './signal/SignalRun.tsx'
 import { NightShiftCount, SessionsSection } from './sessions/Sessions.tsx'
@@ -22,11 +28,10 @@ import { stepRows, withoutGlyph } from './steps.ts'
 import { formatAgo, formatClock, formatSpan } from './time.ts'
 import { stateTone, TONE_LABEL, type Tone } from './tone.ts'
 import { useNow, useTimeReference, useTimeZone } from './useNow.ts'
+import { usePoll } from './usePoll.ts'
 import { useResource, type ResourceMeta } from './useResource.ts'
 import { useRunResults, useRunReview } from './useRunData.ts'
 import './run.css'
-
-type Tab = 'run' | 'assignment'
 
 type Props = {
   scope: RunScope
@@ -36,8 +41,12 @@ type Props = {
   selectedNodeId: string | null
   /** The attempt a node page shows, from `/nodes/<n>/attempts/<k>`; null for its latest. */
   selectedAttempt?: number | null
-  /** The run's view, from the path: the Run view (a node page is part of it) or Assignment. */
-  tab: Tab
+  /** The run's view, from the path: the Run view (a node page is part of it), Team, GitHub or Assignment. */
+  tab: RunTab
+  /** The Team view's selection, from the URL's search (docs/PRD_RUN_TEAMS.md 2); absent reads as none selected. */
+  teamQuery?: TeamQuery
+  /** Changes the Team view's selection: `push` adds a history entry (opening an agent), `replace` rewrites it (filters). */
+  onTeamQuery?: (query: TeamQuery, mode: TeamQueryMode) => void
   refreshToken: number
   /** Ticks while the run page polls live state; the run's events and inputs re-read in the background with it. */
   pollToken?: number
@@ -54,10 +63,13 @@ type FileFocus = { nodeId: string; path: string }
 /** A repair session whose node reads running (its launch has not applied or blocked yet). */
 const REPAIR_RUNNING_STATUSES: ReadonlySet<string> = new Set(['launched', 'captured', 'recorded'])
 
-const TABS: { id: Tab; label: string; testId: string }[] = [
-  { id: 'run', label: 'Run', testId: 'tab-run' },
-  { id: 'assignment', label: 'Assignment', testId: 'tab-assignment' },
-]
+/** How often the teams are re-read (docs/PRD_RUN_TEAMS.md 2 "Polling"): fast while someone watches them on a live run. */
+const TEAMS_FAST_MS = 5000
+const TEAMS_SLOW_MS = 15000
+/** How often the run's GitHub read is re-read: on the GitHub view, and elsewhere for the switcher's suffix. */
+const GITHUB_VIEW_MS = 60_000
+const GITHUB_OTHER_MS = 120_000
+const NO_TEAM_QUERY = () => undefined
 
 /** The timeline of a run whose events have not loaded yet: every step shows its status, none a time. */
 function emptyTimeline(detail: RunDetail): Timeline {
@@ -66,14 +78,16 @@ function emptyTimeline(detail: RunDetail): Timeline {
 
 /**
  * One run (docs/PRD_VIEWER_UX.md 4.2-4.4, redrawn by the Signal Box design of 2026-10-09). The run page: the identity line,
- * then the stage with the run's graph, the live dock (the situation and the likely next step) and the step sheet. The
- * Assignment view keeps the identity line over the assignment. A node page: the one-line run bar (its Assignment link
- * replaces the tabs), the sticky step strip and the node in full width. One clock ticks here while the run can still change; selecting a step's page moves the
+ * then the stage with the run's graph, the live dock (the situation and the likely next step) and the step sheet. The Team,
+ * GitHub and Assignment views keep the identity line, with its view switcher (docs/PRD_RUN_TEAMS.md 2), over their content;
+ * each view has a visually hidden `h2#run-view-title` that takes the focus after a switch. A node page: the one-line run bar
+ * (with the four views as plain links), the sticky step strip and the node in full width. One clock ticks here while the run can still change; selecting a step's page moves the
  * focus to its heading, and coming back returns it to the step's card on the stage.
  */
-export function RunView({ scope, detail, current, selectedNodeId, selectedAttempt = null, tab, refreshToken, pollToken = 0, freshness, onNavigate, onAnnounce }: Props) {
+export function RunView({ scope, detail, current, selectedNodeId, selectedAttempt = null, tab, teamQuery, onTeamQuery = NO_TEAM_QUERY, refreshToken, pollToken = 0, freshness, onNavigate, onAnnounce }: Props) {
   const { summary, definition, snapshot } = detail
-  const clock = useNow(summary.status !== 'succeeded' && summary.status !== 'cancelled')
+  const live = summary.status !== 'succeeded' && summary.status !== 'cancelled'
+  const clock = useNow(live)
   const [zone] = useTimeZone()
   const runStart = useTimeReference()
   const snapshotById = new Map(snapshot.nodes.map(node => [node.node_id, node]))
@@ -107,6 +121,23 @@ export function RunView({ scope, detail, current, selectedNodeId, selectedAttemp
   const loadSessions = useCallback((signal: AbortSignal) => orNotRecorded(fetchSessions(scope, signal), NOT_RECORDED.sessions), [scope])
   const { state: sessions } = useResource(`sessions:${runKey}`, loadSessions, refreshToken, pollToken)
   const sessionsData = sessions.status === 'ready' ? sessions.data : null
+  // The agent teams of the run's Claude sessions (docs/PRD_RUN_TEAMS.md 2 "Polling"): every 5 s while the run is live and
+  // the Team view or a worker's page is open, every 15 s otherwise, and no more once the run finished and no team workflow
+  // runs. A 404 NOT_FOUND (a server that predates teams) loads as null, "not served".
+  const loadTeams = useCallback((signal: AbortSignal) => orNotRecorded(fetchTeams(scope, signal), NOT_RECORDED.teams), [scope])
+  const [teamsWorkflowRunning, setTeamsWorkflowRunning] = useState(false)
+  const teamsWatched = tab === 'team' || selectedDefinition?.kind === 'worker'
+  const teamsPoll = usePoll(live || teamsWorkflowRunning, live && teamsWatched ? TEAMS_FAST_MS : TEAMS_SLOW_MS)
+  const { state: teams, reload: reloadTeams, meta: teamsMeta } = useResource(`teams:${runKey}`, loadTeams, refreshToken, teamsPoll)
+  const teamsData = teams.status === 'ready' ? teams.data : null
+  const workflowsRunning = (teamsData?.totals.workflows_running ?? 0) > 0
+  if (workflowsRunning !== teamsWorkflowRunning) setTeamsWorkflowRunning(workflowsRunning)
+  // The run's branch against GitHub has its own poll, which keeps going after the run finished (checks and reviews change
+  // later): every 60 s on the GitHub view, every 120 s elsewhere for the switcher's suffix. A 404 NOT_FOUND loads as null.
+  const loadRunGithub = useCallback((signal: AbortSignal) => orNotRecorded(fetchRunGithub(scope, signal), NOT_RECORDED.runGithub), [scope])
+  const githubPoll = usePoll(true, tab === 'github' ? GITHUB_VIEW_MS : GITHUB_OTHER_MS)
+  const { state: runGithub, reload: reloadRunGithub, meta: runGithubMeta } = useResource(`run-github:${runKey}`, loadRunGithub, refreshToken, githubPoll)
+  const runGithubData = runGithub.status === 'ready' ? runGithub.data : null
   // The recorded review and the lane results are immutable per URI: read once through the run's cache (docs/PRD_VIEWER_UX.md 7).
   const reviewPath = snapshot.nodes.find(node => node.node_id === 'review')?.result_uri ?? null
   const review = useRunReview(scope, reviewPath, String(refreshToken))
@@ -174,7 +205,6 @@ export function RunView({ scope, detail, current, selectedNodeId, selectedAttemp
   const runHref = runPathname(scope.projectId, scope.workflowId, scope.runId)
   const nodeHref = useCallback((nodeId: string) => runPathname(scope.projectId, scope.workflowId, scope.runId, nodeId), [scope])
   const nodeLabel = useCallback((nodeId: string) => detail.definition.nodes.find(node => node.node_id === nodeId)?.label ?? nodeId, [detail.definition.nodes])
-  const tabHref = (id: Tab) => (id === 'assignment' ? assignmentPathname(scope.projectId, scope.workflowId, scope.runId) : runHref)
   const openRequirement = useCallback((nodeId: string, quote: string) => {
     setPendingHighlight({ nodeId, quote })
     onNavigate(nodeHref(nodeId))
@@ -183,19 +213,6 @@ export function RunView({ scope, detail, current, selectedNodeId, selectedAttemp
     setPendingFile({ nodeId, path })
     onNavigate(nodeHref(nodeId))
   }, [onNavigate, nodeHref])
-
-  const onTabKey = (event: KeyboardEvent<HTMLButtonElement>) => {
-    const index = TABS.findIndex(candidate => candidate.id === tab)
-    let next: number | null = null
-    if (event.key === 'ArrowRight' || event.key === 'ArrowDown') next = (index + 1) % TABS.length
-    else if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') next = (index - 1 + TABS.length) % TABS.length
-    else if (event.key === 'Home') next = 0
-    else if (event.key === 'End') next = TABS.length - 1
-    if (next === null) return
-    event.preventDefault()
-    onNavigate(tabHref(TABS[next].id))
-    event.currentTarget.parentElement?.querySelector<HTMLButtonElement>(`[data-testid="${TABS[next].testId}"]`)?.focus()
-  }
 
   // Selecting a step, or another attempt of it, opens its page at the top with the focus on its heading (the link that was
   // activated unmounts with the page it was on); coming back focuses the step's row again.
@@ -214,6 +231,16 @@ export function RunView({ scope, detail, current, selectedNodeId, selectedAttemp
       document.querySelector<HTMLElement>(`[data-testid="workflow-graph"] [data-graph-node="${CSS.escape(previous)}"]`)?.focus({ preventScroll: true })
     }
   }, [selectedNodeId, selectedAttempt])
+
+  // A switch to another view (from the switcher, or from a node page's run bar to Team, GitHub or Assignment) moves the focus to
+  // the new view's hidden heading (docs/PRD_RUN_TEAMS.md 10); coming back from a node page to the Run view keeps the card focus above.
+  const shownTab = useRef(tab)
+  useEffect(() => {
+    const previous = shownTab.current
+    shownTab.current = tab
+    if (previous === tab || selectedNodeId !== null) return
+    document.getElementById('run-view-title')?.focus({ preventScroll: true })
+  }, [tab, selectedNodeId])
 
   // While a question, a pane or an approval waits on the operator, the tab title says so (docs/PRD_VIEWER_UX.md 6.4).
   const waiting = attention?.top != null
@@ -237,28 +264,6 @@ export function RunView({ scope, detail, current, selectedNodeId, selectedAttemp
     // Only a change of situation speaks; the headline's clock and ages change every second.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [situation])
-
-  const tabs = (
-    <div className="tabs run-tabs" role="tablist" aria-label="Run views">
-      {TABS.map(candidate => (
-        <button
-          key={candidate.id}
-          type="button"
-          role="tab"
-          id={`run-tab-${candidate.id}`}
-          className="tab"
-          aria-selected={tab === candidate.id}
-          aria-controls={`run-panel-${candidate.id}`}
-          tabIndex={tab === candidate.id ? 0 : -1}
-          data-testid={candidate.testId}
-          onClick={() => { if (tab !== candidate.id || selectedNodeId !== null) onNavigate(tabHref(candidate.id)) }}
-          onKeyDown={onTabKey}
-        >
-          {candidate.label}
-        </button>
-      ))}
-    </div>
-  )
 
   // The run-level records without a step of their own open in the sheet of the step they belong to: the attack pass on its
   // node, the multi-provider panel on the review's.
@@ -284,15 +289,17 @@ export function RunView({ scope, detail, current, selectedNodeId, selectedAttemp
     return null
   }
   const attentionWord = attention?.top ? `${TONE_LABEL.warn.toLowerCase()}: ${attention.top.kind === 'question' ? 'a question waits' : attention.top.kind === 'pane' ? 'a pane needs attention' : 'an approval waits'}` : null
-  const identity = (other: { label: string; href: string; testId: string }) => (
-    <IdentityLine detail={detail} inputs={inputs} onRetryInputs={reloadInputs} current={current} freshness={freshness} clock={clock} tone={tone} attentionWord={attentionWord} other={other} onNavigate={onNavigate} />
-  )
+  const views = <RunViews scope={scope} current={tab} suffixes={{ team: teamSuffix(teamsData), github: githubSuffix(runGithubData) }} onNavigate={onNavigate} />
+  const identity = <IdentityLine detail={detail} inputs={inputs} onRetryInputs={reloadInputs} current={current} freshness={freshness} clock={clock} tone={tone} attentionWord={attentionWord} views={views} />
+  const viewTitle = (label: string) => <h2 id="run-view-title" className="visually-hidden" tabIndex={-1}>{label}</h2>
+  const zoneProps = { clock, zone, live }
 
   return (
     <div className="run-view" data-testid="run-view" data-run-id={summary.run_id} data-run-status={summary.status}>
       {selectedNodeId === null && tab === 'run' && (
         <div className="sb-run">
-          {identity({ label: 'Assignment', href: assignmentPathname(scope.projectId, scope.workflowId, scope.runId), testId: 'tab-assignment' })}
+          {identity}
+          {viewTitle('Run')}
           {events.status === 'error' && (
             <ErrorPanel error={events.error} what="The run's events" onRetry={reloadEvents}><span>Without them the situation and the next step cannot be read.</span></ErrorPanel>
           )}
@@ -322,19 +329,73 @@ export function RunView({ scope, detail, current, selectedNodeId, selectedAttemp
         </div>
       )}
 
+      {selectedNodeId === null && tab === 'team' && (
+        <>
+          {identity}
+          <GlyphDefs />
+          <div className="run-views">
+            {viewTitle('Team')}
+            <TeamView
+              scope={scope}
+              detail={detail}
+              inputs={inputs}
+              sessions={sessionsData}
+              teams={teams}
+              teamsMeta={teamsMeta}
+              onRetryTeams={reloadTeams}
+              review={reviewData}
+              now={now}
+              {...zoneProps}
+              query={teamQuery ?? EMPTY_TEAM_QUERY}
+              onQuery={onTeamQuery}
+              nodeHref={nodeHref}
+              onNavigate={onNavigate}
+              onAnnounce={onAnnounce}
+            />
+          </div>
+        </>
+      )}
+
+      {selectedNodeId === null && tab === 'github' && (
+        <>
+          {identity}
+          <GlyphDefs />
+          <div className="run-views">
+            {viewTitle('GitHub')}
+            <GithubView
+              scope={scope}
+              detail={detail}
+              inputs={inputs}
+              sessions={sessionsData}
+              teams={teamsData}
+              runGithub={runGithub}
+              runGithubMeta={runGithubMeta}
+              onRetryRunGithub={reloadRunGithub}
+              review={reviewData}
+              now={now}
+              {...zoneProps}
+              nodeHref={nodeHref}
+              onNavigate={onNavigate}
+              onAnnounce={onAnnounce}
+            />
+          </div>
+        </>
+      )}
+
       {selectedNodeId === null && tab === 'assignment' && (
         <>
-          {identity({ label: 'Run graph', href: runHref, testId: 'run-graph-link' })}
+          {identity}
+          <GlyphDefs />
           <div className="run-views">
-            {tabs}
-            <AssignmentPanel scope={scope} inputs={inputs} review={reviewData} onRetry={reloadInputs} onNavigate={onNavigate} panelId="run-panel-assignment" tabId="run-tab-assignment" />
+            {viewTitle('Assignment')}
+            <AssignmentPanel scope={scope} inputs={inputs} review={reviewData} onRetry={reloadInputs} onNavigate={onNavigate} panelId="run-panel-assignment" tabId="run-view-title" />
           </div>
         </>
       )}
 
       {selectedNodeId !== null && (
         <>
-          <RunBar detail={detail} now={now} clock={clock} runHref={runHref} assignmentHref={tabHref('assignment')} freshness={freshness} onNavigate={onNavigate} />
+          <RunBar detail={detail} now={now} clock={clock} runHref={runHref} views={<RunViews scope={scope} current={null} plain onNavigate={onNavigate} />} freshness={freshness} onNavigate={onNavigate} />
           <div className="run-views">
             <div className="run-body">
               <StepStrip detail={detail} rows={rows} current={selectedNodeId} runHref={runHref} nodeHref={nodeHref} verdicts={verdicts} onNavigate={onNavigate} />

@@ -13,7 +13,7 @@ import './theme.css'
 import './lists.css'
 import { ServedRunContext } from './LiveStatus.tsx'
 import { AppLink, EmptyPanel, ErrorPanel, LoadingPanel } from './panels.tsx'
-import { MAX_LIST_PAGES, projectPathname, projectsPathname, routeToPathname, runPathname, triagePathname, workflowPathname, type ProjectsRoute } from './routes.ts'
+import { MAX_LIST_PAGES, parseTeamQuery, projectPathname, projectsPathname, routeToPathname, runPathname, splitHref, teamQuerySearch, triagePathname, workflowPathname, type ProjectsRoute, type TeamQuery, type TeamQueryMode } from './routes.ts'
 import { PinToggle, RunRow } from './RunRow.tsx'
 import { RunsHome } from './RunsHome.tsx'
 import { fetchDispatchOverview } from './dispatch/client.ts'
@@ -57,6 +57,11 @@ type Props = {
   search?: string
   /** Replaces the current entry's search with a list's new state (no new history entry). */
   onSearch?: (pathname: string, search: string) => void
+  /**
+   * Pushes a new history entry for the same pathname with another search: the Team view's agent drawer opens this way, so
+   * Back closes it (docs/PRD_RUN_TEAMS.md 2). Without it the selection replaces the current entry's search.
+   */
+  onPushSearch?: (pathname: string, search: string) => void
   /** The scroll position and opened folds recorded in the history entry Back returned to, once per return. */
   restore?: { key: string; memory: ListMemory } | null
   /** Reports the shown list's opened folds, so they are recorded in its history entry when the operator leaves. */
@@ -75,12 +80,27 @@ const NO_SEARCH = () => undefined
  * loads from the scoped API and shows loading, empty, not-found and failure states in place; nothing
  * is ever substituted from fixtures.
  */
-export function ProjectsView({ route, refreshToken, onRefreshingChange, onNavigate: navigateTo, onAnnounce, search = '', onSearch = NO_SEARCH, restore = null, onFolds = NO_SEARCH, onFlush = NO_SEARCH }: Props) {
+export function ProjectsView({ route, refreshToken, onRefreshingChange, onNavigate: navigateTo, onAnnounce, search = '', onSearch = NO_SEARCH, onPushSearch, restore = null, onFolds = NO_SEARCH, onFlush = NO_SEARCH }: Props) {
   // The shown list's state lives in the URL; a search still being typed is written before the operator leaves the list.
   const pagePath = route === null ? null : routeToPathname(route)
   const list = useListState(search, pagePath, onSearch)
   const flushList = list.flush
-  const onNavigate = useCallback((pathname: string) => { flushList(); navigateTo(pathname) }, [flushList, navigateTo])
+  // An href with a search (a link into the Team view with its selection, `/team?session=worker:ui`) navigates to its pathname
+  // and then writes the search into the entry it arrived at; every other href is a pathname, as before.
+  const onNavigate = useCallback((href: string) => {
+    flushList()
+    const { pathname, search: hrefSearch } = splitHref(href)
+    navigateTo(pathname)
+    if (hrefSearch !== '') onSearch(pathname, hrefSearch)
+  }, [flushList, navigateTo, onSearch])
+  // The Team view's selection lives in the URL's search (docs/PRD_RUN_TEAMS.md 2): opening an agent pushes, filters replace.
+  const teamQuery: TeamQuery | undefined = useMemo(() => (route?.level === 'run' && route.tab === 'team' ? parseTeamQuery(search) : undefined), [route, search])
+  const onTeamQuery = useCallback((query: TeamQuery, mode: TeamQueryMode) => {
+    if (pagePath === null) return
+    const next = teamQuerySearch(query)
+    if (mode === 'push' && onPushSearch) onPushSearch(pagePath, next)
+    else onSearch(pagePath, next)
+  }, [pagePath, onPushSearch, onSearch])
   useEffect(() => {
     onFlush(flushList)
     return () => onFlush(null)
@@ -590,6 +610,8 @@ export function ProjectsView({ route, refreshToken, onRefreshingChange, onNaviga
             selectedNodeId={nodeId}
             selectedAttempt={attempt}
             tab={route.tab}
+            teamQuery={teamQuery}
+            onTeamQuery={onTeamQuery}
             refreshToken={refreshToken}
             pollToken={runPoll}
             freshness={detailMeta}

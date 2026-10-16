@@ -12,8 +12,7 @@
 .sb-def code { color: var(--fg); }
 .sb-branch { order: 3; flex: 0 1 auto; min-width: 0; max-width: 100%; color: var(--muted); font: var(--type-floor)/1.3 var(--font-mono); white-space: normal; overflow-wrap: anywhere; }
 .sb-fresh { display: flex; align-items: center; gap: 8px; flex: none; }
-.workspace-projects .sb-other { display: inline-flex; align-items: center; min-height: 30px; padding: 0 12px; border: 1px solid var(--border-strong); border-radius: 999px; background: var(--surface-2); color: var(--fg); font-size: var(--type-floor); font-weight: 600; text-decoration: none; }
-.workspace-projects .sb-other:hover { border-color: var(--accent); color: var(--accent); }
+/* The view switcher (Run · Team · GitHub · Assignment) sits here, styled in runViews.css (docs/PRD_RUN_TEAMS.md 2). */
 .sb-details { order: 4; font-size: var(--type-floor); }
 .sb-details[open] { flex-basis: 100%; }
 .sb-details-body { padding: 6px 0 2px; display: grid; gap: 6px; }

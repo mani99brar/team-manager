@@ -71,6 +71,8 @@ export const taskDetails = (page: Page) => page.getByTestId('task-details')
 export const stepSheet = (page: Page) => page.getByTestId('node-sheet')
 /** The run page's live dock: the Now banner (`run-now`), the latest events and the figures live inside it. */
 export const liveDock = (page: Page) => page.getByTestId('live-dock')
+/** One link of the run's view switcher (docs/PRD_RUN_TEAMS.md 2): `run`, `team`, `github` or `assignment`. */
+export const runViewLink = (scope: Page | Locator, view: 'run' | 'team' | 'github' | 'assignment') => scope.locator(`[data-testid="run-views"] [data-testid="run-view-link"][data-view="${view}"]`)
 
 /** Opens a step's sheet from the stage: the card is clicked where it lies (a card behind the dock or off the stage still opens). */
 export async function openStepSheet(page: Page, nodeId: string) {

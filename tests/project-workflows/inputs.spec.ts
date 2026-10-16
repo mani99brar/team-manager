@@ -19,7 +19,7 @@ import {
   uiPathQuote,
   uiTask,
 } from './fixtures.ts'
-import { attach, expectNoExecutionControls, installHooks, nodeDetail, nodeListItem, openRunDetails, openTask, phase, renderedText, runUrl, taskDetails } from './support.ts'
+import { attach, expectNoExecutionControls, installHooks, nodeDetail, nodeListItem, openRunDetails, openTask, phase, renderedText, runUrl, runViewLink, taskDetails } from './support.ts'
 
 installHooks()
 
@@ -36,10 +36,10 @@ async function openFolds(scope: Locator) {
 
 test(`[scenario:run-assignment] The Assignment tab shows what the run was asked to do, with tasks rendered as Markdown (${phase})`, async ({ page }, testInfo) => {
   await page.goto(runUrl(RUN_SUCCEEDED))
-  // The run page has no tabs: its identity line links to the Assignment view, which carries the Run views tablist.
-  const tablist = page.getByRole('tablist', { name: 'Run views' })
-  await expect(tablist).toHaveCount(0)
-  const assignmentLink = page.getByTestId('tab-assignment')
+  // The run page has no tabs: its identity line's view switcher links to the Assignment view (docs/PRD_RUN_TEAMS.md 2).
+  await expect(page.getByRole('tablist', { name: 'Run views' })).toHaveCount(0)
+  const switcher = page.getByRole('navigation', { name: 'Run views' })
+  const assignmentLink = runViewLink(page, 'assignment')
   await expect(assignmentLink).toHaveText('Assignment')
   await expect(assignmentLink).toHaveAttribute('href', `${runUrl(RUN_SUCCEEDED)}/assignment`)
 
@@ -56,14 +56,15 @@ test(`[scenario:run-assignment] The Assignment tab shows what the run was asked 
   await expect(page.getByTestId('inputs-none')).toHaveCount(0)
 
   await assignmentLink.click()
-  await expect(tablist.getByRole('tab')).toHaveText(['Run', 'Assignment'])
-  const runTab = tablist.getByTestId('tab-run')
-  const assignmentTab = tablist.getByTestId('tab-assignment')
-  await expect(assignmentTab).toHaveAttribute('aria-selected', 'true')
-  await expect(runTab).toHaveAttribute('aria-selected', 'false')
+  await expect(switcher.getByTestId('run-view-link').locator('.run-view-label')).toHaveText(['Run', 'Team', 'GitHub', 'Assignment'])
+  const runTab = runViewLink(page, 'run')
+  const assignmentTab = runViewLink(page, 'assignment')
+  await expect(assignmentTab).toHaveAttribute('aria-current', 'page')
+  await expect(runTab).not.toHaveAttribute('aria-current')
   const assignment = page.getByTestId('assignment')
-  await expect(assignment).toHaveAttribute('role', 'tabpanel')
-  await expect(assignment).toHaveAttribute('id', (await assignmentTab.getAttribute('aria-controls'))!)
+  // The panel is named by the view's hidden heading; no `aria-controls` points at a missing id.
+  await expect(assignment).toHaveAttribute('aria-labelledby', 'run-view-title')
+  await expect(page.locator('[aria-controls="run-panel-run"]')).toHaveCount(0)
   await expect(page.getByTestId('workflow-graph')).toHaveCount(0)
   await expect(assignment).toContainText(FEATURE_NAME)
   await expect(assignment).toContainText(sourceBranch(RUN_SUCCEEDED))
@@ -93,10 +94,9 @@ test(`[scenario:run-assignment] The Assignment tab shows what the run was asked 
   await expectNoExecutionControls(page)
   await attach(page, testInfo, 'run-assignment')
 
-  // Tabs are keyboard operable: Left from Assignment selects Run and the graph is back (the run page has no tablist, so
-  // there is no Run tab left to hold the focus).
-  await assignmentTab.focus()
-  await page.keyboard.press('ArrowLeft')
+  // The switcher's links are keyboard operable: Enter on Run brings the graph back.
+  await runTab.focus()
+  await page.keyboard.press('Enter')
   await expect(page).toHaveURL(new RegExp(`${runUrl(RUN_SUCCEEDED)}$`))
   await expect(page.getByTestId('workflow-graph')).toBeVisible()
   await expect(assignment).toHaveCount(0)
@@ -264,7 +264,7 @@ test(`[scenario:inputs-legacy] A run exported before run inputs says they are no
   await expect(page.getByTestId('run-inputs-facts')).toHaveCount(0)
   await expect(page.getByTestId('projects-error')).toHaveCount(0)
 
-  await page.getByTestId('tab-assignment').click()
+  await runViewLink(page, 'assignment').click()
   const assignment = page.getByTestId('assignment')
   await expect(assignment).toContainText('Inputs not recorded for this run')
   await expect(assignment.getByTestId('assignment-worker')).toHaveCount(0)
@@ -287,7 +287,7 @@ test(`[scenario:inputs-paths-redacted] No absolute path from the seeded inputs r
   await openRunDetails(page)
   await expect(page.getByTestId('run-inputs-facts')).toBeVisible()
   await renderedText(page.getByTestId('run-header'))
-  await page.getByTestId('tab-assignment').click()
+  await runViewLink(page, 'assignment').click()
   const assignment = page.getByTestId('assignment')
   await expect(assignment.getByTestId('assignment-worker')).toHaveCount(2)
   await openFolds(assignment)

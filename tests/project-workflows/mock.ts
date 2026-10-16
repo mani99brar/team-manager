@@ -4,18 +4,21 @@
  * API. Responses are the explicit contract fixtures from `fixtures.ts`, plus contract-shaped 404s. Review
  * results, run inputs, the sidecar ledger, the attack pass's record and the panel record answer with the contract's
  * `REVIEW_NOT_FOUND` / `INPUTS_NOT_FOUND` / `SIDECAR_NOT_FOUND` / `ATTACK_NOT_FOUND` / `PANELS_NOT_FOUND` codes when a run has
- * none, exactly like the real adapter for exports that predate those sections.
+ * none, exactly like the real adapter for exports that predate those sections. The run-teams routes (docs/PRD_RUN_TEAMS.md
+ * Appendix A-C) answer from `fixtures/index.ts`: `/teams`, the dispatch `/runs/:r/github` read and the run-control `/github`
+ * offers and actions; a run without a payload answers the scope's catch-all 404 `NOT_FOUND`, as a server that predates them.
  */
 import type { Page, Route } from '@playwright/test'
 import { artifactFiles, attackResults, panelResults, projectList, reviewResults, runDetails, runEvents, runInputs, runLists, sidecarLedgers, workerResults, workflowLists } from './fixtures.ts'
 // Merges the viewer UX slices' runs (`fixtures/ux-*.ts`) into the maps above.
 import './fixtures/index.ts'
-import { sessionsByRun } from './fixtures/index.ts'
+import { runGithubActionsByRun, runGithubByRun, sessionsByRun, teamsByRun } from './fixtures/index.ts'
 import { injectSessionNodes } from './sessionProjection.ts'
 import { CONTROLS_TOKEN, controlsFor, RELAUNCH_ALLOWED, RELAUNCH_LINES, RELAUNCH_REFUSED, RETRY_ALL_LINES } from './fixtures/controls.ts'
 import { dispatchOverview, dispatchSteps, DISPATCH_RUN_COSTS, DISPATCH_UNLISTABLE_WORKFLOWS } from './fixtures/dispatch.ts'
 import type { RunSummary } from '../../contracts/projects/v1.ts'
 import type { ControlId, ControlRecord } from '../../src/projects/controls/types.ts'
+import type { GithubActionId, GithubActionRecord } from '../../contracts/projects/github.ts'
 
 const json = (body: unknown, status = 200) => ({ status, contentType: 'application/json', body: JSON.stringify(body) })
 const notFound = (message: string, code = 'not_found') => json({ error: { code, message } }, 404)
@@ -126,6 +129,11 @@ export function mockDispatchResponse(url: URL): { status: number; contentType: s
     return json({ contract_version: '1.0.0', read_at: new Date().toISOString(), since: new Date(time).toISOString(), projects: mockHomeRuns(time) })
   }
   if (segments.length === 2 && segments[0] === 'runs' && segments[1] === 'all') return mockRegistryRuns(url)
+  // The run's GitHub read (docs/PRD_RUN_TEAMS.md Appendix B), served for the project and workflow its payload names.
+  if (segments.length === 7 && segments[0] === 'projects' && segments[2] === 'workflows' && segments[4] === 'runs' && segments[6] === 'github') {
+    const read = runGithubByRun[segments[5]]
+    return read && read.project_id === segments[1] && read.workflow_id === segments[3] ? json(read) : notFound('No dispatch resource exists at that path.', 'NOT_FOUND')
+  }
   if (segments.length === 3 && segments[0] === 'projects' && segments[2] === 'steps') {
     const steps = dispatchSteps(segments[1])
     return steps ? json(steps) : notFound(`Project "${segments[1]}" is not registered.`, 'NOT_FOUND')
@@ -195,6 +203,10 @@ export function mockResponse(url: URL): { status: number; contentType: string; b
     const result = sessionsByRun[runId]
     return result ? json(result) : notFound('No run with that ID exists in this workflow.', 'RUN_NOT_FOUND')
   }
+  if (kind === 'teams' && tail.length === 0) {
+    const result = teamsByRun[runId]
+    return result ? json(result) : notFound('No project resource exists at that path.', 'NOT_FOUND')
+  }
   if (kind === 'artifacts' && tail.length === 1) {
     const artifact = artifactFiles[runId].find(file => file.artifact_id === tail[0])
     return artifact ? { status: 200, contentType: artifact.contentType, body: artifact.content } : notFound(`Artifact "${tail[0]}" is not registered for this run.`)
@@ -229,8 +241,13 @@ export type ControlMock = {
   previews: unknown[]
   /** The relaunch-preview POSTs and their bodies (`{ run_state_token, lane }`). */
   relaunchPreviews: unknown[]
-  /** Answer the next POST of a control (or of the relaunch dry run) with an error instead of running it; STATE_CHANGED also moves the run. */
-  failNext: (control: ControlId | 'relaunch-preview', status: number, code: string, message: string) => void
+  /** Every POST to a GitHub action route (`/github/:action_id`), in order. */
+  githubPosts: { action: string; body: { request_id?: string; state_token?: string; params?: Record<string, unknown> } }[]
+  /**
+   * Answer the next POST of a control (or of the relaunch dry run, or of a GitHub action as `github:<action_id>`) with an error
+   * instead of running it; STATE_CHANGED also moves the run.
+   */
+  failNext: (control: ControlId | 'relaunch-preview' | `github:${GithubActionId}`, status: number, code: string, message: string) => void
   /** The run moved: the next controls read carries a new state token. */
   bump: () => void
 }
@@ -245,9 +262,10 @@ export async function installControlMocks(page: Page, options: { enabled?: boole
   const token = options.token ?? CONTROLS_TOKEN
   const records: ControlRecord[] = []
   const failures = new Map<string, { status: number; code: string; message: string }>()
+  const githubRecords: { runId: string; record: GithubActionRecord }[] = []
   let generation = 1
   const mock: ControlMock = {
-    posts: [], previews: [], relaunchPreviews: [],
+    posts: [], previews: [], relaunchPreviews: [], githubPosts: [],
     failNext: (control, status, code, message) => { failures.set(control, { status, code, message }) },
     bump: () => { generation += 1 },
   }
@@ -268,6 +286,38 @@ export async function installControlMocks(page: Page, options: { enabled?: boole
     if (header !== token) { await route.fulfill(error(403, 'TOKEN_INVALID', 'The pairing token was refused.')); return }
     const [, , runId, tail, extra] = parts
     const state = `rs-${generation}`
+    // The GitHub actions (docs/PRD_RUN_TEAMS.md Appendix C): the offers from `fixtures/index.ts` and a canned record per POST; a
+    // stale `state_token` answers 409 STATE_CHANGED, an unavailable action 422 NOT_AVAILABLE, as the server does.
+    if (tail === 'github') {
+      const offers = runGithubActionsByRun[runId]
+      if (request.method() === 'GET') {
+        await route.fulfill(offers && extra === undefined ? json({ ...offers, records: [...githubRecords.filter(record => record.runId === runId).map(record => record.record).reverse(), ...offers.records].slice(0, 20) }) : error(404, 'NOT_FOUND', 'No run control resource exists at that path.'))
+        return
+      }
+      const githubBody = request.postDataJSON() as ControlMock['githubPosts'][number]['body']
+      mock.githubPosts.push({ action: extra ?? '', body: githubBody })
+      const failed = failures.get(`github:${extra}`)
+      if (failed) { failures.delete(`github:${extra}`); await route.fulfill(error(failed.status, failed.code, failed.message)); return }
+      const action = offers?.actions.find(item => item.id === extra)
+      if (!offers || !action) { await route.fulfill(error(404, 'NOT_FOUND', 'No run control resource exists at that path.')); return }
+      if (githubBody.state_token !== offers.state_token) { await route.fulfill(error(409, 'STATE_CHANGED', 'The branch or the pull request changed since the offers were read.')); return }
+      if (!action.available) { await route.fulfill(error(422, 'NOT_AVAILABLE', action.reason ?? 'Not available.')); return }
+      const params = githubBody.params ?? {}
+      const now = new Date().toISOString()
+      const record: GithubActionRecord = {
+        record_id: `g-${String(githubRecords.length + 1).padStart(12, '0')}`, request_id: githubBody.request_id ?? '', action: action.id,
+        params: {
+          ...(typeof params.title === 'string' ? { title: params.title } : {}),
+          ...(typeof params.body === 'string' ? { body_chars: params.body.length } : {}),
+          ...(Array.isArray(params.reviewers) ? { reviewers: params.reviewers as string[] } : {}),
+        },
+        command: action.command, status: 'succeeded', exit_code: 0, started_at: now, ended_at: now,
+        output_tail: [`${action.label} by the operator`], url: null,
+      }
+      githubRecords.push({ runId, record })
+      await route.fulfill(json({ record }))
+      return
+    }
     if (request.method() === 'GET' && tail === undefined) {
       const controls = controlsFor(runId, state, records.map(record => settled(record, true)).reverse(), { older: options.older })
       await route.fulfill(controls ? json(controls) : error(404, 'NOT_FOUND', 'The run was not found.'))

@@ -4,6 +4,8 @@
  * same state always shows the same colour. The accent hue is never a tone.
  */
 import type { RunDetail, RunSummary } from '../../contracts/projects/v1.ts'
+import type { AgentState, TeamPhase, WorkflowStatus } from '../../contracts/projects/teams.ts'
+import type { CHECK_BUCKETS, PushState, RunPr } from '../../contracts/projects/github.ts'
 
 export type Tone = 'ok' | 'run' | 'warn' | 'fail' | 'pause' | 'override' | 'idle'
 export type Severity = 'P0' | 'P1' | 'P2'
@@ -75,6 +77,102 @@ export const TONE_LABEL: Record<Tone, string> = {
   pause: 'Paused',
   override: 'Integrated (operator override)',
   idle: 'Idle',
+}
+
+// ---- Teams and GitHub (docs/PRD_RUN_TEAMS.md 8 "Visual language and tokens") -------------------------------------------
+// Each returns the tone and the lower-case word that repeats it, so no state is shown by colour alone.
+
+/** A tone and the lower-case word said beside its glyph. */
+export type ToneWord = { tone: Tone; word: string }
+
+/**
+ * A view's state suffix in the run switcher (docs/PRD_RUN_TEAMS.md 2): a glyph in `tone` (none when null), a lower-case
+ * `word`, and `spoken`, the words its link's accessible name carries ("pull request 531, checks failing").
+ */
+export type Suffix = { tone: Tone | null; word: string; spoken: string }
+
+const AGENT_TONE: Record<AgentState, Tone> = { done: 'ok', running: 'run', failed: 'fail', interrupted: 'pause', queued: 'idle' }
+
+/** An agent's state: done ok, running run, failed fail, interrupted pause, queued idle; the word is the contract's own. */
+export function agentTone(state: AgentState): ToneWord {
+  return { tone: AGENT_TONE[state] ?? 'idle', word: state }
+}
+
+const WORKFLOW_TONE: Record<WorkflowStatus, Tone> = { completed: 'ok', running: 'run', failed: 'fail', interrupted: 'pause', killed: 'idle' }
+
+/** A team workflow's status: completed ok, running run, failed fail, interrupted pause, killed idle. */
+export function workflowTone(status: WorkflowStatus): ToneWord {
+  return { tone: WORKFLOW_TONE[status] ?? 'idle', word: status }
+}
+
+/**
+ * A phase by its agents' counts, in the precedence fail > run > pause > ok > idle: any failed, any running, any interrupted,
+ * all done (and at least one), else idle: "not started" when no agent reached it, "queued" when only queued (or some done
+ * and the rest queued).
+ */
+export function phaseTone(phase: Pick<TeamPhase, 'agents' | 'queued' | 'running' | 'done' | 'failed' | 'interrupted'>): ToneWord {
+  if (phase.failed > 0) return { tone: 'fail', word: 'failed' }
+  if (phase.running > 0) return { tone: 'run', word: 'running' }
+  if (phase.interrupted > 0) return { tone: 'pause', word: 'interrupted' }
+  if (phase.agents > 0 && phase.done === phase.agents) return { tone: 'ok', word: 'all done' }
+  if (phase.agents === 0) return { tone: 'idle', word: 'not started' }
+  return { tone: 'idle', word: 'queued' }
+}
+
+const PUSH_TONE: Record<PushState, ToneWord> = {
+  up_to_date: { tone: 'ok', word: 'up to date' },
+  remote_ahead: { tone: 'warn', word: 'behind GitHub' },
+  diverged: { tone: 'fail', word: 'diverged' },
+  not_pushed: { tone: 'idle', word: 'not pushed' },
+  local_ahead: { tone: 'idle', word: 'ahead' },
+  unknown: { tone: 'idle', word: 'unknown' },
+  no_local_branch: { tone: 'idle', word: 'not in repo' },
+}
+
+/** Where the run branch stands against its remote: up to date ok, behind GitHub warn, diverged fail, the rest idle. */
+export function pushTone(state: PushState): ToneWord {
+  return PUSH_TONE[state] ?? { tone: 'idle', word: 'unknown' }
+}
+
+/**
+ * A pull request's own state, then what holds it: merged ok, closed idle, draft idle, conflicts fail, changes requested
+ * fail, approved ok, review required idle, otherwise open (run: it waits on review). Checks have their own `checkTone`.
+ */
+export function prTone(pr: Pick<RunPr, 'state' | 'draft'> & Partial<Pick<RunPr, 'mergeable' | 'review_decision'>>): ToneWord {
+  if (pr.state === 'MERGED') return { tone: 'ok', word: 'merged' }
+  if (pr.state === 'CLOSED') return { tone: 'idle', word: 'closed' }
+  if (pr.draft) return { tone: 'idle', word: 'draft' }
+  if (pr.mergeable === 'CONFLICTING') return { tone: 'fail', word: 'conflicts' }
+  if (pr.review_decision === 'CHANGES_REQUESTED') return { tone: 'fail', word: 'changes requested' }
+  if (pr.review_decision === 'APPROVED') return { tone: 'ok', word: 'approved' }
+  if (pr.review_decision === 'REVIEW_REQUIRED') return { tone: 'idle', word: 'review required' }
+  return { tone: 'run', word: 'open' }
+}
+
+const CHECK_TONE: Record<(typeof CHECK_BUCKETS)[number], ToneWord> = {
+  pass: { tone: 'ok', word: 'pass' },
+  fail: { tone: 'fail', word: 'failing' },
+  pending: { tone: 'run', word: 'pending' },
+  skip: { tone: 'idle', word: 'skipped' },
+  neutral: { tone: 'idle', word: 'neutral' },
+}
+
+/** One check by its bucket: pass ok, fail fail ("failing"), pending run, skip and neutral idle. */
+export function checkTone(bucket: (typeof CHECK_BUCKETS)[number]): ToneWord {
+  return CHECK_TONE[bucket] ?? { tone: 'idle', word: 'neutral' }
+}
+
+/** The team precedence within a container: a failure is never hidden by activity. */
+const TEAM_PRECEDENCE: readonly Tone[] = ['fail', 'run', 'pause', 'ok', 'idle']
+
+/** The tone a container of these tones takes, fail > run > pause > ok > idle; `idle` for none (other tones count as idle). */
+export function precedenceTone(tones: Iterable<Tone>): Tone {
+  let best = TEAM_PRECEDENCE.length - 1
+  for (const tone of tones) {
+    const rank = TEAM_PRECEDENCE.indexOf(tone)
+    if (rank >= 0 && rank < best) best = rank
+  }
+  return TEAM_PRECEDENCE[best]
 }
 
 /** An sRGB colour as `[r, g, b, alpha]`, from `#rgb`, `#rrggbb`, `#rrggbbaa`, `rgb()`, `rgba()` or `transparent`; null otherwise. */

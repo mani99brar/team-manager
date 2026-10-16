@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react'
 import { acceptedOf, type Now } from '../../contracts/projects/triage.ts'
 import type { RunDetail } from './api.ts'
 import { LiveStatus } from './LiveStatus.tsx'
@@ -10,15 +11,16 @@ import type { ResourceMeta } from './useResource.ts'
 
 /**
  * The one-line run bar of a node page (docs/PRD_VIEWER_UX.md 4.4): the run, its status in a few words and the Now headline,
- * which links back to the run page, where the full banner is; then the Assignment link (a node page has no tabs), the live chip
- * and the Local/UTC switch.
+ * which links back to the run page, where the full banner is; then the run's four views as plain links (docs/PRD_RUN_TEAMS.md 2
+ * "Node pages"), the live chip and the Local/UTC switch.
  */
-export function RunBar({ detail, now, clock, runHref, assignmentHref, freshness, onNavigate }: {
+export function RunBar({ detail, now, clock, runHref, views, freshness, onNavigate }: {
   detail: RunDetail
   now: Now | null
   clock: number
   runHref: string
-  assignmentHref: string
+  /** The run's view switcher as four plain links (`RunViews` with `plain`). */
+  views: ReactNode
   freshness: ResourceMeta
   onNavigate: (pathname: string) => void
 }) {
@@ -38,7 +40,7 @@ export function RunBar({ detail, now, clock, runHref, assignmentHref, freshness,
           </span>
         )}
       </p>
-      <AppLink href={assignmentHref} onNavigate={onNavigate} className="run-bar-assignment" data-testid="tab-assignment">Assignment</AppLink>
+      {views}
       <div className="run-freshness">
         <LiveStatus status={summary.status} meta={freshness} now={clock} />
         <TimeZoneToggle />
