@@ -119,6 +119,8 @@ export function createApp(locations: readonly LocationConfig[], options: AppOpti
   // The read-only dispatch API: the Projects overview (git and GitHub) and per-project step digests.
   const dispatch = buildDispatch(store, options.dispatch ?? {}, (message, details) => app.log.warn(details, message))
   app.register(dispatchRoutes, { prefix: DISPATCH_PREFIX, ...dispatch, now: options.dispatch?.now })
+  // The run GitHub source (read + markDue), shared with the run controls' GitHub actions (docs/PRD_RUN_TEAMS.md "GitHub read").
+  app.decorate('runGithub', dispatch.runGithub)
   // Warm the step digests and start GitHub's timer-driven reads after boot; stop the timer on close so the loop never lingers.
   app.addHook('onReady', async () => { void dispatch.steps.warm(store.config.projects) })
   app.addHook('onReady', async () => { dispatch.github.start() })

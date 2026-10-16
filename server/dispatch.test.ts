@@ -9,6 +9,7 @@ import { buildDispatch, projectSpend } from './dispatch.ts'
 import { GitReader, discoverGithubRepos, parseGithubRemote, readGitState, realGitRunner, type ExecFileLike, type GitInput, type GitRunner } from './dispatchGit.ts'
 import { GH_REASONS, GITHUB_QUERY, GithubReader, githubArgv, githubReaderOptions, parseGithub, realGhRunner, type GhResult } from './dispatchGithub.ts'
 import { buildDigest } from './dispatchSteps.ts'
+import { readRunBranch, readRunRepo } from './runGithub.ts'
 import { ProjectApiError, RunStore, type LoadedRun } from './projects.ts'
 import { githubStateSchema, homeRunsSchema, registryRunsSchema, type RegistryRuns } from '../contracts/projects/dispatch.ts'
 import { readsNextPage } from '../src/projects/lists.ts'
@@ -802,6 +803,31 @@ function isReadOnlyGit(args: readonly string[]): boolean {
       return false
   }
 }
+
+test('run-teams: every git argv the run branch reader issues is read-only (the same allowlist), refs fully qualified', async () => {
+  const { clone, origin } = originAndClone()
+  git(clone, 'checkout', '-b', 'feature/w/run-001')
+  const integrated = (commit(clone, 'run change'), git(clone, 'rev-parse', 'HEAD').trim())
+  git(clone, 'push', 'origin', 'feature/w/run-001')
+  commit(clone, 'unpushed')
+  const seen: string[][] = []
+  const recording: GitRunner = async (repo, args) => { seen.push([...args]); return runner(repo, args) }
+  const facts = await readRunBranch(recording, clone, 'feature/w/run-001', 'main', integrated)
+  await readRunRepo(recording, clone)
+  assert.equal(facts.push_state, 'local_ahead')
+  // Every verb/option shape the run reader uses: rev-parse --verify --quiet <ref>^{commit}, rev-list --left-right --count,
+  // rev-list --count <ref> --not <refs>, log --format -n <ref> --not <refs>, merge-base --is-ancestor, symbolic-ref
+  // --quiet --short, rev-parse --path-format=absolute --git-common-dir and remote get-url.
+  const verbs = new Set(seen.map(args => args[0]))
+  assert.deepEqual([...verbs].sort(), ['log', 'merge-base', 'remote', 'rev-list', 'rev-parse', 'symbolic-ref'])
+  for (const args of seen) assert.ok(isReadOnlyGit(args), `writing argv reached git: ${args.join(' ')}`)
+  for (const args of seen) {
+    for (const arg of args.slice(1)) if (arg.includes('run-001')) assert.match(arg, /^refs\/(heads|remotes\/origin)\/feature\/w\/run-001(\^\{commit\})?(\.\.\.refs\/remotes\/origin\/(main|feature\/w\/run-001))?$/)
+  }
+  assert.ok(seen.some(args => args[0] === 'log' && args.includes('--not')))
+  assert.equal(isReadOnlyGit(['rev-list', '--count', 'refs/heads/x', '--not', 'refs/remotes/origin/x']), true)
+  void origin
+})
 
 test('S7: realGitRunner and realGhRunner spawn execFile the way production does — default timeouts 5000/20000, no shell, the env', async () => {
   type Call = { file: string; args: readonly string[]; options: { timeout: number; env?: NodeJS.ProcessEnv; shell?: boolean } }

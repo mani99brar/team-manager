@@ -5,16 +5,29 @@ import {
   DISPATCH_VERSION, dispatchOverviewSchema, gitStateSchema, homeRunsSchema, projectStepsSchema, registryRunsSchema,
   type GitState, type GithubState, type HomeRuns, type ProjectSpend, type ProjectSteps, type ReadError, type RegistryRuns,
 } from '../contracts/projects/dispatch.ts'
+import { runGithubSchema } from '../contracts/projects/github.ts'
 import type { RunSummary } from '../contracts/projects/v1.ts'
 import { GitReader, discoverGithubRepos, realGitRunner, type GitRunner } from './dispatchGit.ts'
 import { GithubReader } from './dispatchGithub.ts'
 import { StepDigests } from './dispatchSteps.ts'
+import { RunBranchReader, createRunGithubSource, type RunGithubSource } from './runGithub.ts'
 import { DEFAULT_RUN_LIMIT, MAX_RUN_LIMIT, ProjectApiError, RunStore, encodeCursor } from './projects.ts'
 import { ID_PATTERN } from './projectsConfig.ts'
 
+export type { RunGithubSource } from './runGithub.ts'
+
+declare module 'fastify' {
+  interface FastifyInstance {
+    /** The run GitHub source `createApp` decorates the app with (read + markDue), for the run controls' GitHub actions. */
+    runGithub: RunGithubSource
+  }
+}
+
 /**
- * The dispatch API (docs/PRD_PROJECTS_DISPATCH Appendix A): `GET /api/dispatch/projects` (the overview) and
- * `GET /api/dispatch/projects/:projectId/steps`. GET and HEAD only; any other method is 405. Read-only throughout:
+ * The dispatch API (docs/PRD_PROJECTS_DISPATCH Appendix A): `GET /api/dispatch/projects` (the overview),
+ * `GET /api/dispatch/projects/:projectId/steps`, and the run's GitHub read
+ * `GET /api/dispatch/projects/:project_id/workflows/:workflow_id/runs/:run_id/github` (docs/PRD_RUN_TEAMS.md "GitHub read",
+ * `contracts/projects/github.ts`; built by `server/runGithub.ts`). GET and HEAD only; any other method is 405. Read-only throughout:
  * git and gh run read-only, nothing is fetched, pushed or written (except the GitHub cache, inside the reader).
  * Each project's git and GitHub parts are validated on their own, so one odd field degrades a single project rather
  * than the whole page (design-challenge note 6, [L2]). Errors use `{ error: { code, message } }` and never carry a path.
@@ -43,7 +56,7 @@ function conform<T>(schema: z.ZodType<T>, payload: unknown, log: FastifyInstance
 }
 
 /** The dispatch dependencies, built by `createApp` from its options (defaults: real git, no timer, GitHub off). */
-export type DispatchDeps = { store: RunStore; git: GitReader; github: GithubReader; steps: StepDigests }
+export type DispatchDeps = { store: RunStore; git: GitReader; github: GithubReader; steps: StepDigests; runGithub: RunGithubSource }
 
 export type DispatchAppOptions = {
   gitRunner?: GitRunner
@@ -62,7 +75,9 @@ export function buildDispatch(store: RunStore, options: DispatchAppOptions, warn
   // registry as it is now. The tick reads a repository added at runtime and skips one no longer registered ([S3], [L9]).
   github.setDiscover(async () => { await store.sync(); return discoverGithubRepos(store.config.projects, gitRunner) })
   const steps = new StepDigests(store, warn)
-  return { store, git, github, steps }
+  // The run GitHub source: built once here and shared by the route and (through the app's `runGithub` decoration) the controls.
+  const runGithub = createRunGithubSource({ store, github, branches: new RunBranchReader(gitRunner, now), now, warn })
+  return { store, git, github, steps, runGithub }
 }
 
 function gitFailed(repositoryLabel: string, now: () => number): GitState {
@@ -139,7 +154,7 @@ export function compareRegistryRuns(a: RegistryPosition, b: RegistryPosition): n
 }
 
 export async function dispatchRoutes(scope: FastifyInstance, options: DispatchRoutesOptions): Promise<void> {
-  const { store, git, github, steps } = options
+  const { store, git, github, steps, runGithub } = options
   const now = options.now ?? Date.now
   const log = scope.log
 
@@ -155,7 +170,10 @@ export async function dispatchRoutes(scope: FastifyInstance, options: DispatchRo
   scope.addHook('onRequest', async () => { await store.sync() })
   scope.addHook('onSend', async (_request, reply) => { if (!reply.hasHeader('Cache-Control')) reply.header('Cache-Control', 'no-store') })
 
-  const paths = { overview: '/projects', steps: '/projects/:project_id/steps', homeRuns: '/runs', registryRuns: '/runs/all' }
+  const paths = {
+    overview: '/projects', steps: '/projects/:project_id/steps', homeRuns: '/runs', registryRuns: '/runs/all',
+    runGithub: '/projects/:project_id/workflows/:workflow_id/runs/:run_id/github',
+  }
   for (const url of Object.values(paths)) {
     scope.route({
       method: [...OTHER_METHODS], url,
@@ -239,6 +257,13 @@ export async function dispatchRoutes(scope: FastifyInstance, options: DispatchRo
     unreadable.sort((a, b) => text(a.project_id, b.project_id) || text(a.workflow_id, b.workflow_id))
     const payload: RegistryRuns = { contract_version: DISPATCH_VERSION, read_at: new Date(now()).toISOString(), runs, next_cursor, unreadable }
     return conform(registryRunsSchema, payload, log)
+  })
+
+  // The run's GitHub read: local branch facts per request (cached 10 s) and GitHub facts from the reader's cache only.
+  scope.get(paths.runGithub, async request => {
+    const params = request.params as Record<string, string>
+    const payload = await runGithub.read(params.project_id, params.workflow_id, params.run_id)
+    return conform(runGithubSchema, payload, log)
   })
 
   scope.get(paths.steps, async request => {

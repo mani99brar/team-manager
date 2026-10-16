@@ -278,6 +278,22 @@ One run, with `server` and `viewer` in parallel ([D2]). The viewer lane mirrors 
 
 - `GET /api/dispatch/projects` returns `DispatchOverview` for every registered project.
 - `GET /api/dispatch/projects/:projectId/steps` returns `ProjectSteps`. An unknown project is 404 `NOT_FOUND`.
+- `GET /api/dispatch/projects/:project_id/workflows/:workflow_id/runs/:run_id/github` returns `RunGithub`
+  (`contracts/projects/github.ts`, docs/PRD_RUN_TEAMS.md "GitHub read"; added by the run-teams build). An unknown project,
+  workflow or run is 404 (`PROJECT_NOT_FOUND`, `WORKFLOW_NOT_FOUND`, `RUN_NOT_FOUND`); a malformed ID is 400 `INVALID_ID`.
+
+**Runs now read their branch** (run-teams build, `server/runGithub.ts`). The run route above reads the run's
+`inputs.source_branch` in the project's registered repository: the local sha, the `refs/remotes/origin/<b>` sha, the push
+state (`not_pushed`, `up_to_date`, `local_ahead`, `remote_ahead`, `diverged`, `no_local_branch`, `unknown`), ahead/behind
+against the remote branch and `origin/<default>`, the commits a push would publish (with their `Name <email>` author) and
+whether the branch contains the run's integrated commit. Local facts are read per request with read-only git, cached 10 s,
+and nothing fetches. The branch name is checked against git's ref rules before any argv. GitHub facts (branch head, the
+same-repository pull request whose head is the branch, its checks by name, reviews, requested reviewers, comment and thread
+counts, visibility and the viewer's permission) come from the `GithubReader`'s second key space, `owner/name#<branch>`: a
+request registers its key and answers from the cache (`pending` before the first read); a 30 s branch tick reads the keys due
+(last attempt older than `MD_MANAGER_GITHUB_BRANCH_REFRESH_SECONDS`, asked for within 15 minutes) with one GraphQL query per
+repository whose branch names are GraphQL variables. Requests never call gh. The cache and fixture files take an optional
+`branches` map keyed `owner/name#<branch>` (older files without it still load).
 
 ### A.2 Types
 
@@ -383,9 +399,10 @@ interface ProjectSteps {
 |---|---|---|
 | `MD_MANAGER_GITHUB` | on | `off` disables every `gh` call; GitHub states are `off` |
 | `MD_MANAGER_GH` | `gh` | the executable for GitHub reads |
-| `MD_MANAGER_GITHUB_FIXTURE` | unset | a JSON file `{viewer_login, repos}` read synchronously at start and used instead of `gh`; no cache write |
+| `MD_MANAGER_GITHUB_FIXTURE` | unset | a JSON file `{viewer_login, repos, branches?}` read synchronously at start and used instead of `gh`; no cache write |
 | `MD_MANAGER_GITHUB_REFRESH_MINUTES` | 15 | minimum minutes between reads of one repository |
-| `MD_MANAGER_GITHUB_CACHE` | `~/.cache/md-manager/github.json` | the last good reads, with `read_at` |
+| `MD_MANAGER_GITHUB_CACHE` | `~/.cache/md-manager/github.json` | the last good reads, with `read_at` (repositories under `repos`, run branches under `branches`) |
+| `MD_MANAGER_GITHUB_BRANCH_REFRESH_SECONDS` | 90 | minimum seconds between reads of one run branch key (`owner/name#<branch>`); only keys asked for in the last 15 minutes are read |
 
 Binding for PR order: one `gh api graphql` query per repository asks for:
 - `pullRequests(first: 20, orderBy: {field: UPDATED_AT, direction: DESC})`;
