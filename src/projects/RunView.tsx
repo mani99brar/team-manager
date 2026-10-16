@@ -277,7 +277,7 @@ export function RunView({ scope, detail, current, selectedNodeId, selectedAttemp
       return (
         <section className="sb-sheet-record" data-testid="panel-section" aria-labelledby="run-panels-title">
           <h4 id="run-panels-title">Panel</h4>
-          <ProviderPanelBody record={panels} onRetry={reloadPanels} />
+          <ProviderPanelBody record={panels} onRetry={reloadPanels} links={{ nodeHref, onNavigate }} />
         </section>
       )
     }

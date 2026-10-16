@@ -7,8 +7,8 @@ import { z } from 'zod'
 import { acceptedOf, buildTimeline, deriveAttention, deriveFocus, deriveNow, humanizeEvent, type Focus, type Now, type RunAttention, type RunData } from '../contracts/projects/triage.ts'
 import {
   CHALLENGE_CONCERN_KINDS, CHALLENGE_STATUSES, EFFORT_LEVELS, validateFixLoop, CHECK_KINDS, COMPLETION_STATUSES, COMPLETION_VERSIONS, DEFAULT_REVIEWER_ID, FINDING_ATTRIBUTIONS, LANE_ID_PATTERN, REVIEWER_STATUSES, REVIEW_TRANSPORTS, RUN_DIR_PATTERN,
-  RUN_PROFILES, acceptedRecordSchema, runControllerSchema, TRYOUT_RESULTS, runRolesSchema, sidecarLedgerFileSchema, attackRecordSchema, panelRecordSchema, validateAttackResult, validatePanelResults, validateReviewResult, validateRunDetail, validateRunInputs, validateSidecarLedger,
-  type AttackRecord, type RunAccepted, type AttackResult, type FixLoop, type RepairEntry, type PanelRecord, type PanelResults, type Project, type ReviewFinding, type ReviewResult, type ReviewerEntry, type RunActivity, type RunDetail, type RunInputs, type RunSummary, type SidecarLedger, type SidecarLedgerFile,
+  RUN_PROFILES, acceptedRecordSchema, runControllerSchema, TRYOUT_RESULTS, runRolesSchema, sidecarLedgerFileSchema, attackRecordSchema, anyPanelRecordSchema, reviewPlanContext, validateAttackResult, validatePanelResults, validateReviewResult, validateRunDetail, validateRunInputs, validateSidecarLedger,
+  type AttackRecord, type RunAccepted, type AttackResult, type FixLoop, type RepairEntry, type AnyPanelRecord, type PanelResults, type ReviewPlanContext, type Project, type ReviewFinding, type ReviewResult, type ReviewerEntry, type RunActivity, type RunDetail, type RunInputs, type RunSummary, type SidecarLedger, type SidecarLedgerFile,
   type WorkerQuestion, type WorkflowDefinition,
 } from '../contracts/projects/v1.ts'
 import { eventSchema, validateWorkerResult, type RunSnapshot, type WorkerResult, type WorkflowEvent } from '../contracts/workflow/v1.ts'
@@ -844,7 +844,7 @@ function projectReviewers(section: ReviewSection, findings: ReviewFinding[], inp
 }
 
 /** Projects the export's review section onto the review-result contract; the caller applies the cross-field rules. */
-function projectReview(scope: Scope, runId: string, section: ReviewSection, inputs: InputsSection | null, loop: FixLoop | null = null): ReviewResult {
+function projectReview(scope: Scope, runId: string, section: ReviewSection, inputs: InputsSection | null, loop: FixLoop | null = null, context: ReviewPlanContext = { judgedPanel: false }): ReviewResult {
   const findings = section.findings.map(finding => projectFinding(finding, inputs))
   const attempt = reviewAttempt(section, loop)
   return {
@@ -860,6 +860,8 @@ function projectReview(scope: Scope, runId: string, section: ReviewSection, inpu
       round: section.round, delta_from: section.delta_from ?? null,
       delta_diff: section.delta_diff == null ? null : reviewDiffArtifact(scope, runId, section.delta_diff.sha256),
     } : {}),
+    // Panel record 1.1.0: the plan pins a judged panel, so the client validates with the same context.
+    ...(context.judgedPanel ? { judged_panel: true as const } : {}),
   }
 }
 
@@ -1408,6 +1410,8 @@ export class RunStore {
         const input: SessionsInput = {
           directory, runId, definition, lanes, review: run.review, nodes: run.sessionInput, fixLoop: run.fixLoop,
           panels: run.panelRecord, laneReviewEventWords, nightShift, resume: { exposed, home: this.options.home },
+          // Only a run whose panels route answers has panel rows; an archived round's record is validated as a live one.
+          archivedPanel: run.panelRecord === null ? undefined : round => readArchivedPanel(directory, round),
         }
         return await readSessions(input)
       } finally {
@@ -1582,7 +1586,9 @@ export class RunStore {
     let review: ReviewResult | null = null
     if (state.review) {
       try {
-        review = validateReviewResult(projectReview(scope, state.run_id, state.review, state.inputs ?? null, loop))
+        // The judged rule applies only on a run whose plan pins a judged panel (features/review-panel-registry/prd.md 7.4).
+        const context = reviewPlanContext(planJson)
+        review = validateReviewResult(projectReview(scope, state.run_id, state.review, state.inputs ?? null, loop, context), context)
         // A finding names a lane this run had, an attribution (`multiple`, `none`, the legacy `both`) or nothing; anything else is contradictory.
         for (const item of review.findings) {
           if (item.worker !== null && !lanes.lanes.includes(item.worker) && !(FINDING_ATTRIBUTIONS as readonly string[]).includes(item.worker)) {
@@ -2339,25 +2345,68 @@ async function resolvePanelRecord(directory: FileHandle | null, exportPanels: un
 }
 
 /**
+ * An archived review round's panel record (`panel.round-<k>.json`, where `archive_review` moves that round's `panel.json`),
+ * bounded and validated as the live record is; null when absent, oversized or invalid, which drops only that round's rows.
+ */
+async function readArchivedPanel(directory: FileHandle, round: number): Promise<PanelResults | null> {
+  let raw: Buffer | null
+  try {
+    raw = await readBounded(directory, [`panel.round-${round}.json`], PANEL_BYTE_LIMIT)
+  } catch (error) {
+    if (error instanceof ProjectApiError) return null
+    throw error
+  }
+  if (raw === null) return null
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw.toString('utf8'))
+  } catch {
+    return null
+  }
+  const served = projectPanels(parsed, 'live')
+  return 'result' in served ? served.result : null
+}
+
+/**
  * The record (`<run>/panel.json` or the export's `panels` section) onto the contract: Appendix A's shape and rules, path-
  * redacted texts (a finding's title, detail and file label, every error), Z times. Unknown keys are dropped. The record names
  * no run, so there is no foreign-file check. Returns the reason instead when it does not conform.
  */
 function projectPanels(raw: unknown, source: PanelResults['source']): { result: PanelResults } | { error: string } {
-  const parsed = panelRecordSchema.safeParse(raw)
+  // Record 1.0.0 (report-only) or 1.1.0 (judged, features/review-panel-registry/prd.md 8); either is refused whole when it
+  // does not conform (an unknown transport, seat status or ruling), and only this record is dropped.
+  const parsed = anyPanelRecordSchema.safeParse(raw)
   if (!parsed.success) return { error: `the ${source} record ${issueText(parsed.error)}` }
-  const record: PanelRecord = parsed.data
+  const record: AnyPanelRecord = parsed.data
   const text = (value: string) => boundedRedacted(value, 8000)
   const nullable = (value: string | null) => value === null ? null : text(value)
   const time = (value: string | null) => value === null ? null : ledgerTime(value)
+  const findings = (panel: AnyPanelRecord['panels'][number]) => panel.findings.map(finding => ({ ...finding, file: text(finding.file), title: text(finding.title), detail: text(finding.detail), providers_raised: [...finding.providers_raised] }))
   try {
-    const result = validatePanelResults({
+    const result = validatePanelResults(record.version === '1.0.0' ? {
       contract_version: '1.9.0', source,
       version: record.version,
       panels: record.panels.map(panel => ({
         ...panel, started_at: time(panel.started_at), ended_at: time(panel.ended_at), error: nullable(panel.error),
         providers: panel.providers.map(provider => ({ ...provider, finding_ids: [...provider.finding_ids], error: nullable(provider.error) })),
-        findings: panel.findings.map(finding => ({ ...finding, file: text(finding.file), title: text(finding.title), detail: text(finding.detail), providers_raised: [...finding.providers_raised] })),
+        findings: findings(panel),
+      })),
+    } : {
+      contract_version: '1.9.0', source,
+      version: record.version,
+      panels: record.panels.map(panel => ({
+        ...panel, started_at: time(panel.started_at), ended_at: time(panel.ended_at), error: nullable(panel.error),
+        providers: panel.providers.map(seat => ({ ...seat, cli_version: nullable(seat.cli_version), finding_ids: [...seat.finding_ids], error: nullable(seat.error) })),
+        findings: findings(panel),
+        ...(panel.judge ? { judge: {
+          ...panel.judge, started_at: time(panel.judge.started_at), ended_at: time(panel.judge.ended_at), error: nullable(panel.judge.error),
+          inputs: panel.judge.inputs.map(input => ({ ...input, finding_ids: [...input.finding_ids] })),
+          reviewer_findings: panel.judge.reviewer_findings.map(finding => ({ ...finding, message: text(finding.message) })),
+          rulings: panel.judge.rulings.map(ruling => ({
+            ...ruling, sources: [...ruling.sources], file: nullable(ruling.file), title: text(ruling.title), detail: text(ruling.detail),
+            requirement: nullable(ruling.requirement), reason: text(ruling.reason), evidence: nullable(ruling.evidence),
+          })),
+        } } : {}),
       })),
     })
     return { result }

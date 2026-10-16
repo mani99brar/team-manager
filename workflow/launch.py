@@ -24,6 +24,7 @@ from .pipeline import finish_policy, parse_lane_selection, policy_workers, valid
 from .registry import merge_registry, overlap_notes, previous_policy, read_git, read_registry, register, registry_entry, registry_path, repo_name
 from .sessions import EFFORT_LEVELS, override_note, pin_roles, read_json, role_pin, validate_node_id, validate_reviewer_id
 from . import attack, critique, panel, sidecar
+from . import reviewers as reviewer_list
 from .verification import policy_lint, validate_schema
 from .worktrees import common_dir, controller_git_config, worktree_lock
 
@@ -37,21 +38,21 @@ FEATURE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 # critical; and `tryout` (C7): a user-facing feature the operator tries before the merge to main. 2.5.0 (the attack pass)
 # 2.6.0 (the multi-provider panel), 2.7.0 (per-lane worker pins) and 2.8.0 (per-lane skills) keep both. The migration hint for
 # an earlier feature with a browser check names the version it should move to.
-CRITICAL_VERSIONS = frozenset({"2.4.0", "2.5.0", "2.6.0", "2.7.0", "2.8.0", "2.9.0", "2.10.0"})
+CRITICAL_VERSIONS = frozenset({"2.4.0", "2.5.0", "2.6.0", "2.7.0", "2.8.0", "2.9.0", "2.10.0", "2.11.0"})
 CRITICAL_VERSION = "2.4.0"
 # The feature versions whose `workers[]` may carry the lane's own worker `model` and `effort` (pinned per lane at prepare).
 # A set, not a range: the next bump must join it (shared learning version-gates-are-sets-add-a-keeps-everything-test).
 LANE_ROLE_VERSION = "2.7.0"
-LANE_ROLE_VERSIONS = frozenset({LANE_ROLE_VERSION, "2.8.0", "2.9.0", "2.10.0"})
+LANE_ROLE_VERSIONS = frozenset({LANE_ROLE_VERSION, "2.8.0", "2.9.0", "2.10.0", "2.11.0"})
 LANE_ROLE_FIELDS = ("model", "effort")
 # The feature versions whose `workers[]` may carry the lane's own `skills` (feature.json 2.8.0, PRD_WORKER_SKILLS section 3).
 # One more set the next bump must move.
 SKILLS_VERSION = "2.8.0"
-SKILLS_VERSIONS = frozenset({SKILLS_VERSION, "2.9.0", "2.10.0"})
+SKILLS_VERSIONS = frozenset({SKILLS_VERSION, "2.9.0", "2.10.0", "2.11.0"})
 # The feature versions whose `workers[]` may carry the lane's own `lane_review` (feature.json 2.10.0, PRD_LANE_REVIEWER section 3).
 # One more set the next bump must move.
 LANE_REVIEW_VERSION = "2.10.0"
-LANE_REVIEW_VERSIONS = frozenset({LANE_REVIEW_VERSION})
+LANE_REVIEW_VERSIONS = frozenset({LANE_REVIEW_VERSION, "2.11.0"})
 LEGACY_FEATURE_MESSAGE = ("feature.json version 1.0.0 (ui_task/adapter_task) is no longer supported: rewrite it as version 2.x "
                           "with workers: [{node_id, task}] (contracts/workflow/feature.schema.json)")
 
@@ -281,11 +282,15 @@ def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr
                     reviewer_transport: str | None = None, workers: str | None = None, by: str = "operator", profile: str | None = None,
                     roles: dict | None = None, restore_from: str | None = None, hold_challenge: bool = False,
                     follows: str | None = None, allow_untried: str | None = None, prove=None,
-                    fix_rounds: int | None = None, preflight_setup: bool = False) -> tuple[Path, list[list[str]], list[str]]:
+                    fix_rounds: int | None = None, preflight_setup: bool = False,
+                    resolve_seats=None) -> tuple[Path, list[list[str]], list[str]]:
     """The exact commands a launch runs against the target `repo`, the run directory and any notes. Nothing of the run is executed
     here; the one exception is a feature with `panels` (2.6.0), whose two read-only transport probes (`claude --help` for a
     claude provider, `pi --version` for a pi provider; `panel.prove_transports`, injectable as `prove`) run here so a dry run
-    refuses what a live launch would.
+    refuses what a live launch would. A 2.11.0 judged panel instead reads the shared reviewer list (reviewers.read; refused when
+    missing, unreadable or invalid) and resolves its seats with their read-only probes (reviewers.resolve, injectable as
+    `resolve_seats`): a seat the list lacks refuses, a disabled seat or a failed probe is pinned `unavailable`; it needs
+    `--judge-model` (the judge's pinned model, PRD 7.3).
 
     The target checkout is never switched: preflight checks it is clean, then `git worktree add` gives the run its own
     checkout of a new branch at its HEAD (`source_checkout`, beside the run directory). Every later command gets that
@@ -362,12 +367,28 @@ def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr
     # 2.6.0: the panels (PRD_MULTI_PROVIDER_PANEL 4.2). The stage guard, the DeepSeek key guard, each brief and the two transport
     # probes are refused here, before any Git action (the dry run included; pipeline preflight proves the transports again).
     review_panels = panel.declared(manifest)
-    panel_briefs, proved = {}, None
+    report_panels = [item for item in review_panels or [] if not panel.is_judged(item)]
+    panel_briefs, proved, judged = {}, None, None
     if review_panels:
         panel.check_launch(review_panels)
         for item in review_panels:
-            panel_briefs[item["id"]] = panel.brief_path(folder, item["prompt"])
-        proved = (prove or panel.prove_transports)(review_panels)
+            panel_briefs[item["id"]] = panel.brief_path(folder, item["prompt"], judged=panel.is_judged(item))
+        if report_panels:  # Only report-only panels prove their transports; a judged panel's seat probes never block (PRD 4.3).
+            proved = (prove or panel.prove_transports)(report_panels)
+    # 2.11.0: the judged panel (features/review-panel-registry/prd.md 4.3). The reviewer list is read here, once, and only for a
+    # judged panel (the dry run included); its resolved seats and sha256 ride in --panel-settings and prepare pins them ([G3]).
+    item = next((item for item in review_panels or [] if panel.is_judged(item)), None)
+    if item is not None:
+        judge_model = (roles or {}).get("judge_model")
+        if not judge_model:
+            raise ValueError("feature.json declares a judged panel (report_only: false): launch it with --judge-model, the model the "
+                             "judge runs (PRD 7.3); without it every judging would fall back to today's rule")
+        listing, digest, list_path = reviewer_list.read()
+        seats = (resolve_seats or reviewer_list.resolve)(listing, item["seats"])
+        judged = {"id": item["id"], "stage": item["stage"], "report_only": False, "requirements": item["requirements"],
+                  "reviewers_file": {"label": reviewer_list.label_of(list_path), "sha256": digest}, "seats": seats,
+                  "judge": {"model": judge_model, "effort": panel.JUDGE_EFFORT, **item["judge"], "input_cap_bytes": panel.JUDGE_INPUT_CAP_BYTES}}
+        panel.check_launch([judged])  # The DeepSeek key guard over the resolved pi seats, as for a report-only provider.
     # 2.9.0: the critique reviewer (PRD_USER_CRITIQUE 4.2). The lanes-are-lanes check, the policy's critique_app and the
     # critique skills are refused here, before any Git action (the dry run included; prepare pins plan.critique and refuses
     # the print transport). Resolving the skills checks them on this host, naming the skill.
@@ -486,9 +507,10 @@ def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr
     if review_attack is not None:
         # Preflight decides on the attack pass from the feature's `attack` ([L16], run 003 fix 8), not from policy.attack_check.
         preflight.append("--attack")
-    if review_panels:
-        # Preflight proves the declared transports again (claude --max-budget-usd, pi --version) from this list.
-        preflight.extend(["--panels", ",".join(sorted({provider["transport"] for item in review_panels for provider in item["providers"]}))])
+    if report_panels:
+        # Preflight proves the declared transports again (claude --max-budget-usd, pi --version) from this list; a judged panel's
+        # seats were probed above and never block (design-challenge note 4).
+        preflight.extend(["--panels", ",".join(sorted({provider["transport"] for item in report_panels for provider in item["providers"]}))])
     for node in selected:
         prepare.extend(["--task", f"{node}={in_source(tasks[node])}"])
     lane_pins = lane_roles(manifest)  # 2.7.0: each selected lane's own worker pin; prepare records every lane's effective pin.
@@ -533,9 +555,14 @@ def launch_commands(repo: Path, feature: str, run_id: str, run_root: Path, herdr
         if review_panels:
             # Each panel with its brief as the path prepare reads (the committed file in the source checkout, or the bundled one)
             # and the pi bin directory the probe resolved; prepare pins plan.panels last (text + sha256, requirement copies).
-            pinned = [{**item, "prompt": str(panel_briefs[item["id"]] if item["prompt"].startswith(BUILTIN_PREFIX) else in_source(panel_briefs[item["id"]]))}
+            pinned = [{**(judged if panel.is_judged(item) else item),
+                       "prompt": str(panel_briefs[item["id"]] if item["prompt"].startswith(BUILTIN_PREFIX) else in_source(panel_briefs[item["id"]]))}
                       for item in review_panels]
-            prepare.extend(["--panel-settings", json.dumps({"panels": pinned, "pi_bin": proved["pi_bin"]}, sort_keys=True)])
+            if judged is not None:  # The pi seat's resolved bin directory (none when it is unavailable or absent).
+                pi_bin = next((str(Path(seat["bin"]).parent) for seat in judged["seats"] if seat["transport"] == "pi" and seat["status"] == "pending"), None)
+            else:
+                pi_bin = proved["pi_bin"]
+            prepare.extend(["--panel-settings", json.dumps({"panels": pinned, "pi_bin": pi_bin}, sort_keys=True)])
     roles = {key: value for key, value in (roles or {}).items() if value is not None}
     pin_roles(**roles, env={})  # A bad model or level is refused before any command runs; the variable is prepare's to read.
     for key, value in roles.items():
@@ -720,8 +747,10 @@ def main(argv=None):
                                        "critique_app": critique.validate_critique_app(dry_policy["critique_app"]),
                                        "guard": "clear: critique lanes are selected lanes, policy has critique_app"}
             if "--panel-settings" in prepare:  # What prepare pins as plan.panels (briefs by path) and the proved pi bin (PRD 4.2).
-                printed["panels"] = {**json.loads(prepare[prepare.index("--panel-settings") + 1]),
-                                     "guard": "clear: stage review, transports proved (claude --max-budget-usd / pi --version)"}
+                shown = json.loads(prepare[prepare.index("--panel-settings") + 1])
+                judged_shown = any(panel.is_judged(item) for item in shown["panels"])
+                printed["panels"] = {**shown, "guard": "clear: stage review, seats resolved from the reviewer list (an unavailable seat never blocks)"
+                                     if judged_shown else "clear: stage review, transports proved (claude --max-budget-usd / pi --version)"}
             if "--lane-review-settings" in prepare:  # 2.10.0: what prepare pins as plan.nodes[<lane>].lane_review (per lane) and the proved pi bin.
                 settings = json.loads(prepare[prepare.index("--lane-review-settings") + 1])
                 printed["lane_review"] = {**settings, "guard": "clear: transports proved (claude --max-budget-usd / pi --version)"}

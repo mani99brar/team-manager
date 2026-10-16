@@ -473,5 +473,41 @@ class StaleClaudeTests(unittest.TestCase):
         self.assertEqual((stale_claude_processes(proc / "absent"), stale_claude_warning(proc / "absent")), ([], ""))
 
 
+class ReservedReviewerIdTests(unittest.TestCase):
+    """PRD 6 and 10.4: the reviewer id `judge` is the judged review panel's judge entry, reserved for every feature."""
+
+    def test_reviewer_id_judge_is_refused_beside_the_reserved_node_ids(self):
+        from .sessions import RESERVED_NODE_IDS, RESERVED_REVIEWER_IDS, plan_reviewers, validate_node_id, validate_reviewer_id
+        with self.assertRaisesRegex(ValueError, "Reviewer id is reserved: judge"):
+            validate_reviewer_id("judge")
+        with self.assertRaisesRegex(ValueError, "Reviewer id is reserved: judge"):
+            validate_reviewer_id("judge", ["ui", "adapter"])
+        for reserved in sorted(RESERVED_NODE_IDS):
+            with self.assertRaisesRegex(ValueError, "reserved"):
+                validate_reviewer_id(reserved)
+        self.assertEqual(RESERVED_REVIEWER_IDS, frozenset({"judge"}))
+        self.assertEqual([validate_reviewer_id(value) for value in ("general", "coverage", "security", "judges", "judge-x")],
+                         ["general", "coverage", "security", "judges", "judge-x"])
+        self.assertEqual(validate_node_id("judge"), "judge")  # A lane may still be called judge (this feature's own judge lane).
+        with self.assertRaisesRegex(ValueError, "Reviewer id is reserved: judge"):  # A pinned plan, whatever its feature version.
+            plan_reviewers({"workers": ["ui"], "reviewers": [{"reviewer_id": "judge", "prompt": "Judge."}]})
+
+    def test_prepare_refuses_a_reviewer_judge(self):
+        from .pipeline import parse_reviewer_files
+        with tempfile.TemporaryDirectory() as temp:
+            brief = Path(temp) / "judge.md"
+            brief.write_text("Judge everything.")
+            with self.assertRaisesRegex(ValueError, "Reviewer id is reserved: judge"):
+                parse_reviewer_files([f"judge={brief}"], ["ui"])
+            self.assertEqual(parse_reviewer_files([f"general={brief}"], ["ui"]), [{"reviewer_id": "general", "prompt": "Judge everything."}])
+
+    def test_no_feature_in_the_repository_declares_a_reviewer_judge(self):
+        import json
+        root = Path(__file__).resolve().parents[1]
+        for path in sorted(root.glob("features/*/feature.json")) + sorted((root / "workflow" / "testdata").glob("**/feature.json")):
+            reviewers = json.loads(path.read_text()).get("reviewers") or []
+            self.assertNotIn("judge", [item.get("reviewer_id") for item in reviewers if isinstance(item, dict)], path)
+
+
 if __name__ == "__main__":
     unittest.main()

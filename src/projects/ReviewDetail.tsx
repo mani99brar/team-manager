@@ -10,14 +10,15 @@ import {
   type RunInputs,
   type RunScope,
 } from './api.ts'
+import type { JudgeReviewerFinding } from '../../contracts/projects/v1.ts'
 import { CRITIQUE_DECIDED_WORDING, CRITIQUE_JOB_WORDING, critiqueOutcomeWording, evidenceOf, isCritiqueReviewer, missingScreenshot, reviewBlockedBy } from './critique.ts'
 import { DIFF_BYTE_LIMIT, diffTotals, fetchDiffText, MAX_DIFF_LINES, parseDiff, type DiffFile } from './diff.ts'
-import { findingsForFile, runLanes, splitFirstSentence, workerWording } from './findings.ts'
+import { findingsForFile, laneWording, runLanes, splitFirstSentence, workerWording } from './findings.ts'
 import { Screenshots } from './Screenshots.tsx'
 import './critique.css'
 import { useRunCapturedFiles } from './files.ts'
 import { AppLink, ErrorPanel, LoadingPanel } from './panels.tsx'
-import { outcomeWording, severityCounts, type Reviewer } from './reviewers.ts'
+import { ADVISORY_WORDING, advisedWording, advisoryFindingsWording, DECIDING_WORDING, findingsLegend, isJudgedReview, outcomeWording, reviewerRole, severityCounts, type Reviewer } from './reviewers.ts'
 import { runPathname } from './routes.ts'
 import { BLOCKING_ONLY, blockingFindings, filterFindings, findingFilterIds, OPEN_ONLY, orderFindings, reviewerTime, type FindingFilter } from './node/panels.ts'
 import { reviewSummary, shortRevision } from './status.ts'
@@ -204,11 +205,12 @@ function FindingCard({ finding, scope, definitionNodes, inputs, onOpenRequiremen
  * The controller's verdict for a reviewer, derived from its findings (C34); the verdict the reviewer wrote is `accepted_decision` in
  * its status file. A reviewer superseded before deciding, still pending, or blocked by the deadline or a rejected file has none.
  */
-function ReviewerVerdict({ verdict }: { verdict: Reviewer['verdict'] }) {
+function ReviewerVerdict({ verdict, advisory = false }: { verdict: Reviewer['verdict']; advisory?: boolean }) {
   if (verdict === null) return <span className="projects-muted" data-testid="reviewer-verdict" data-status="none">No verdict</span>
   const approved = verdict === 'approved'
+  // An advisory verdict stays visible but neutral: it did not decide the review.
   return (
-    <span className={`status-badge ${approved ? 'status-succeeded' : 'status-failed'}`} data-testid="reviewer-verdict" data-status={verdict}>
+    <span className={`status-badge ${advisory ? 'status-advisory' : approved ? 'status-succeeded' : 'status-failed'}`} data-testid="reviewer-verdict" data-status={verdict}>
       <span>{approved ? 'Approved' : 'Blocked'}</span>
     </span>
   )
@@ -238,30 +240,43 @@ function ReviewerTime({ reviewer }: { reviewer: Reviewer }) {
  * One entry per reviewer of the run, in declared order: id, the controller's verdict for it (derived from its findings, C34),
  * how it ended (with its blocking reason) and how long it took, then its finding counts by severity and its recorded times.
  */
-function ReviewerStrip({ reviewers }: { reviewers: readonly Reviewer[] }) {
+function ReviewerStrip({ review, reviewers }: { review: ReviewResult; reviewers: readonly Reviewer[] }) {
   return (
     <section className="evidence-section reviewer-strip" aria-labelledby="review-reviewers-title" data-testid="reviewer-strip" data-count={reviewers.length}>
       <h4 id="review-reviewers-title">Reviewers ({reviewers.length})</h4>
       <ul className="evidence-list reviewer-list">
-        {reviewers.map(reviewer => (
-          <li key={reviewer.reviewer_id} className={`ui-card reviewer-card ${toneClass(reviewerTone(reviewer))}`} data-testid="reviewer-entry" data-reviewer={reviewer.reviewer_id} data-status={reviewer.status} data-verdict={reviewer.verdict ?? 'none'}>
-            <p>
-              <strong data-testid="reviewer-id">{reviewer.reviewer_id}</strong>{' '}
-              {isCritiqueReviewer(reviewer.reviewer_id) && <><span className="reviewer-kind" data-testid="reviewer-kind">{CRITIQUE_JOB_WORDING}</span>{' '}</>}
-              <ReviewerVerdict verdict={reviewer.verdict} />{' '}
-              <span data-testid="reviewer-status">{isCritiqueReviewer(reviewer.reviewer_id) ? critiqueOutcomeWording(reviewer) : outcomeWording(reviewer)}</span>
-              <ReviewerTime reviewer={reviewer} />
-            </p>
-            <p className="projects-muted">
-              <span data-testid="reviewer-counts">{severityCounts(reviewer.findings)}</span>
-              {reviewer.launched_at !== null && reviewer.accepted_at !== null && <> · launched <Time iso={reviewer.launched_at} seconds /></>}
-              {reviewer.accepted_at !== null && <> · {isCritiqueReviewer(reviewer.reviewer_id) ? CRITIQUE_DECIDED_WORDING : 'file accepted'} <Time iso={reviewer.accepted_at} seconds /></>}
-            </p>
-          </li>
-        ))}
+        {reviewers.map(reviewer => {
+          // An advisory built-in of a judged review keeps its verdict for the record but decided nothing: neutral tone, "advised"
+          // wording, and its findings went to the judge when it gave a verdict (the review's list carries the judge's rulings, not them).
+          const role = reviewerRole(review, reviewer.reviewer_id)
+          const advisory = role === 'advisory'
+          return (
+            <li key={reviewer.reviewer_id} className={`ui-card reviewer-card ${toneClass(advisory ? 'idle' : reviewerTone(reviewer))}`} data-testid="reviewer-entry" data-reviewer={reviewer.reviewer_id} data-status={reviewer.status} data-verdict={reviewer.verdict ?? 'none'}>
+              <p>
+                <strong data-testid="reviewer-id">{reviewer.reviewer_id}</strong>{' '}
+                {isCritiqueReviewer(reviewer.reviewer_id) && <><span className="reviewer-kind" data-testid="reviewer-kind">{CRITIQUE_JOB_WORDING}</span>{' '}</>}
+                <RoleLabel role={role} />
+                <ReviewerVerdict verdict={reviewer.verdict} advisory={advisory} />{' '}
+                <span data-testid="reviewer-status">{advisory ? advisedWording(reviewer) : isCritiqueReviewer(reviewer.reviewer_id) ? critiqueOutcomeWording(reviewer) : outcomeWording(reviewer)}</span>
+                <ReviewerTime reviewer={reviewer} />
+              </p>
+              <p className="projects-muted">
+                <span data-testid="reviewer-counts">{advisory ? advisoryFindingsWording(reviewer) : severityCounts(reviewer.findings)}</span>
+                {reviewer.launched_at !== null && reviewer.accepted_at !== null && <> · launched <Time iso={reviewer.launched_at} seconds /></>}
+                {reviewer.accepted_at !== null && <> · {isCritiqueReviewer(reviewer.reviewer_id) ? CRITIQUE_DECIDED_WORDING : 'file accepted'} <Time iso={reviewer.accepted_at} seconds /></>}
+              </p>
+            </li>
+          )
+        })}
       </ul>
     </section>
   )
+}
+
+/** On a judged review: `deciding reviewer` on the judge, `advisory (the judge decided)` on each built-in reviewer. */
+function RoleLabel({ role }: { role: 'deciding' | 'advisory' | null }) {
+  if (role === null) return null
+  return <><span className={`reviewer-kind reviewer-role-${role}`} data-testid="reviewer-role" data-role={role}>{role === 'deciding' ? DECIDING_WORDING : ADVISORY_WORDING}</span>{' '}</>
 }
 
 /** What a reviewer's own outcome means for the run, as a tone: approved ok, blocked fail, no verdict yet idle. */
@@ -433,6 +448,7 @@ function ReviewResultView({ review, scope, definitionNodes, snapshotNodes, input
   const reviewers = review.reviewers
   const several = reviewers.length > 1
   const blockedBy = reviewBlockedBy(review)
+  const judged = isJudgedReview(review)
   const candidateNode = definitionNodes.some(candidate => candidate.node_id === 'candidate') ? 'candidate' : null
   const bundle = <code title={review.bundle_sha256}>{shortRevision(review.bundle_sha256)}</code>
   // Like every other artifact link, the diff is only ever fetched through this run's own artifact route by its ID.
@@ -478,13 +494,15 @@ function ReviewResultView({ review, scope, definitionNodes, snapshotNodes, input
     })
   }
   return (
-    <div className="review-result" data-testid="review-result" data-verdict={review.verdict} data-reviewer-count={reviewers.length}>
+    <div className="review-result" data-testid="review-result" data-verdict={review.verdict} data-reviewer-count={reviewers.length} data-judged={judged || undefined}>
       <p className="review-verdict-line">
         <span className={`status-badge ${approved ? 'status-succeeded' : 'status-failed'}`} data-testid="review-verdict" data-status={review.verdict}>
           <span>{approved ? 'Approved' : 'Blocked'}</span>
         </span>
-        <span className="projects-muted">
-          Combined verdict of {several ? `${reviewers.length} reviewers` : 'the one reviewer'} for review attempt {review.attempt}: every reviewer must approve; approval and integration are separate nodes.
+        <span className="projects-muted" data-testid="review-verdict-rule">
+          {judged
+            ? <>Verdict of the judge for review attempt {review.attempt}: it ruled on every finding, from a panel seat or a built-in reviewer; the built-in reviewers are advisory{reviewers.some(reviewer => isCritiqueReviewer(reviewer.reviewer_id)) ? ' and the critique still blocks on its own' : ''}; approval and integration are separate nodes.</>
+            : <>Combined verdict of {several ? `${reviewers.length} reviewers` : 'the one reviewer'} for review attempt {review.attempt}: every reviewer must approve; approval and integration are separate nodes.</>}
         </span>
       </p>
       {blockedBy !== null && <p className="projects-error-inline" role="status" data-testid="review-blocked-by">{blockedBy}</p>}
@@ -512,9 +530,7 @@ function ReviewResultView({ review, scope, definitionNodes, snapshotNodes, input
             ))}
           </ul>
         )}
-        <p className="projects-muted">
-          A finding links to a captured file only where its message names the file's path verbatim. Blocking means an unresolved P0 or P1 finding from any reviewer; a quote links only where the task text contains it verbatim. Workers are the lanes this run had{lanes.length > 0 ? ` (${lanes.join(', ')})` : ''}; “multiple workers” covers findings that concern more than one lane. Reviewer names the reviewer that raised the finding; the same finding raised by several reviewers is listed once per reviewer, never merged.
-        </p>
+        <p className="projects-muted" data-testid="findings-legend">{findingsLegend(judged, reviewers.some(reviewer => isCritiqueReviewer(reviewer.reviewer_id)), lanes)}</p>
       </section>
 
       <dl className="projects-facts">
@@ -557,7 +573,7 @@ function ReviewResultView({ review, scope, definitionNodes, snapshotNodes, input
 
       {review.diff !== null && diffScoped && <InlineDiff scope={scope} views={diffViews} />}
 
-      <ReviewerStrip reviewers={reviewers} />
+      <ReviewerStrip review={review} reviewers={reviewers} />
     </div>
   )
 }
@@ -566,20 +582,41 @@ const DISPOSITION_TONE: Record<ReviewFinding['disposition'], Tone> = { open: 'wa
 
 /**
  * One reviewer's own findings of the recorded round, as the review page's finding cards (run-sessions, PRD 3.1): the reviewer
- * node page shows exactly these, never another reviewer's. Empty, it says so.
+ * node page shows exactly these, never another reviewer's. On a judged review the record keeps only the judge's and critique's
+ * findings; a built-in reviewer's own findings are then the ones the judge read (`judgeRead`, the panel's `reviewer_findings`),
+ * listed under their source ids so a ruling's source chip lands on its evidence. Empty, it says so.
  */
-export function ReviewerFindings({ review, reviewerId, scope, definitionNodes, snapshotNodes, inputs, refreshToken, onOpenRequirement, onOpenFile }: { review: ReviewResult; reviewerId: string } & Omit<Props, 'review' | 'onRetry' | 'unscopedUri' | 'onNavigate'>) {
+export function ReviewerFindings({ review, reviewerId, judgeRead = [], scope, definitionNodes, snapshotNodes, inputs, refreshToken, onOpenRequirement, onOpenFile }: { review: ReviewResult; reviewerId: string; judgeRead?: readonly JudgeReviewerFinding[] } & Omit<Props, 'review' | 'onRetry' | 'unscopedUri' | 'onNavigate'>) {
   const capturedFiles = useRunCapturedFiles(scope, snapshotNodes, refreshToken)
   const own = review.findings.filter(finding => finding.reviewer === reviewerId)
-  if (own.length === 0) return <p className="projects-muted" data-testid="reviewer-findings-none">{reviewerId} recorded no findings in this round.</p>
+  if (own.length === 0 && judgeRead.length === 0) return <p className="projects-muted" data-testid="reviewer-findings-none">{reviewerId} recorded no findings in this round.</p>
   return (
-    <ul className="finding-cards" data-testid="reviewer-findings" data-reviewer={reviewerId}>
-      {own.map(finding => (
-        <li key={review.findings.indexOf(finding)}>
-          <FindingCard finding={finding} scope={scope} definitionNodes={definitionNodes} inputs={inputs} onOpenRequirement={onOpenRequirement} onOpenFile={onOpenFile} capturedFiles={capturedFiles} />
-        </li>
-      ))}
-    </ul>
+    <>
+      {own.length > 0 && (
+        <ul className="finding-cards" data-testid="reviewer-findings" data-reviewer={reviewerId}>
+          {own.map(finding => (
+            <li key={review.findings.indexOf(finding)}>
+              <FindingCard finding={finding} scope={scope} definitionNodes={definitionNodes} inputs={inputs} onOpenRequirement={onOpenRequirement} onOpenFile={onOpenFile} capturedFiles={capturedFiles} />
+            </li>
+          ))}
+        </ul>
+      )}
+      {judgeRead.length > 0 && (
+        <section data-testid="reviewer-judge-read" data-reviewer={reviewerId} aria-label={`${reviewerId}'s findings as the judge read them`}>
+          <p className="projects-muted">{reviewerId}'s findings as the judge read them (advisory; the judge's rulings decide):</p>
+          <ul className="finding-cards">
+            {judgeRead.map(finding => (
+              <li key={finding.id} id={`reviewer-finding-${finding.id}`.replace(/[^A-Za-z0-9_-]/g, '-')} className={`blocking-card ui-card ${severityClass(severityTone(finding.severity))}`} data-testid="reviewer-judge-read-finding" data-id={finding.id} data-severity={finding.severity}>
+                <p className="blocking-card-head">
+                  <SeverityChip severity={finding.severity} className="finding-severity" /> · {finding.id} · {laneWording(finding.worker)}
+                </p>
+                <p className="blocking-card-message">{finding.message}</p>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+    </>
   )
 }
 

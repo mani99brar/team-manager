@@ -1,0 +1,73 @@
+{
+  "version": "1.0.0",
+  "reviewers": [
+    {
+      "name": "claude",
+      "transport": "claude",
+      "model": null,
+      "effort": null,
+      "credential": "cli-login",
+      "prefix": "C",
+      "cap": {"timeout_minutes": 15, "budget_usd": 5},
+      "enabled": true
+    },
+    {
+      "name": "gpt",
+      "transport": "pi",
+      "model": "openai-codex/gpt-6.1-sol",
+      "effort": null,
+      "credential": "cli-login",
+      "prefix": "G",
+      "cap": {"timeout_minutes": 15},
+      "enabled": true
+    },
+    {
+      "name": "muse",
+      "transport": "cli",
+      "model": "muse-wonder-1.0",
+      "effort": null,
+      "credential": "cli-login",
+      "prefix": "M",
+      "cap": {"timeout_minutes": 15},
+      "enabled": true,
+      "cli": {
+        "argv": ["muse", "exec", "--json", "--no-session-log", "--model", "{model}", "--reasoning-effort", "high",
+                 "--prompt-file", "{prompt_file}", "--workspace", "{worktree}", "--approval-mode", "on-request",
+                 "--sandbox-network", "restricted", "--no-foreign-personal-context", "--disable-web-tools",
+                 "--max-model-steps", "200"],
+        "prompt_via": "file",
+        "output": {"format": "jsonl_event", "match": {"payload_type": "run.terminal.completed"}, "field": "payload.text"},
+        "served_model": {"format": "jsonl_event", "match": {"payload_type": "run.model.configured"}, "field": "payload.model_id"},
+        "env": {"set": {"MUSE_NO_AUTO_UPDATE": "1"}, "pass": []},
+        "version_argv": ["muse", "--version"],
+        "failures": {
+          "auth": ["Not logged in", "run `muse login`", "API error 40[13]"],
+          "quota": ["usage limit reached", "tier_limit", "rate limited"]
+        }
+      }
+    },
+    {
+      "name": "argon",
+      "transport": "cli",
+      "model": "gemini-4-argon",
+      "effort": null,
+      "credential": "cli-login",
+      "prefix": "A",
+      "cap": {"timeout_minutes": 15},
+      "enabled": false,
+      "cli": {
+        "argv": ["agy", "-p", "Read the review brief in {prompt_file} and follow it exactly.", "--output-format", "json",
+                 "--model", "{model}", "--effort", "high", "--print-timeout", "{timeout_minutes}m"],
+        "prompt_via": "file",
+        "output": {"format": "json_field", "match": {"status": "SUCCESS"}, "field": "response"},
+        "served_model": null,
+        "env": {"set": {"AGY_CLI_DISABLE_AUTO_UPDATE": "true"}, "pass": ["DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR"]},
+        "version_argv": ["agy", "--version"],
+        "failures": {
+          "auth": ["authentication required", "keyring is locked"],
+          "quota": ["RESOURCE_EXHAUSTED", "quota exceeded"]
+        }
+      }
+    }
+  ]
+}

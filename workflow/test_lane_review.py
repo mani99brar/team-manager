@@ -98,6 +98,19 @@ class ConfigTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "not a lane_review setting"):
             lane_review.settings({**self.good(), "extra": 1}, "x ")
 
+    def test_a_cli_reviewer_is_refused(self):
+        """[O4]: lane review keeps claude and pi; the judged panel's cli transport is refused, naming it."""
+        cli = {"transport": "cli", "model": "muse-wonder-1.0"}
+        with self.assertRaisesRegex(ValueError, "transport cli is not a lane reviewer transport: lane review keeps claude and pi only"):
+            lane_review.settings({"reviewers": [cli]}, "x ")
+        manifest = {"version": "2.11.0", "workers": [{"node_id": "engine", "task": "t.md", "lane_review": {"reviewers": [cli]}}]}
+        with self.assertRaisesRegex(ValueError, r"workers\[engine\].lane_review reviewers\[0\].transport cli"):
+            lane_review.declared(manifest)
+
+    def test_declared_keeps_lane_review_at_2_11_0(self):
+        manifest = {"version": "2.11.0", "workers": [{"node_id": "engine", "task": "t.md", "lane_review": self.good()}]}
+        self.assertEqual(lane_review.declared(manifest), lane_review.declared({**manifest, "version": "2.10.0"}))
+
     def test_declared_refuses_before_2_10_0_naming_the_lane(self):
         for version in ("2.8.0", "2.9.0"):  # 2.9.0 is the critique version; lane_review starts at 2.10.0.
             manifest = {"version": version, "workers": [{"node_id": "engine", "task": "t.md", "lane_review": self.good()}]}

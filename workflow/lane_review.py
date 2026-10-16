@@ -52,7 +52,11 @@ def _number(value) -> bool:
 # ---- Configuration: feature.json 2.10.0 and plan.nodes[<lane>].lane_review ------------------------------------------
 
 def reviewer_settings(value, where: str) -> dict:
-    """One reviewer validated as a panel provider: {transport (claude|pi), model?, effort?}; the panel's own rules."""
+    """One reviewer validated as a panel provider: {transport (claude|pi), model?, effort?}; the panel's own rules. The judged
+    panel's generic `cli` transport is refused here: lane review keeps claude and pi only ([O4])."""
+    if isinstance(value, dict) and value.get("transport") == "cli":
+        raise ValueError(f"{where}transport cli is not a lane reviewer transport: lane review keeps claude and pi only "
+                         "(the cli transport is the judged review panel's, features/review-panel-registry decisions [O4])")
     return panel.provider_settings(value, where)
 
 

@@ -1406,7 +1406,7 @@ function lanesQuoting(requirement: string | null, tasks: Record<string, string>)
  * `review`: the adapter fills a one-entry list from the section itself and tags every finding with that id, so the viewer
  * has a single code path. The combined `reviewer` identity stays what the review node names (the first reviewer's session).
  */
-export function projectReview(runId: string, section: RawReviewSection, tasks: Record<string, string>, workflowId: string = runDetails[runId].summary.workflow_id): ReviewResult {
+export function projectReview(runId: string, section: RawReviewSection, tasks: Record<string, string>, workflowId: string = runDetails[runId].summary.workflow_id, judgedPanel = false): ReviewResult {
   const link = (finding: RawFinding, reviewer: string) => ({ ...finding, reviewer: finding.reviewer ?? reviewer, requirement_found_in: lanesQuoting(finding.requirement, tasks) })
   const reviewers: RawReviewer[] = section.reviewers ?? [{
     reviewer_id: DEFAULT_REVIEWER_ID, transport: section.transport, session_id: section.reviewer_session_id, verdict: section.verdict,
@@ -1426,7 +1426,9 @@ export function projectReview(runId: string, section: RawReviewSection, tasks: R
     })),
     reviewed_at: zulu(section.reviewed_at),
     diff: section.diff === null ? null : { artifact_id: REVIEW_DIFF_ARTIFACT_ID, kind: 'patch', uri: `${apiRunPath(runId, workflowId)}/artifacts/${REVIEW_DIFF_ARTIFACT_ID}`, sha256: section.diff.sha256 },
-  })
+    // A run whose plan pins a judged panel (features/review-panel-registry/prd.md 7.4): served with the flag, validated with its context.
+    ...(judgedPanel ? { judged_panel: true } : {}),
+  }, { judgedPanel })
 }
 
 /**

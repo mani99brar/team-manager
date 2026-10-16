@@ -487,7 +487,7 @@ spec = (json.loads(CONTROL.read_text()) if CONTROL.exists() else {}).get("claude
 assert argv[argv.index("--tools") + 1] == "Read,Glob,Grep"
 assert "--add-dir" not in argv
 prompt = sys.stdin.read()
-Path(%(seen)r).write_text(json.dumps({"argv": argv, "cwd": os.getcwd(), "prompt": prompt}))
+Path(%(seen)r).write_text(json.dumps({"argv": argv, "cwd": os.getcwd(), "prompt": prompt, "env": dict(os.environ)}))
 if spec.get("hang"):
     time.sleep(3600)
 time.sleep(spec.get("delay", 0))
@@ -1260,6 +1260,1062 @@ class GraphRun(GraphFixture):
         self.assertEqual(record["panels"][0]["status"], "succeeded")
         self.assertIsNotNone(record["panels"][0]["ended_at"])
         self.assertEqual([event for event in self.events() if str(event.get("node", "")).startswith("panel")], [])
+
+
+# ---- the judged panel (feature.json 2.11.0; features/review-panel-registry, seats task Acceptance 4-9) ---------------------
+
+REGISTRY_FEATURE = ROOT / "features" / "review-panel-registry"
+REGISTRY_EXAMPLES = REGISTRY_FEATURE / "examples"
+# review.md as it is today: the report-only panels' brief stays byte-identical (design-challenge note 1; operator answer: option A).
+REVIEW_BRIEF_SHA256 = "d69daeefffd43cbb143392cac1bfed33fd657dbdfaad9f44c43a89362a407128"
+
+
+def registry_example(name: str) -> dict:
+    return json.loads((REGISTRY_EXAMPLES / f"{name}.example.json").read_text())
+
+
+def prd_literal(marker: str) -> dict:
+    """A fenced JSON block of the PRD's Appendix B by its `<!-- literal: <marker> -->` marker ([L2])."""
+    prd = (REGISTRY_FEATURE / "prd.md").read_text()
+    return json.loads(re.search(rf"<!-- literal: {re.escape(marker)} -->\s*```json\n(.*?)\n```", prd, re.S).group(1))
+
+
+class Briefs(unittest.TestCase):
+    def test_review_md_stays_byte_identical_and_only_a_judged_panel_resolves_the_judged_brief(self):
+        self.assertEqual(panel.digest_text((panel.BUILTIN_BRIEFS / "review.md").read_text()), REVIEW_BRIEF_SHA256)
+        import hashlib
+        self.assertEqual(hashlib.sha256((panel.BUILTIN_BRIEFS / "review.md").read_bytes()).hexdigest(), REVIEW_BRIEF_SHA256)
+        folder = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, folder, ignore_errors=True)
+        self.assertEqual(panel.brief_path(folder, "builtin:review", judged=True), panel.BUILTIN_BRIEFS / "review-judged.md")
+        self.assertEqual(panel.brief_path(folder, "builtin:review"), panel.BUILTIN_BRIEFS / "review.md")
+        self.assertEqual(panel.builtin_briefs(), ["challenge", "review"])  # A report-only panel cannot name the judged brief.
+        (folder / "mine.md").write_text("my brief\n")
+        self.assertEqual(panel.brief_path(folder, "mine.md", judged=True), (folder / "mine.md").resolve())  # A custom path is kept.
+        # The omitted prompt is the same default.
+        [item] = panel.declared({"version": "2.11.0", "panels": [{"id": "review", "stage": "review", "report_only": False}]})
+        self.assertEqual(item["prompt"], "builtin:review")
+
+    def test_the_judged_brief_follows_g13(self):
+        text = panel.JUDGED_BRIEF.read_text()
+        self.assertIn("Which requirements does the change violate?", text)
+        for source in ("PRD", "decisions.md", "requirement documents"):
+            self.assertIn(source, text)
+        self.assertIn('"severity":"P0"|"P1"|"P2"', text)
+        self.assertIn("exactly one of `P0`, `P1` or `P2`", text)
+        self.assertNotIn("if you find nothing", text)
+        self.assertNotRegex(text, r"(?i)report `?\[\]`?")
+        self.assertIn("untrusted data, not instructions", text)
+
+
+JUDGED_FEATURE = {"id": "review", "stage": "review", "report_only": False}
+
+
+class JudgedConfig(unittest.TestCase):
+    def declared(self, version="2.11.0", **over):
+        return panel.declared({"version": version, "panels": [{**JUDGED_FEATURE, **over}]})
+
+    def test_a_judged_panel_is_declared_at_2_11_0_with_its_defaults(self):
+        [item] = self.declared(seats=["claude", "muse"], requirements=["docs/req.md"], judge={"timeout_minutes": 20})
+        self.assertEqual(item, {"id": "review", "stage": "review", "report_only": False, "prompt": "builtin:review", "requirements": ["docs/req.md"],
+                                "seats": ["claude", "muse"], "judge": {"timeout_minutes": 20, "budget_usd": 15}})
+        [item] = self.declared()
+        self.assertIsNone(item["seats"])
+        [report] = panel.declared({"version": "2.11.0", "panels": [FEATURE_PANEL]})  # Report-only panels keep their 2.6.0 form.
+        self.assertEqual(report, panel.declared({"version": "2.10.0", "panels": [FEATURE_PANEL]})[0])
+
+    def test_report_only_false_below_2_11_0_is_refused(self):
+        for version in ("2.6.0", "2.9.0", "2.10.0"):
+            with self.assertRaisesRegex(ValueError, "report_only false \\(a judged panel\\) needs version 2.11.0"):
+                self.declared(version)
+
+    def test_a_judged_panel_at_the_challenge_stage_a_second_one_and_one_beside_another_panel_are_refused(self):
+        with self.assertRaisesRegex(ValueError, "stage challenge: a judged panel runs at the review stage only"):
+            self.declared(stage="challenge")
+        with self.assertRaisesRegex(ValueError, "second judged panel"):
+            panel.declared({"version": "2.11.0", "panels": [JUDGED_FEATURE, {**JUDGED_FEATURE, "id": "again"}]})
+        for others in ([FEATURE_PANEL, JUDGED_FEATURE], [JUDGED_FEATURE, FEATURE_PANEL]):
+            with self.assertRaisesRegex(ValueError, "judged panel beside another panel.*\\[L5\\]"):
+                panel.declared({"version": "2.11.0", "panels": others})
+
+    def test_a_judged_panel_with_providers_overlap_or_a_panel_budget_is_refused(self):
+        for key, value in (("providers", [{"transport": "claude"}]), ("overlap_threshold", 2), ("budget_usd", 5), ("timeout_minutes", 15)):
+            with self.assertRaisesRegex(ValueError, f"{key} is not a judged-panel setting"):
+                self.declared(**{key: value})
+
+    def test_a_feature_cannot_inline_a_seat_a_list_digest_or_the_judge_model(self):
+        """Design-challenge note 5: resolved seat objects, `reviewers_file` and `judge.model` ride only in --panel-settings and the plan."""
+        seat = prd_literal("plan-panel-judged")["seats"][2]
+        with self.assertRaisesRegex(ValueError, "seats must be 1 to 16 distinct reviewer names.*never inline"):
+            self.declared(seats=[seat])
+        with self.assertRaisesRegex(ValueError, "reviewers_file is not a judged-panel setting"):
+            self.declared(reviewers_file={"label": "x", "sha256": "0" * 64})
+        with self.assertRaisesRegex(ValueError, "judge.model is not a judge setting"):
+            self.declared(judge={"model": "claude-opus-5-5"})
+        for bad in ([], ["a"] * 2, ["Bad"], [f"s{i}" for i in range(17)]):
+            with self.assertRaisesRegex(ValueError, "seats must be"):
+                self.declared(seats=bad)
+        for judge, pattern in (({"timeout_minutes": 4}, "from 5 to 60"), ({"budget_usd": 51}, "from 1 to 50"), ({"effort": "low"}, "not a judge setting")):
+            with self.assertRaisesRegex(ValueError, pattern):
+                self.declared(judge=judge)
+
+    def test_validate_plan_accepts_the_plan_panel_judged_literal_and_refuses_it_beside_another_panel(self):
+        literal = prd_literal("plan-panel-judged")
+        panel.validate_plan({"panels": [literal]})
+        self.assertEqual([seat["name"] for seat in literal["seats"]], ["claude", "gpt", "muse", "argon"])
+        self.assertEqual(panel.judged_item({"panels": [literal]}), literal)
+        report = {**plan_item(), "id": "other"}
+        with self.assertRaisesRegex(ValueError, "beside another panel"):
+            panel.validate_plan({"panels": [literal, report]})
+        for mutate, pattern in ((lambda item: item.pop("reviewers_file"), "a judged panel expects"),
+                                (lambda item: item["judge"].update(model=None), "judge.model must be"),
+                                (lambda item: item["seats"][2]["cli"]["argv"].append("{prompt}"), "placeholder"),
+                                (lambda item: item["seats"][0].update(bin=None), "needs its resolved absolute bin"),
+                                (lambda item: item["seats"][1].update(prefix="C"), "repeat a prefix")):
+            item = json.loads(json.dumps(literal))
+            mutate(item)
+            with self.assertRaisesRegex(ValueError, pattern):
+                panel.validate_plan({"panels": [item]})
+
+    def test_check_launch_runs_the_deepseek_guard_over_resolved_pi_seats(self):
+        item = prd_literal("plan-panel-judged")
+        item["seats"][1]["model"] = "deepseek/deepseek-v4"
+        with self.assertRaisesRegex(ValueError, "DeepSeek key"):
+            panel.check_launch([item], environ={})
+        item["seats"][1].update(status="unavailable", error="disabled in the reviewer list")
+        panel.check_launch([item], environ={})  # An unavailable seat never runs, so it needs no key.
+
+
+class Schemas(unittest.TestCase):
+    def test_every_example_and_the_judge_states_validate_and_record_1_0_0_still_does(self):
+        for name in ("panel-judged", "panel-fallback"):
+            validate_schema("panel", registry_example(name))
+            panel.validate_record(registry_example(name))
+        validate_schema("reviewers", registry_example("reviewers"))
+        record = registry_example("panel-judged")
+        for status, judge in prd_literal("judge-states").items():
+            self.assertEqual(judge["status"], status)
+            record["panels"][0]["judge"] = judge
+            validate_schema("panel", record)
+        for item in appendix_records():  # The 1.0.0 records of the multi-provider panel PRD still validate.
+            validate_schema("panel", item)
+            panel.validate_record(item)
+        from jsonschema.exceptions import ValidationError
+        for mutate in (lambda r: r.update(version="1.2.0"), lambda r: r["panels"][0].pop("judge"), lambda r: r["panels"][0].update(judged=False),
+                       lambda r: r["panels"][0]["providers"][2].update(transport="codex"), lambda r: r["panels"].append(r["panels"][0]),
+                       lambda r: r["panels"][0]["judge"].update(fallback=True), lambda r: r["panels"][0]["findings"][0].update(id="f1"),
+                       lambda r: r["panels"][0]["providers"][0].update(status="succeeded")):
+            item = registry_example("panel-judged")
+            mutate(item)
+            with self.assertRaises(ValidationError):
+                validate_schema("panel", item)
+        legacy = appendix_records()[0]
+        legacy["panels"][0]["providers"][0]["transport"] = "cli"  # A 1.0.0 record keeps claude|pi only.
+        with self.assertRaises(ValidationError):
+            validate_schema("panel", legacy)
+
+
+def fake_run_probes(argv, **kwargs):
+    """Probes for reviewers.resolve in the seat harness: claude --help lists --max-budget-usd, every version probe succeeds."""
+    name = Path(argv[0]).name
+    out = "  --max-budget-usd <n>\n" if argv[1:] == ["--help"] else ("Muse Code 1.4.7 (1.4.7-R6101.1)\n" if name == "muse" else f"{name} 1.0\n")
+    return subprocess.CompletedProcess(argv, 0, stdout=out)
+
+
+class SeatHarness(Harness):
+    """The toy repository and run of Harness, plus fake `muse` and `agy` (workflow/testdata/panel/) on a fake bin dir, and a plan
+    whose one judged panel pins seats resolved from the shipped reviewer list. Planted credentials in the controller's environment
+    must never reach a cli seat."""
+
+    def setUp(self):
+        super().setUp()
+        self.fakes = self.tmp / "fake-bin"
+        self.fakes.mkdir()
+        for name in ("muse", "agy"):
+            shutil.copyfile(TESTDATA / f"fake-{name}", self.fakes / name)
+            (self.fakes / name).chmod(0o755)
+        self.seat_control = self.fakes / "control.json"
+        self.seat_control.write_text("{}")
+        planted = mock.patch.dict(os.environ, {"META_API_KEY": "planted-meta", "GEMINI_API_KEY": "planted-gemini",
+                                               "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/1/bus",
+                                               "XDG_RUNTIME_DIR": "/run/user/1"})
+        planted.start()
+        self.addCleanup(planted.stop)
+        self.addCleanup(self.kill_grandchild)
+        self.addCleanup(lambda: subprocess.run(["git", "-C", str(self.repo), "worktree", "prune"], capture_output=True))
+        (self.repo / "features" / "demo").mkdir(parents=True)
+
+    def kill_grandchild(self):
+        import signal
+        path = self.fakes / "grandchild.pid"
+        if path.exists():
+            try:
+                os.kill(int(path.read_text()), signal.SIGKILL)
+            except (OSError, ValueError):
+                pass
+
+    def seats(self, names=None, listing=None) -> list[dict]:
+        from . import reviewers
+        found = {"claude": str(self.fake_claude), "pi": str(self.pi_bin / "pi"), "muse": str(self.fakes / "muse"), "agy": str(self.fakes / "agy")}
+        return reviewers.resolve(listing or registry_example("reviewers"), names, which=lambda name, path=None: found.get(name), run=fake_run_probes)
+
+    def judged_plan(self, seats=None, **over) -> dict:
+        from .sessions import pin_roles
+        text = panel.JUDGED_BRIEF.read_text()
+        item = {"id": "review", "stage": "review", "report_only": False,
+                "prompt": {"source": str(panel.JUDGED_BRIEF), "text": text, "sha256": panel.digest_text(text)},
+                "requirements": ["docs/req.md"], "requirement_docs": {"docs/req.md": "REQ-1: the pinned requirements text\n"},
+                "pi_bin": str(self.pi_bin), "prd_label": None, "reviewers_file": {"label": "~/reviewers.json", "sha256": "a" * 64},
+                "seats": self.seats() if seats is None else seats,
+                "judge": {"model": "claude-opus-5-5", "effort": "high", "timeout_minutes": 30, "budget_usd": 15, "input_cap_bytes": 600000}}
+        item.update(over)
+        plan = {"run_id": "panel-001", "repository": str(self.repo), "base_commit": self.base, "nodes": {}, "conventions": None, "panels": [item],
+                "prd": None, "roles": pin_roles(judge_model="claude-opus-5-5", env={}),
+                "decisions": {"path": str(self.repo / "features" / "demo" / "decisions.md"), "text": "# Decisions\n- [O1] DECISION-ONE: the seat reads me\n"}}
+        panel.validate_plan(plan)
+        save_json(self.run / "plan.json", plan)
+        return plan
+
+    def control_seats(self, **spec):
+        self.seat_control.write_text(json.dumps(spec))
+
+    def seen(self) -> list[dict]:
+        return [read_json(path) for path in sorted(self.fakes.glob("seen-*.json"), key=lambda p: int(p.stem.split("-")[1]))]
+
+    def fresh_round(self):
+        """A new round of the same run: no record, no panel dir, no fake records."""
+        shutil.rmtree(self.run / "panel", ignore_errors=True)
+        (self.run / "panel.json").unlink(missing_ok=True)
+        for path in self.fakes.glob("seen-*.json"):
+            path.unlink()
+
+    def worktrees(self) -> str:
+        return git(self.repo, "worktree", "list", "--porcelain")
+
+    def pause(self, _):
+        time.sleep(0.05)
+
+
+MUSE_FINDINGS = [{"severity": "P1", "file": "workflow/x.py", "line": 2, "title": "Owner check gone", "detail": "PRD REQ-1: anyone withdraws"}]
+
+
+class JudgedSeats(SeatHarness):
+    def test_seats_run_blind_beside_each_other_and_settle_returns_every_seat(self):
+        """Acceptance 4-6: the three transports, the context with decisions.md, the record 1.1.0, <prefix><n> ids, settle's return,
+        no attention, and collect a no-op afterwards."""
+        self.set_control(claude={"findings": CLAUDE_FINDINGS, "cost": 0.021}, pi={"findings": PI_FINDINGS, "cost": 0.0047})
+        self.control_seats(muse={"findings": MUSE_FINDINGS})
+        plan = self.judged_plan()
+        self.assertEqual([(s["name"], s["status"]) for s in plan["panels"][0]["seats"]], [("claude", "pending"), ("gpt", "pending"), ("muse", "pending")])
+        runtime = self.runtime(plan)
+        panel.ensure_started(runtime)
+        running = self.record()
+        self.assertEqual(running["version"], "1.1.0")
+        self.assertEqual(running["panels"][0]["judge"], {**prd_literal("judge-states")["pending"]})
+        self.assertEqual([p["status"] for p in running["panels"][0]["providers"]], ["running"] * 3)
+        settled = panel.settle(runtime, sleep=self.pause)
+        record = self.record()
+        entry = record["panels"][0]
+        self.assertEqual(entry["status"], "succeeded")
+        self.assertEqual([(p["name"], p["prefix"], p["transport"], p["status"], p["finding_ids"]) for p in entry["providers"]],
+                         [("claude", "C", "claude", "ok", ["C1", "C2"]), ("gpt", "G", "pi", "ok", ["G1", "G2"]), ("muse", "M", "cli", "ok", ["M1"])])
+        self.assertEqual([(f["id"], f["providers_raised"], f["accepted"], f["file"]) for f in entry["findings"]],
+                         [("C1", ["claude"], False, "workflow/x.py"), ("C2", ["claude"], False, "workflow/new.py"),
+                          ("G1", ["gpt"], False, "workflow/x.py"), ("G2", ["gpt"], False, "src/elsewhere.ts"), ("M1", ["muse"], False, "workflow/x.py")])
+        muse = entry["providers"][2]
+        self.assertEqual((muse["served_model"], muse["cli_version"], muse["cost_usd"], muse["effort"]), ("muse-wonder-1.0", "Muse Code 1.4.7 (1.4.7-R6101.1)", None, None))
+        self.assertEqual(entry["providers"][0]["effort"], "high")  # A null-effort claude seat runs the judges' pinned effort.
+        # settle's return (design-challenge note 6): each providers[] entry plus its findings cut to six keys, every pinned seat.
+        by_id = {f["id"]: f for f in entry["findings"]}
+        self.assertEqual(settled, [{**p, "findings": [{k: by_id[i][k] for k in ("id", "severity", "file", "line", "title", "detail")} for i in p["finding_ids"]]}
+                                   for p in entry["providers"]])
+        # The context: today's sections plus the pinned decisions.md under its repository label.
+        context = (self.run / "panel" / "review" / "context.txt").read_text()
+        self.assertIn("=== features/demo/decisions.md ===\n# Decisions\n- [O1] DECISION-ONE", context)
+        self.assertEqual(panel.context_labels(context), ["docs/req.md", "workflow/new.py", "workflow/x.py", "docs/req.md", "features/demo/decisions.md"])
+        # No attention record for a judged panel; collect after settle changes nothing.
+        self.assertEqual([line for line in self.attention_lines() if line["kind"] == "panel"], [])
+        before = (self.run / "panel.json").read_bytes()
+        self.decide()
+        panel.collect(runtime, None)
+        self.assertEqual((self.run / "panel.json").read_bytes(), before)
+        self.assertEqual(panel.settle(self.runtime(plan)), settled)  # A terminal record is returned, never rerun.
+        self.assertEqual(len(self.seen()), 1)
+
+    def test_a_candidate_touching_decisions_md_still_gives_the_seats_the_pinned_decisions(self):
+        """[G13]: the candidate's edit of decisions.md is a touched-file section; the pinned text still follows under the same label."""
+        (self.repo / "features" / "demo" / "decisions.md").write_text("# Decisions\n- [O1] CANDIDATE-REWRITE: nothing is pinned\n")
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-qm", "candidate editing decisions.md")
+        save_json(self.run / "review-bundle.json", {"run_id": "panel-001", "candidate_commit": git(self.repo, "rev-parse", "HEAD")})
+        plan = self.judged_plan()
+        path, _, _ = panel.assemble_review_context(self.run, plan, plan["panels"][0])
+        context = path.read_text()
+        self.assertEqual(panel.context_labels(context), ["docs/req.md", "features/demo/decisions.md", "workflow/new.py", "workflow/x.py",
+                                                         "docs/req.md", "features/demo/decisions.md"])
+        self.assertIn("CANDIDATE-REWRITE", context)
+        self.assertIn("=== features/demo/decisions.md ===\n# Decisions\n- [O1] DECISION-ONE", context)
+
+    def test_no_seat_prompt_names_the_run_directory_and_claude_and_pi_argv_equal_todays_builders(self):
+        """[L1]: no seat's prompt file names a run-directory path; claude and pi seat argv equal claude_command / pi_command."""
+        self.set_control(claude={"findings": []}, pi={"findings": []})
+        self.control_seats(muse={"findings": []})
+        plan = self.judged_plan()
+        runtime = self.runtime(plan)
+        panel.ensure_started(runtime)
+        panel.settle(runtime, sleep=self.pause)
+        run_dir = str(self.run.resolve())
+        claude_seen, pi_seen = read_json(self.claude_seen), read_json(self.pi_seen)
+        [muse_seen] = self.seen()
+        session_id = claude_seen["argv"][claude_seen["argv"].index("--session-id") + 1]
+        claude_seat, gpt_seat = plan["panels"][0]["seats"][:2]
+        self.assertEqual(claude_seen["argv"], panel.claude_command(str(self.fake_claude), session_id, panel.seat_entry(claude_seat),
+                                                                   {"budget_usd": 5}, self.run, plan)[1:])
+        self.assertEqual(claude_seen["argv"][claude_seen["argv"].index("--model") + 1], "claude-opus-5-5")  # [L7]: the judges' model.
+        self.assertEqual(pi_seen["argv"], panel.pi_command(str(self.pi_bin), panel.seat_entry(gpt_seat), plan["panels"][0]["prompt"]["text"])[1:])
+        self.assertEqual(Path(claude_seen["cwd"]).resolve(), (self.run / "review-worktree").resolve())  # Today's placement.
+        for prompt in (claude_seen["prompt"], muse_seen["prompt"], pi_seen["argv"][-2], (self.run / "panel" / "review" / "context.txt").read_text()):
+            self.assertNotIn(run_dir, prompt)
+            self.assertNotIn(str(self.run), prompt)
+        self.assertTrue(muse_seen["prompt"].startswith(plan["panels"][0]["prompt"]["text"].rstrip()))
+
+    def test_the_cli_seat_gets_no_prompt_in_argv_dev_null_stdin_an_env_from_nothing_and_a_removed_throwaway_worktree(self):
+        """Acceptance 4: argv, stdin, the exact environment ([G14], [G18]) and the worktree and scratch dir, against the fake muse."""
+        listing = registry_example("reviewers")
+        login = self.tmp / "muse-login.json"
+        login.write_text("{}")
+        login.chmod(0)
+        self.addCleanup(login.chmod, 0o600)
+        listing["reviewers"][2]["credential"] = {"file": str(login), "env": "MUSE_LOGIN_FILE"}
+        self.control_seats(muse={"findings": MUSE_FINDINGS, "write": True})
+        plan = self.judged_plan(self.seats(["muse"], listing))
+        runtime = self.runtime(plan)
+        panel.settle(runtime, sleep=self.pause)  # Starts the seat itself (nothing started in this process), then waits.
+        [seen] = self.seen()
+        brief = plan["panels"][0]["prompt"]["text"]
+        self.assertFalse(any(brief[:60] in argument or "DECISION-ONE" in argument for argument in seen["argv"]))
+        self.assertFalse(any(str(self.run) in argument or str(self.run.resolve()) in argument for argument in seen["argv"]))
+        self.assertNotIn(str(login), json.dumps(seen["argv"]))
+        self.assertEqual(seen["stdin"], "/dev/null")
+        self.assertEqual(seen["argv"][:3], ["exec", "--json", "--no-session-log"])
+        prompt_file = Path(seen["argv"][seen["argv"].index("--prompt-file") + 1])
+        worktree = Path(seen["argv"][seen["argv"].index("--workspace") + 1])
+        self.assertEqual(Path(seen["cwd"]).resolve(), worktree.resolve())
+        self.assertTrue(worktree.name.startswith("review-seat-") and prompt_file.parent.name.startswith("review-seat-ctx-"))
+        for path in (worktree, prompt_file):
+            self.assertFalse(str(path.resolve()).startswith(str(self.run.resolve())))
+            self.assertFalse(str(path.resolve()).startswith(str(Path.home() / "dev")))
+        self.assertEqual(set(seen["env"]) - {"PWD", "SHLVL", "_", "OLDPWD", "LC_CTYPE"},
+                         {"PATH", "HOME", "LANG", "TMPDIR", "MUSE_NO_AUTO_UPDATE", "MUSE_LOGIN_FILE"})
+        self.assertEqual(seen["env"]["PATH"], f"{self.fakes}:/usr/bin:/bin")
+        self.assertEqual(seen["env"]["MUSE_LOGIN_FILE"], str(login))
+        self.assertNotIn("META_API_KEY", seen["env"])
+        self.assertNotIn("GEMINI_API_KEY", seen["env"])
+        # The seat's write stayed in its throwaway worktree, which is gone with its scratch dir; the candidate is untouched.
+        self.assertFalse(worktree.exists())
+        self.assertFalse(prompt_file.parent.exists())
+        self.assertNotIn(str(worktree), self.worktrees())
+        self.assertFalse((self.run / "review-worktree" / "SEAT-WROTE-THIS.txt").exists())
+        self.assertEqual(git(self.repo, "status", "--porcelain"), "")
+        self.assertEqual(self.record()["panels"][0]["findings"][0]["id"], "M1")
+        self.assertTrue((self.run / "panel" / "review" / "muse-1.stdout.txt").stat().st_size > 0)  # Kept for the record.
+
+    def test_the_agy_entry_with_its_pass_names_and_a_stdin_prompt(self):
+        listing = registry_example("reviewers")
+        listing["reviewers"][3]["enabled"] = True
+        listing["reviewers"][3]["cli"]["prompt_via"] = "stdin"
+        self.control_seats(agy={"findings": [{"severity": "P2", "file": "workflow/new.py", "line": 1, "title": "t", "detail": "d"}]})
+        plan = self.judged_plan(self.seats(["argon"], listing))
+        panel.settle(self.runtime(plan), sleep=self.pause)
+        [seen] = self.seen()
+        self.assertEqual(set(seen["env"]) - {"PWD", "SHLVL", "_", "OLDPWD", "LC_CTYPE"},
+                         {"PATH", "HOME", "LANG", "TMPDIR", "AGY_CLI_DISABLE_AUTO_UPDATE", "DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR"})
+        self.assertEqual((seen["env"]["DBUS_SESSION_BUS_ADDRESS"], seen["env"]["XDG_RUNTIME_DIR"]), ("unix:path=/run/user/1/bus", "/run/user/1"))
+        self.assertTrue(seen["stdin_text"].startswith(plan["panels"][0]["prompt"]["text"].rstrip()))
+        self.assertNotEqual(seen["stdin"], "/dev/null")
+        self.assertEqual(seen["argv"][1], f"Read the review brief in {Path(seen['argv'][1].split(' in ')[1].split(' and')[0])} and follow it exactly.")
+        self.assertEqual(seen["argv"][-1], "15m")
+        self.assertEqual([(p["status"], p["finding_ids"], p["cli_version"]) for p in self.record()["panels"][0]["providers"]], [("ok", ["A1"], "agy 1.0")])
+
+    def run_muse(self, spec: dict, **settle) -> dict:
+        self.fresh_round()
+        self.control_seats(muse=spec)
+        plan = self.judged_plan(self.seats(["muse"]))
+        panel.settle(self.runtime(plan), **({"sleep": self.pause} | settle))
+        return self.record()["panels"][0]["providers"][0]
+
+    def test_each_cli_status_is_produced_by_its_trigger(self):
+        """PRD 5.1: ok, auth_required, usage_limit, model_mismatch, error (no terminal event at exit 0; exit != 0), parse_failed."""
+        cases = [({"findings": MUSE_FINDINGS}, "ok", None),
+                 ({"mode": "auth"}, "auth_required", "Error: Not logged in (run `muse login`)"),
+                 ({"mode": "quota"}, "usage_limit", "Error: usage limit reached for your plan (tier_limit); try again later"),
+                 ({"served": "muse-lite-0.9", "findings": MUSE_FINDINGS}, "model_mismatch", "served model 'muse-lite-0.9'"),
+                 ({"mode": "no_terminal"}, "error", "no output matching"),
+                 ({"exit": 2, "findings": MUSE_FINDINGS}, "error", "exit 2"),
+                 ({"text": "I reviewed it and it looks fine."}, "parse_failed", "parse_failed: I reviewed it"),
+                 ({"text": '["review failed"]'}, "parse_failed", 'parse_failed: ["review failed"]'),
+                 ({"text": '{"findings": ["x"]}'}, "parse_failed", 'parse_failed: {"findings": ["x"]}')]
+        for spec, status, error in cases:
+            with self.subTest(status=status, spec=spec):
+                provider = self.run_muse(spec)
+                self.assertEqual(provider["status"], status)
+                if error is None:
+                    self.assertIsNone(provider["error"])
+                    self.assertEqual(provider["finding_ids"], ["M1"])
+                else:
+                    self.assertIn(error, provider["error"])
+                    self.assertEqual(provider["finding_ids"], [])
+                self.assertEqual(self.record()["panels"][0]["findings"] != [], status == "ok")
+                self.assertNotIn("review-seat-", self.worktrees())
+        for text in ("[]", '{"findings": []}'):
+            with self.subTest(empty=text):
+                provider = self.run_muse({"text": text})
+                self.assertEqual((provider["status"], provider["error"], provider["finding_ids"]), ("ok", None, []))
+        provider = self.run_muse({"mode": "fenced", "findings": MUSE_FINDINGS})
+        self.assertEqual(provider["status"], "ok")
+        for spec, status in (({"mode": "auth"}, "auth_required"), ({"mode": "quota"}, "usage_limit"), ({"mode": "failed"}, "error")):
+            with self.subTest(agy=status):
+                self.fresh_round()
+                listing = registry_example("reviewers")
+                listing["reviewers"][3]["enabled"] = True
+                self.control_seats(agy=spec)
+                plan = self.judged_plan(self.seats(["argon"], listing))
+                panel.settle(self.runtime(plan), sleep=self.pause)
+                self.assertEqual(self.record()["panels"][0]["providers"][0]["status"], status)
+
+    def test_a_seat_that_answers_and_exits_leaves_nothing_running_in_its_group(self):
+        """Lane review: an exited seat's process group is killed when it is reaped, so a background process it spawned dies."""
+        provider = self.run_muse({"mode": "spawn", "findings": MUSE_FINDINGS})
+        self.assertEqual(provider["status"], "ok")
+        grandchild = int((self.fakes / "grandchild.pid").read_text())
+        for _ in range(50):
+            if panel._gone(grandchild):
+                break
+            time.sleep(0.1)
+        self.assertTrue(panel._gone(grandchild))
+        self.assertNotIn("review-seat-", self.worktrees())
+
+    def test_a_timeout_kills_the_process_group_and_removes_the_worktree(self):
+        now = [1000.0]
+
+        def sleep(_):
+            time.sleep(0.05)
+            if (self.fakes / "grandchild.pid").exists():
+                now[0] += 16 * 60  # Past the 15-minute cap, from the seat's own start.
+        provider = self.run_muse({"mode": "hang"}, clock=lambda: now[0], sleep=sleep)
+        self.assertEqual((provider["status"], provider["error"]), ("timed_out", "timed out after 15 minutes"))
+        grandchild = int((self.fakes / "grandchild.pid").read_text())
+        for _ in range(50):
+            if panel._gone(grandchild):
+                break
+            time.sleep(0.1)
+        self.assertTrue(panel._gone(grandchild))
+        self.assertNotIn("review-seat-", self.worktrees())
+        self.assertEqual(self.record()["panels"][0]["status"], "timed_out")
+
+    # ---- [L12] B1 / [L13]: the per-seat watchdog, armed at start_seat ----
+
+    def gated_watchdog(self, grace: float = 0.2):
+        """The watchdog factory patched: the timer fires as soon as `gate` is set (the seat's cap, reached on the test's word),
+        KILL_GRACE_SECONDS patched small; every os.killpg is logged with its thread and the seat's `expired` at that moment."""
+        import signal
+        import threading
+        gate, timers, kills = threading.Event(), [], []
+        real_killpg = os.killpg
+        main = threading.get_ident()
+
+        def factory(seconds, callback):
+            timer = threading.Timer(0.0, lambda: gate.wait(5) and callback())
+            timers.append((seconds, timer, callback))
+            return timer
+
+        def killpg(pid, sig):
+            jobs = [job for items in (self.jobs or {}).values() for job in items]
+            kills.append((sig, threading.get_ident() != main, [job.expired for job in jobs if job.process.pid == pid]))
+            return real_killpg(pid, sig)
+        self.jobs = None
+        for patch in (mock.patch.object(panel, "watchdog_timer", factory), mock.patch.object(panel, "KILL_GRACE_SECONDS", grace),
+                      mock.patch.object(panel.os, "killpg", killpg)):
+            patch.start()
+            self.addCleanup(patch.stop)
+        self.signal = signal
+        return gate, timers, kills
+
+    def start_muse(self, spec: dict, clock=time.time):
+        self.control_seats(muse=spec)
+        plan = self.judged_plan(self.seats(["muse"]))
+        runtime = self.runtime(plan)
+        panel.ensure_started(runtime, clock=clock)
+        self.jobs = dict(runtime.panel_jobs)
+        [job] = runtime.panel_jobs["review"]
+        return runtime, job
+
+    def wait_for(self, predicate, seconds: float = 4.0) -> bool:
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            if predicate():
+                return True
+            time.sleep(0.02)
+        return predicate()
+
+    def test_completed_seat_survives_late_settle(self):
+        """[L13]: a cli seat that exits with findings at +1 minute keeps them when settle starts at launched + cap + 30 minutes."""
+        now = [1000.0]
+        runtime, job = self.start_muse({"findings": MUSE_FINDINGS}, clock=lambda: now[0])
+        self.assertEqual(job.timeout, 15 * 60)
+        self.assertTrue(self.wait_for(lambda: job.process.poll() is not None))
+        now[0] = job.launched + job.timeout + 30 * 60
+        panel.settle(runtime, clock=lambda: now[0], sleep=self.pause)
+        provider = self.record()["panels"][0]["providers"][0]
+        self.assertNotEqual(provider["status"], "timed_out")
+        self.assertEqual((provider["status"], provider["error"], provider["finding_ids"]), ("ok", None, ["M1"]))
+        self.assertEqual([f["id"] for f in self.record()["panels"][0]["findings"]], ["M1"])
+        self.assertFalse(job.expired)
+        self.assertTrue(job.watchdog_cancelled.is_set())
+
+    def test_a_seat_exiting_past_its_cap_between_the_checks_keeps_its_result(self):
+        """[L13]: a seat that exits between `_wait_seats`' running check and its clock comparison is re-checked and reaped on its
+        result, not timed_out, when the clock is past its cap and its watchdog has not fired."""
+        now = [1000.0]
+        runtime, job = self.start_muse({"findings": MUSE_FINDINGS}, clock=lambda: now[0])
+        self.assertTrue(self.wait_for(lambda: job.process.poll() is not None))
+        real, calls = job.running, []
+
+        def running():
+            calls.append(None)
+            return len(calls) == 1 or real()  # Still running at the first check, exited by the re-check.
+        job.running = running
+        now[0] = job.launched + job.timeout + 30 * 60
+        panel.settle(runtime, clock=lambda: now[0], sleep=self.pause)
+        provider = self.record()["panels"][0]["providers"][0]
+        self.assertEqual(len(calls), 2)
+        self.assertEqual((provider["status"], provider["error"], provider["finding_ids"]), ("ok", None, ["M1"]))
+        self.assertFalse(job.expired)
+        self.assertNotIn("review-seat-", self.worktrees())
+
+    def test_watchdog_expires_without_settle(self):
+        """[L12] B1 / [L13]: a cli seat outlives its cap while no settle runs: SIGTERMed at the cap with `expired` already set, its
+        group gone by cap plus grace; settle then records it timed_out with no findings (the clock still inside the cap) and removes
+        its worktree."""
+        gate, timers, kills = self.gated_watchdog()
+        runtime, job = self.start_muse({"mode": "hang", "findings": MUSE_FINDINGS}, clock=lambda: 1000.0)
+        self.assertEqual([seconds for seconds, _, _ in timers], [15 * 60])  # Armed at start_seat with the seat's own cap.
+        self.assertTrue(self.wait_for(lambda: (self.fakes / "grandchild.pid").exists()))
+        grandchild = int((self.fakes / "grandchild.pid").read_text())
+        self.assertEqual(kills, [])
+        gate.set()  # The cap.
+        self.assertTrue(self.wait_for(lambda: job.process.poll() is not None and panel._gone(grandchild)))
+        timers[0][1].join(2)
+        self.assertEqual(kills[0], (self.signal.SIGTERM, True, [True]))  # From the timer thread, `expired` set before the signal.
+        self.assertTrue(job.expired)
+        self.assertIsNone(job.result)  # The callback recorded nothing: the main thread does.
+        self.assertIn("review-seat-", self.worktrees())
+        panel.settle(runtime, clock=lambda: 1000.0, sleep=self.pause)
+        record = self.record()
+        provider = record["panels"][0]["providers"][0]
+        self.assertNotIn(provider["status"], ("ok", "error"))
+        self.assertEqual((provider["status"], provider["error"], provider["finding_ids"]), ("timed_out", "timed out after 15 minutes", []))
+        self.assertEqual(record["panels"][0]["findings"], [])
+        self.assertNotIn("review-seat-", self.worktrees())
+
+    def test_reaped_seat_watchdog_is_inert(self):
+        """[L13]: a reaped seat's watchdog callback, fired by hand, sends no signal and leaves `expired` unchanged."""
+        gate, timers, kills = self.gated_watchdog()
+        runtime, job = self.start_muse({"findings": MUSE_FINDINGS})
+        panel.settle(runtime, sleep=self.pause)
+        self.assertEqual(self.record()["panels"][0]["providers"][0]["status"], "ok")
+        del kills[:]
+        timers[0][2]()
+        panel._expire_seat(job)
+        self.assertEqual(kills, [])
+        self.assertFalse(job.expired)
+        gate.set()
+        timers[0][1].join(2)  # Cancelled at the reap: the timer itself never runs the callback either.
+        self.assertEqual(kills, [])
+        self.assertFalse(job.expired)
+
+    def test_stopping_a_seat_cancels_its_timer(self):
+        """[L13]: stop_seat cancels the watchdog, before its cap and (challenge note 1) inside its grace: no SIGKILL from the
+        watchdog thread after the cancel."""
+        gate, timers, kills = self.gated_watchdog(grace=1.5)
+        runtime, job = self.start_muse({"mode": "hang"})
+        self.assertTrue(self.wait_for(lambda: (self.fakes / "grandchild.pid").exists()))
+        panel.stop_seat(job)
+        self.assertTrue(timers[0][1].finished.is_set() and job.watchdog_cancelled.is_set())
+        gate.set()
+        timers[0][1].join(2)
+        self.assertFalse(job.expired)
+        self.assertEqual([kill for kill in kills if kill[1]], [])  # Nothing from the watchdog thread.
+        self.assertNotIn("review-seat-", self.worktrees())
+        # Inside the grace: the callback has SIGTERMed, then a cancel stops its pending SIGKILL.
+        self.fresh_round()
+        gate.clear()
+        del kills[:], timers[:]
+        runtime, job = self.start_muse({"mode": "hang"})
+        self.assertTrue(self.wait_for(lambda: (self.fakes / "grandchild.pid").exists()))
+        gate.set()
+        self.assertTrue(self.wait_for(lambda: any(kill[1] for kill in kills)))
+        self.assertTrue(job.expired)
+        panel.cancel_watchdog(job)  # Inside the 1.5 s grace.
+        timers[0][1].join(3)
+        self.assertEqual([kill[0] for kill in kills if kill[1]], [self.signal.SIGTERM])  # No SIGKILL after the cancel.
+        panel.stop_seat(job)
+
+    def test_stopping_a_seat_whose_leader_exits_on_sigterm_kills_the_rest_of_its_group(self):
+        """PRD 5.1 / 7.6: a leader that exits on the SIGTERM inside the grace still has its group SIGKILLed, so a child that
+        ignores SIGTERM does not outlive the seat."""
+        import signal
+        pid_file = self.tmp / "child.pid"
+        child = f"import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); open({str(pid_file)!r}, 'w').write('ready'); time.sleep(60)"
+        leader = f"import subprocess, sys, time; c = subprocess.Popen([sys.executable, '-c', {child!r}]); time.sleep(60)"
+        process = subprocess.Popen([sys.executable, "-c", leader], start_new_session=True)
+        children: list[str] = []
+
+        def kill_survivors():
+            if process.poll() is None or not all(panel._gone(int(pid)) for pid in children):  # The group still has a member.
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
+            process.wait()
+        self.addCleanup(kill_survivors)
+        self.assertTrue(self.wait_for(lambda: pid_file.exists() and pid_file.read_text() == "ready", seconds=30))  # Two interpreter starts on a loaded host.
+        children[:] = Path(f"/proc/{process.pid}/task/{process.pid}/children").read_text().split()
+        self.assertEqual(len(children), 1)
+        job = panel.Job(0, 0, {"transport": "cli", "name": "muse"}, process, 0.0, 900.0, self.tmp / "x.stdout", "s", 1)
+        panel.stop_seat(job)
+        self.assertEqual(process.poll(), -signal.SIGTERM)  # The leader took the SIGTERM path: only the group SIGKILL can end the child.
+        self.assertTrue(self.wait_for(lambda: panel._gone(int(children[0])), seconds=10))
+
+    def test_a_stop_interrupted_in_its_wait_still_kills_the_group_and_cleans_up(self):
+        """A KeyboardInterrupt in stop_seat's wait still SIGKILLs the seat's group (a child ignoring SIGTERM) and removes its
+        scratch dir, and the KeyboardInterrupt propagates."""
+        import signal
+        pid_file = self.tmp / "child.pid"
+        child = f"import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); open({str(pid_file)!r}, 'w').write('ready'); time.sleep(60)"
+        leader = f"import signal, subprocess, sys, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); c = subprocess.Popen([sys.executable, '-c', {child!r}]); time.sleep(60)"
+        process = subprocess.Popen([sys.executable, "-c", leader], start_new_session=True)
+        children: list[str] = []
+
+        def kill_survivors():
+            if process.poll() is None or not all(panel._gone(int(pid)) for pid in children):  # The group still has a member.
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
+            process.wait()
+        self.addCleanup(kill_survivors)
+        self.assertTrue(self.wait_for(lambda: pid_file.exists() and pid_file.read_text() == "ready", seconds=30))  # Two interpreter starts on a loaded host.
+        children[:] = Path(f"/proc/{process.pid}/task/{process.pid}/children").read_text().split()
+        self.assertEqual(len(children), 1)
+        scratch = Path(tempfile.mkdtemp(prefix="seat-scratch-", dir=self.tmp))
+        job = panel.Job(0, 0, {"transport": "cli", "name": "muse"}, process, 0.0, 900.0, self.tmp / "x.stdout", "s", 1)
+        job.stderr, job.stem, job.worktree, job.scratch, job.repository = self.tmp / "x.stderr", self.tmp / "muse-1", None, scratch, str(self.repo)
+        with mock.patch.object(process, "wait", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                panel.stop_seat(job)
+        self.assertTrue(self.wait_for(lambda: process.poll() is not None, seconds=10))  # Both ignore SIGTERM: only the group SIGKILL ends them.
+        self.assertEqual(process.returncode, -signal.SIGKILL)
+        self.assertTrue(self.wait_for(lambda: panel._gone(int(children[0])), seconds=10))
+        self.assertFalse(scratch.exists())
+
+    def test_stopping_seats_interrupted_in_the_first_wait_still_stops_every_seat(self):
+        """A KeyboardInterrupt in the first seat's stop wait (a second Ctrl-C) does not end _stop_seats: every seat's group
+        (leader and child both ignoring SIGTERM) is killed, every worktree and scratch dir removed, and the interrupt propagates."""
+        import signal
+        jobs, processes, children = [], [], []
+        self.addCleanup(lambda: subprocess.run(["git", "-C", str(self.repo), "worktree", "prune"], capture_output=True))
+        for n in (1, 2):
+            pid_file = self.tmp / f"child-{n}.pid"
+            child = f"import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); open({str(pid_file)!r}, 'w').write('ready'); time.sleep(60)"
+            leader = f"import signal, subprocess, sys, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); c = subprocess.Popen([sys.executable, '-c', {child!r}]); time.sleep(60)"
+            process = subprocess.Popen([sys.executable, "-c", leader], start_new_session=True)
+            processes.append(process)
+
+            def kill_survivors(process=process):
+                if process.poll() is None or not all(panel._gone(int(pid)) for pid in children):  # A group may still have a member.
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except (ProcessLookupError, PermissionError):
+                        pass
+                process.wait()
+            self.addCleanup(kill_survivors)
+            self.assertTrue(self.wait_for(lambda: pid_file.exists() and pid_file.read_text() == "ready", seconds=30))  # Two interpreter starts on a loaded host.
+            children.extend(Path(f"/proc/{process.pid}/task/{process.pid}/children").read_text().split())
+            worktree = self.tmp / f"review-seat-{n}"
+            git(self.repo, "worktree", "add", "--detach", str(worktree), self.candidate)
+            scratch = Path(tempfile.mkdtemp(prefix="seat-scratch-", dir=self.tmp))
+            job = panel.Job(0, n - 1, {"transport": "cli", "name": "muse"}, process, 0.0, 900.0, self.tmp / f"x{n}.stdout", "s", 1)
+            job.stderr, job.stem, job.worktree, job.scratch, job.repository = self.tmp / f"x{n}.stderr", self.tmp / f"muse-{n}", worktree, scratch, str(self.repo)
+            jobs.append(job)
+        self.assertEqual(len(children), 2)
+        left = [job.worktree for job in jobs] + [job.scratch for job in jobs]
+        with mock.patch.object(processes[0], "wait", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                panel._stop_seats(jobs)
+        for process in processes:
+            self.assertTrue(self.wait_for(lambda: process.poll() is not None, seconds=10))  # Both ignore SIGTERM: only the group SIGKILL ends them.
+            self.assertEqual(process.returncode, -signal.SIGKILL)
+        for pid in children:
+            self.assertTrue(self.wait_for(lambda: panel._gone(int(pid)), seconds=10))
+        for path in left:
+            self.assertFalse(path.exists(), path)
+        self.assertNotIn("review-seat-", git(self.repo, "worktree", "list", "--porcelain"))
+
+    def launch_failing(self, step: str) -> tuple[dict, dict]:
+        """A muse seat whose `.pid` write (`step` "pid") or watchdog (`step` "watchdog") fails after the spawn, once the seat has
+        a grandchild in its group: returns its provider record and the `.pid` record start_seat built (pid, worktree, scratch),
+        plus `grandchild` (its pid, or None when it never came up)."""
+        import signal
+        built, real_save = {}, panel.save_json
+        grandchild = self.fakes / "grandchild.pid"
+
+        def wait_for_grandchild():
+            ready = self.wait_for(lambda: grandchild.exists() and grandchild.read_text().strip().isdigit(), seconds=30)  # Interpreter start on a loaded host.
+            built["grandchild"] = int(grandchild.read_text()) if ready else None
+
+        def save(path, value):
+            if str(path).endswith(".pid"):
+                built.update(value)
+                if step == "pid":
+                    wait_for_grandchild()
+                    raise OSError(28, "No space left on device")
+            return real_save(path, value)
+
+        def arm(job):
+            wait_for_grandchild()
+            raise RuntimeError("can't start new thread")
+
+        def kill_leftover():
+            pid = built.get("pid")
+            if pid and not panel._gone(pid):
+                try:
+                    os.killpg(pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
+            if pid:
+                try:
+                    os.waitpid(pid, 0)
+                except ChildProcessError:
+                    pass
+            for left in (built.get("worktree"), built.get("scratch")):  # What a failing run left behind.
+                if left:
+                    shutil.rmtree(left, ignore_errors=True)
+        self.addCleanup(kill_leftover)
+        self.control_seats(muse={"mode": "hang"})
+        plan = self.judged_plan(self.seats(["muse"]))
+        patches = [mock.patch.object(panel, "save_json", save)] + ([mock.patch.object(panel, "arm_watchdog", arm)] if step == "watchdog" else [])
+        for patch in patches:
+            patch.start()
+        try:
+            panel.ensure_started(self.runtime(plan))
+        finally:
+            for patch in patches:
+                patch.stop()
+        return self.record()["panels"][0]["providers"][0], built
+
+    def assert_launch_failure_left_nothing(self, provider: dict, built: dict, error: str):
+        self.assertEqual(provider["status"], "error")
+        self.assertIn(f"launch failed: {error}", provider["error"])
+        self.assertTrue(self.wait_for(lambda: panel._gone(built["pid"]), seconds=10))
+        self.assertIsNotNone(built["grandchild"])  # The failure struck with a grandchild in the group: the whole group is killed.
+        self.assertTrue(self.wait_for(lambda: panel._gone(built["grandchild"]), seconds=10))
+        self.assertNotIn("review-seat-", self.worktrees())
+        self.assertFalse(Path(built["worktree"]).exists())
+        self.assertFalse(Path(built["scratch"]).exists())
+
+    def test_a_seat_whose_pid_record_cannot_be_written_is_stopped_and_cleaned_up(self):
+        """PRD 5.2 / 9: a `.pid` write failing after the spawn (ENOSPC) stops the seat's group and removes its worktree and
+        scratch dir before the launch failure is recorded."""
+        provider, built = self.launch_failing("pid")
+        self.assert_launch_failure_left_nothing(provider, built, "OSError")
+
+    def test_a_seat_whose_watchdog_cannot_be_armed_is_stopped_and_cleaned_up(self):
+        """PRD 5.2 / 9: a watchdog that cannot start (Timer.start's RuntimeError) stops the seat the same way."""
+        provider, built = self.launch_failing("watchdog")
+        self.assert_launch_failure_left_nothing(provider, built, "RuntimeError")
+
+    def test_an_expired_seat_is_timed_out_on_an_exit_with_no_review_json(self):
+        """Challenge note 2: a seat killed at its cap during the built-in reviewers is recorded timed_out, not `error: exit -15`,
+        when the review exits with no review.json."""
+        gate, timers, kills = self.gated_watchdog()
+        runtime, job = self.start_muse({"mode": "hang"})
+        self.assertTrue(self.wait_for(lambda: (self.fakes / "grandchild.pid").exists()))
+        gate.set()
+        self.assertTrue(self.wait_for(lambda: job.process.poll() is not None))
+        panel.collect(runtime, None)
+        provider = self.record()["panels"][0]["providers"][0]
+        self.assertEqual((provider["status"], provider["error"]), ("timed_out", "timed out after 15 minutes"))
+        self.assertNotIn("review-seat-", self.worktrees())
+
+    def test_ctrl_c_in_settle_stops_the_seats_and_resume_relaunches_and_awaits_them(self):
+        """PRD 7.6: a KeyboardInterrupt kills the groups, removes the worktrees and leaves the seats non-terminal; settle on resume
+        relaunches the non-terminal seat (a new numbered file) and returns only once it has ended."""
+        self.set_control(claude={"findings": CLAUDE_FINDINGS}, pi={"findings": []})
+        self.control_seats(muse={"mode": "hang"})
+        plan = self.judged_plan()
+        runtime = self.runtime(plan)
+        panel.ensure_started(runtime)
+
+        armed = []
+
+        def interrupt(_):
+            """Once claude and pi have answered and muse hangs: one more poll (which reaps them), then Ctrl-C."""
+            if armed:
+                raise KeyboardInterrupt
+            time.sleep(0.05)
+            if self.claude_seen.exists() and self.pi_seen.exists() and (self.fakes / "grandchild.pid").exists():
+                time.sleep(1.0)
+                armed.append(True)
+        with self.assertRaises(KeyboardInterrupt):
+            panel.settle(runtime, sleep=interrupt)
+        record = self.record()
+        self.assertEqual([p["status"] for p in record["panels"][0]["providers"]], ["ok", "ok", "running"])
+        self.assertEqual(record["panels"][0]["status"], "running")
+        [first] = self.seen()
+        self.assertFalse(Path(first["cwd"]).exists())
+        self.assertNotIn("review-seat-", self.worktrees())
+        grandchild = int((self.fakes / "grandchild.pid").read_text())
+        for _ in range(50):
+            if panel._gone(grandchild):
+                break
+            time.sleep(0.1)
+        self.assertTrue(panel._gone(grandchild))
+        # Resume: a new controller process; only the muse seat reruns, and settle waits for it.
+        (self.fakes / "grandchild.pid").unlink()
+        self.control_seats(muse={"findings": MUSE_FINDINGS, "delay": 0})
+        claude_runs = len(list((self.run / "panel" / "review").glob("claude-*.stdout.json")))
+        resumed = self.runtime(plan)
+        settled = panel.settle(resumed, sleep=self.pause)
+        self.assertEqual([seat["status"] for seat in settled], ["ok", "ok", "ok"])
+        self.assertEqual(settled[2]["findings"][0]["id"], "M1")
+        self.assertEqual(len(self.seen()), 2)
+        self.assertTrue((self.run / "panel" / "review" / "muse-2.stdout.txt").exists())
+        self.assertEqual(len(list((self.run / "panel" / "review").glob("claude-*.stdout.json"))), claude_runs)  # Terminal seats kept.
+        self.assertEqual(self.record()["panels"][0]["findings"][0]["id"], "C1")  # Their findings re-merged from the side files.
+
+    def test_ctrl_c_while_starting_the_seats_stops_the_started_ones_and_leaves_them_non_terminal(self):
+        """Lane review: a KeyboardInterrupt while a later seat starts stops the earlier ones (group killed, worktree removed),
+        saves them `running` for resume, and propagates."""
+        listing = registry_example("reviewers")
+        listing["reviewers"][3]["enabled"] = True
+        self.control_seats(muse={"mode": "hang"})
+        plan = self.judged_plan(self.seats(["muse", "argon"], listing))
+        self.assertEqual([seat["name"] for seat in plan["panels"][0]["seats"]], ["muse", "argon"])
+        start = panel.start_seat
+
+        def interrupted(runtime, index, *args):
+            if index == 1:
+                for _ in range(100):
+                    if (self.fakes / "grandchild.pid").exists():
+                        break
+                    time.sleep(0.05)
+                raise KeyboardInterrupt
+            return start(runtime, index, *args)
+        runtime = self.runtime(plan)
+        with mock.patch.object(panel, "start_seat", interrupted), self.assertRaises(KeyboardInterrupt):
+            panel.ensure_started(runtime)
+        self.assertIsNone(runtime.panel_jobs)
+        self.assertEqual([p["status"] for p in self.record()["panels"][0]["providers"]], ["running", "pending"])
+        grandchild = int((self.fakes / "grandchild.pid").read_text())
+        for _ in range(50):
+            if panel._gone(grandchild):
+                break
+            time.sleep(0.1)
+        self.assertTrue(panel._gone(grandchild))
+        [seen] = self.seen()
+        self.assertFalse(Path(seen["cwd"]).exists())
+        self.assertNotIn("review-seat-", self.worktrees())
+
+    def test_a_file_credential_reaches_claude_and_pi_seats_in_its_env(self):
+        """Lane review: a `{file, env}` credential is passed to every transport, not only cli."""
+        listing = registry_example("reviewers")
+        logins = {}
+        for index, name in ((0, "CLAUDE_LOGIN_FILE"), (1, "PI_LOGIN_FILE")):
+            login = self.tmp / f"{name.lower()}.json"
+            login.write_text("{}")
+            listing["reviewers"][index]["credential"] = {"file": str(login), "env": name}
+            logins[name] = str(login)
+        self.set_control(claude={"findings": []}, pi={"findings": []})
+        plan = self.judged_plan(self.seats(["claude", "gpt"], listing))
+        panel.settle(self.runtime(plan), sleep=self.pause)
+        claude_env, pi_env = read_json(self.claude_seen)["env"], read_json(self.pi_seen)["env"]
+        self.assertEqual(claude_env.get("CLAUDE_LOGIN_FILE"), logins["CLAUDE_LOGIN_FILE"])
+        self.assertNotIn("PI_LOGIN_FILE", claude_env)
+        self.assertEqual(pi_env.get("PI_LOGIN_FILE"), logins["PI_LOGIN_FILE"])
+        self.assertEqual(set(pi_env) - {"PWD", "SHLVL", "_", "OLDPWD"}, {"PATH", "HOME", "LANG", "TMPDIR", "PI_LOGIN_FILE"})
+
+    def test_orphan_cleanup_on_resume_kills_a_leftover_seat_and_removes_its_worktree(self):
+        self.control_seats(muse={"mode": "hang"})
+        plan = self.judged_plan(self.seats(["muse"]))
+        crashed = self.runtime(plan)
+        panel.ensure_started(crashed)  # The controller "crashes" here: no collect, no settle.
+        for _ in range(100):
+            if self.seen():
+                break
+            time.sleep(0.05)
+        [orphan] = self.seen()
+        self.assertTrue(Path(orphan["cwd"]).exists())
+        self.control_seats(muse={"findings": []})
+        [seat] = panel.settle(self.runtime(plan), sleep=self.pause)
+        self.assertEqual(seat["status"], "ok")
+        self.assertTrue(panel._gone(orphan["pid"]) or not Path(f"/proc/{orphan['pid']}").exists())
+        self.assertFalse(Path(orphan["cwd"]).exists())
+        self.assertNotIn("review-seat-", self.worktrees())
+        crashed.panel_jobs = None  # Nothing left for the crashed process's handles to do.
+
+    def test_orphan_cleanup_kills_a_group_member_that_ignores_sigterm(self):
+        """An orphan seat whose leader exits on the SIGTERM still has its group SIGKILLed (as stop_seat), so a child ignoring
+        SIGTERM does not outlive it while its worktree is removed."""
+        import signal
+        orphan_cwd = Path(tempfile.mkdtemp(prefix="orphan-seat-", dir=self.tmp)).resolve()
+        pid_file = self.tmp / "child.pid"
+        child = f"import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); open({str(pid_file)!r}, 'w').write('ready'); time.sleep(60)"
+        leader = f"import subprocess, sys, time; c = subprocess.Popen([sys.executable, '-c', {child!r}]); time.sleep(60)  # orphan-seat-leader"
+        process = subprocess.Popen([sys.executable, "-c", leader], cwd=str(orphan_cwd), start_new_session=True)
+        children: list[str] = []
+
+        def kill_survivors():
+            if process.poll() is None or not all(panel._gone(int(pid)) for pid in children):  # The group still has a member.
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
+            process.wait()
+        self.addCleanup(kill_survivors)
+        self.assertTrue(self.wait_for(lambda: pid_file.exists() and pid_file.read_text() == "ready", seconds=30))  # Two interpreter starts on a loaded host.
+        children[:] = Path(f"/proc/{process.pid}/task/{process.pid}/children").read_text().split()
+        self.assertEqual(len(children), 1)
+        panel_dir = self.run / "panel" / "review"
+        panel_dir.mkdir(parents=True)
+        save_json(panel_dir / "muse-1.pid", {"pid": process.pid, "cwd": str(orphan_cwd), "marker": "someone-elses-process",
+                                             "worktree": None, "scratch": None})
+        panel.kill_orphan_seat(panel_dir, "muse", str(self.repo))  # A live pid whose marker does not match is never signalled.
+        self.assertFalse(self.wait_for(lambda: process.poll() is not None, seconds=1))
+        self.assertFalse(panel._gone(int(children[0])))
+        save_json(panel_dir / "muse-2.pid", {"pid": process.pid, "cwd": str(orphan_cwd), "marker": "orphan-seat-leader",
+                                             "worktree": None, "scratch": str(orphan_cwd)})  # The latest record is the one read.
+        panel.kill_orphan_seat(panel_dir, "muse", str(self.repo))
+        self.assertTrue(self.wait_for(lambda: process.poll() is not None, seconds=10))
+        self.assertTrue(self.wait_for(lambda: panel._gone(int(children[0])), seconds=10))
+        self.assertFalse(orphan_cwd.exists())
+
+    def test_an_unavailable_seat_is_recorded_and_an_all_unavailable_panel_still_settles(self):
+        listing = registry_example("reviewers")
+        plan = self.judged_plan(self.seats(["argon"], listing))
+        settled = panel.settle(self.runtime(plan), sleep=self.pause)
+        self.assertEqual([(s["status"], s["error"], s["context_bytes"], s["findings"]) for s in settled],
+                         [("unavailable", "disabled in the reviewer list", None, [])])
+        entry = self.record()["panels"][0]
+        self.assertEqual((entry["status"], entry["error"]), ("failed", "no seat returned findings: argon unavailable"))
+        self.assertEqual(self.seen(), [])
+
+    def test_ctrl_c_before_settle_through_collect_leaves_the_seats_non_terminal_and_removes_worktrees(self):
+        self.control_seats(muse={"mode": "hang"})
+        plan = self.judged_plan(self.seats(["muse"]))
+        runtime = self.runtime(plan)
+        panel.ensure_started(runtime)
+        for _ in range(100):
+            if (self.fakes / "grandchild.pid").exists():
+                break
+            time.sleep(0.05)
+        panel.collect(runtime, KeyboardInterrupt())
+        self.assertEqual(self.record()["panels"][0]["providers"][0]["status"], "running")
+        self.assertNotIn("review-seat-", self.worktrees())
+        self.assertIsNone(runtime.panel_jobs)
+
+
+class JudgeRecord(SeatHarness):
+    def seed(self, name: str) -> dict:
+        """The example's record as settle leaves it: every finding unaccepted, ended_at the seats' end, the judge pending."""
+        example = registry_example(name)
+        record = json.loads(json.dumps(example))
+        entry = record["panels"][0]
+        for finding in entry["findings"]:
+            finding["accepted"] = False
+        entry["ended_at"] = "2026-10-15T10:24:00Z"
+        entry["judge"] = {**prd_literal("judge-states")["pending"]}
+        panel.save_record(self.run, record)
+        return example
+
+    def test_record_judge_reproduces_the_judged_and_the_fallback_examples(self):
+        """[L4]: accepted exactly for the sources of confirmed rulings of a judged record (all false on fallback); ended_at = the judge's."""
+        runtime = self.runtime(self.judged_plan())
+        for name in ("panel-judged", "panel-fallback"):
+            with self.subTest(name):
+                example = self.seed(name)
+                panel.record_judge(runtime, "review", example["panels"][0]["judge"])
+                self.assertEqual(read_json(self.run / "panel.json"), example)
+
+    def test_record_judge_accepts_the_non_terminal_states_and_refuses_a_broken_object(self):
+        runtime = self.runtime(self.judged_plan())
+        self.seed("panel-judged")
+        for status, judge in prd_literal("judge-states").items():
+            panel.record_judge(runtime, "review", judge)
+            entry = self.record()["panels"][0]
+            self.assertEqual((entry["judge"], entry["ended_at"]), (judge, judge["ended_at"]))
+            self.assertEqual([f["accepted"] for f in entry["findings"]], [False] * 4)
+        unlinked = json.loads(json.dumps(prd_literal("judge-states")["running"]))
+        unlinked["reviewer_findings"][0]["worker"] = None  # A built-in finding that names no lane (review.json's worker is optional).
+        panel.record_judge(runtime, "review", unlinked)
+        for status in ("failed", "timed_out"):
+            judge = {**prd_literal("judge-states")["incomplete"], "status": status}
+            panel.record_judge(runtime, "review", judge)
+            self.assertEqual(self.record()["panels"][0]["judge"]["status"], status)
+        before = (self.run / "panel.json").read_bytes()
+        judged = registry_example("panel-judged")["panels"][0]["judge"]
+        for broken in ({**judged, "fallback": True}, {**judged, "extra": 1}, {**judged, "status": "decided"},
+                       {**prd_literal("judge-states")["running"], "ended_at": "2026-10-15T10:31:40Z"},
+                       {**judged, "rulings": [{**judged["rulings"][0], "id": "X1"}]}, {**judged, "effort": "low"}):
+            with self.assertRaisesRegex(ValueError, "breaks panel record 1.1.0"):
+                panel.record_judge(runtime, "review", broken)
+            self.assertEqual((self.run / "panel.json").read_bytes(), before)
+        with self.assertRaisesRegex(ValueError, "no judged panel 'other'"):
+            panel.record_judge(runtime, "other", judged)
+
+    def test_the_export_status_and_outcome_of_a_judged_plan_before_during_and_after_the_judge(self):
+        """Design-challenge note 2 and PRD 7.7: no panel.json, a running record, judged and fallback records."""
+        plan = self.judged_plan()
+        pending = panel.export_section(self.run, plan)
+        validate_schema("panel", pending)
+        self.assertEqual((pending["version"], pending["panels"][0]["judge"]), ("1.1.0", prd_literal("judge-states")["pending"]))
+        self.assertEqual(panel.status_lines(self.run, plan), ["Panel (judged): runs at the review step."])
+        self.assertEqual(panel.outcome_lines(self.run, plan), ["Panel (judged): runs at the review step."])
+        running = json.loads(json.dumps(pending))
+        running["panels"][0].update(status="running", started_at="2026-10-15T10:02:11Z")
+        panel.save_record(self.run, running)
+        self.assertEqual(panel.export_section(self.run, plan), running)
+        self.assertEqual(panel.outcome_lines(self.run, plan), ["Panel (judged): seats running."])
+        example = self.seed("panel-judged")
+        self.assertEqual(panel.status_lines(self.run, plan), ["Panel (judged): 3 seats ok, 0 not ok; judge pending"])
+        panel.record_judge(self.runtime(plan), "review", example["panels"][0]["judge"])
+        self.assertEqual(panel.export_section(self.run, plan), example)  # Record 1.1.0 verbatim in the export.
+        line = "Panel (judged): 3 seats ok, 0 not ok; judge: 2 confirmed (1 P0/P1), 1 deferred, 1 refuted"
+        self.assertEqual((panel.status_lines(self.run, plan), panel.outcome_lines(self.run, plan)), ([line], [line]))
+        example = self.seed("panel-fallback")
+        panel.record_judge(self.runtime(plan), "review", example["panels"][0]["judge"])
+        self.assertEqual(panel.outcome_lines(self.run, plan), ["Panel (judged): judge timed_out; today's rule decided"])
+        self.assertNotIn("report-only", json.dumps(panel.outcome_lines(self.run, plan) + panel.status_lines(self.run, plan)))
+        (self.run / "panel.json").write_text('{"version": "1.1.0", "panels": []}')
+        broken = panel.export_section(self.run, plan)
+        validate_schema("panel", broken)
+        self.assertTrue(broken["panels"][0]["error"].startswith("panel.json is not valid"))
+        self.assertEqual([line for line in self.attention_lines() if line["kind"] == "panel"], [])
+
+
+class ReportOnlyRegression(Harness):
+    def test_a_report_only_panel_writes_the_same_1_0_0_panel_json_bytes_as_before_the_judged_panel(self):
+        """Acceptance 8: a report-only panel (as a 2.11.0 feature pins it, the same plan item as 2.10.0) writes panel.json 1.0.0 with
+        the bytes of the golden record written by the code before this change (workflow/testdata/panel/report-only-panel.json)."""
+        self.set_control(claude={"findings": CLAUDE_FINDINGS, "cost": 0.021}, pi={"findings": PI_FINDINGS, "cost": 0.0047})
+        plan = self.plan()
+        runtime = self.runtime(plan)
+        clock = lambda: 1_790_000_000.0  # noqa: E731
+        panel.ensure_started(runtime, clock=clock)
+        self.decide()
+        panel.collect(runtime, None, clock=clock, sleep=lambda _: time.sleep(0.05))
+        self.assertEqual((self.run / "panel.json").read_bytes(), (TESTDATA / "report-only-panel.json").read_bytes())
+        self.assertEqual(read_json(self.run / "panel.json")["version"], "1.0.0")
 
 
 if __name__ == "__main__":

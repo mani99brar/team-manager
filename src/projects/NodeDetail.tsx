@@ -12,6 +12,8 @@ import { AwaitingNotice, ControllerSections } from './node/ControllerSections.ts
 import { launchSectionEntries } from './node/launch.ts'
 import { attemptStrip, causeOf, nodeTiming, resultRole, reviewerLead, revisionAttempt, verifiedSections, type SectionEntry, type VerdictLead } from './node/model.ts'
 import { challengeSectionEntries, reviewSectionEntries } from './node/panels.ts'
+import { judgeReadFindings } from './node/judgedPanel.ts'
+import { isJudgedReview } from './reviewers.ts'
 import { panelsAtStage } from './node/providerPanel.ts'
 import { ReviewSections } from './node/ReviewSections.tsx'
 import { sidecarSectionEntries } from './node/sidecar.ts'
@@ -113,7 +115,7 @@ export function NodeDetail({ scope, detail, definition, node, attempt, events, o
   const isSidecar = isSidecarNode(definition)
   const isAttack = isAttackNode(definition)
   // A `challenge`-stage panel (docs/PRD_MULTI_PROVIDER_PANEL.md 4.5) shows on the challenge view as well as the run page.
-  const challengePanels = isChallenge && panels.status === 'ready' && panels.data !== null ? panelsAtStage(panels.data.panels, 'challenge').length : 0
+  const challengePanels = isChallenge && panels.status === 'ready' && panels.data !== null ? panelsAtStage<{ stage: 'challenge' | 'review' }>(panels.data.panels, 'challenge').length : 0
   // Three nodes are of kind review (the workflow v1 kinds are frozen): the challenge, the sidecar and the independent review,
   // which is the one named `review`.
   const isReview = definition.kind === 'review' && definition.node_id === 'review'
@@ -245,6 +247,8 @@ export function NodeDetail({ scope, detail, definition, node, attempt, events, o
   const next = isLatest && !answered && now?.focus?.node_id === node.node_id && (now.next.steps.length > 0 || now.next.action === 'required' || failedCheck) ? now.next : null
   const attemptHref = (value: number) => attemptPathname(scope.projectId, scope.workflowId, scope.runId, node.node_id, value)
   const nodeHref = runPathname(scope.projectId, scope.workflowId, scope.runId, node.node_id)
+  // A ruling's reviewer source links to that reviewer's own node page (features/review-panel-registry/prd.md 8).
+  const panelLinks = { nodeHref: (nodeId: string) => runPathname(scope.projectId, scope.workflowId, scope.runId, nodeId), onNavigate }
 
   const renderResult = (evidence: (data: WorkerResult) => ReactNode) => (
     <>
@@ -361,7 +365,7 @@ export function NodeDetail({ scope, detail, definition, node, attempt, events, o
             <ChallengeSections inputs={inputs} onRetryInputs={onRetryInputs} sessionsRecorded={sessionsData !== null && sessionsForNode(sessionsData, node.node_id).length > 0} />
             {challengePanels > 0 && (
               <NodeSection sectionKey="panel" title="Panel" testId="panel-section">
-                <ProviderPanelBody record={panels} onRetry={onRetryPanels} stage="challenge" />
+                <ProviderPanelBody record={panels} onRetry={onRetryPanels} stage="challenge" links={panelLinks} />
               </NodeSection>
             )}
           </>
@@ -402,7 +406,7 @@ export function NodeDetail({ scope, detail, definition, node, attempt, events, o
           node.node_id === PANEL_NODE_ID ? (
             <>
               <NodeSection sectionKey="panel" title="Panel" testId="panel-section">
-                <ProviderPanelBody record={panels} onRetry={onRetryPanels} stage="review" />
+                <ProviderPanelBody record={panels} onRetry={onRetryPanels} stage="review" links={panelLinks} />
               </NodeSection>
               <NodeSection sectionKey="provider-sessions" title="Provider sessions" testId="panel-sessions-section">
                 {sessionsData === null ? <p className="projects-muted" data-testid="session-not-recorded">{sessionsMissing}</p> : <PanelSessions sessions={sessionsData} />}
@@ -425,7 +429,7 @@ export function NodeDetail({ scope, detail, definition, node, attempt, events, o
                 nodeId={node.node_id}
                 findings={reviewData && projectedReviewer !== null && reviewData.reviewers.some(entry => entry.reviewer_id === projectedReviewer) ? (
                   <ReviewerFindings
-                    review={reviewData} reviewerId={projectedReviewer} scope={scope} definitionNodes={definitionNodes} snapshotNodes={snapshotNodes}
+                    review={reviewData} reviewerId={projectedReviewer} judgeRead={isJudgedReview(reviewData) ? judgeReadFindings(panels.status === 'ready' ? panels.data : null, projectedReviewer) : []} scope={scope} definitionNodes={definitionNodes} snapshotNodes={snapshotNodes}
                     inputs={inputs} refreshToken={refreshToken} onOpenRequirement={onOpenRequirement} onOpenFile={onOpenFile}
                   />
                 ) : <p className="projects-muted" data-testid="reviewer-findings-none">{review.status === 'loading' ? 'Loading the recorded review…' : 'No findings are recorded for this round yet.'}</p>}

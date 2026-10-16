@@ -1,0 +1,45 @@
+{
+  "run_id": "example-001",
+  "bundle_sha256": "3f1c9a6e0b7d4c2a8e5f1b3d7c9a0e2f4b6d8c1a3e5f7b9d0c2a4e6f8b1d3c5a",
+  "candidate_commit": "9b2e4c6a8d0f1b3e5c7a9d1f3b5e7c9a1d3f5b7e",
+  "reviewer": "0a1b2c3d-1111-4222-8333-444455556666, 0a1b2c3d-2222-4333-8444-555566667777, 5f0c2a8e-7d4b-4f1e-9a63-2b8d1c0e4f71",
+  "independent": true,
+  "verdict": "blocked",
+  "reviewers": [
+    {
+      "reviewer_id": "general",
+      "session_id": "0a1b2c3d-1111-4222-8333-444455556666",
+      "verdict": "blocked",
+      "accepted_at": "2026-10-15T10:14:02Z"
+    },
+    {
+      "reviewer_id": "coverage",
+      "session_id": "0a1b2c3d-2222-4333-8444-555566667777",
+      "verdict": "blocked",
+      "accepted_at": "2026-10-15T10:16:40Z"
+    },
+    {
+      "reviewer_id": "judge",
+      "session_id": "5f0c2a8e-7d4b-4f1e-9a63-2b8d1c0e4f71",
+      "verdict": "blocked",
+      "accepted_at": "2026-10-15T10:31:40Z"
+    }
+  ],
+  "findings": [
+    {
+      "severity": "P1",
+      "message": "[J1 from general-1, C1, M1] settle does not wait for a seat relaunched on resume (workflow/panel.py:212): The wait set is built once from the seats running at the first pass; a seat relaunched on resume is never awaited, so the judge can start without its findings.",
+      "disposition": "open",
+      "worker": "engine",
+      "requirement": "PRD 7.2: the judge starts only after every seat has finished, failed or timed out",
+      "reviewer": "judge"
+    },
+    {
+      "severity": "P2",
+      "message": "[J2 from coverage-1] No unit test for the judge-fallback banner (tests/unit/panels.test.ts): The banner renders but no unit test pins its text.",
+      "disposition": "open",
+      "worker": "viewer",
+      "reviewer": "judge"
+    }
+  ]
+}

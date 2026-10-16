@@ -1,4 +1,5 @@
 import type { PanelEntry, PanelFinding, PanelProvider, PanelResults } from './api.ts'
+import { JudgedPanel, type PanelLinks } from './judgedPanel.tsx'
 import { REPORT_ONLY } from './node/AttackSections.tsx'
 import {
   acceptedFindings, contextText, fileLocation, foldedFindings, overlapCount, PANEL_STATUS_WORDING, panelDuration, panelHeadline, panelsAtStage, PROVIDER_STATUS_WORDING, providerCostText,
@@ -126,11 +127,25 @@ function Panel({ panel }: { panel: PanelEntry }) {
  * pending panel says it runs at its stage; a failed or timed-out one shows its error. `stage` narrows the record to one stage
  * (the challenge view). Read-only: nothing here acts on the panel.
  */
-export function ProviderPanelBody({ record, onRetry, stage }: { record: Resource<PanelResults | null>; onRetry: () => void; stage?: PanelEntry['stage'] }) {
+export function ProviderPanelBody({ record, onRetry, stage, links }: { record: Resource<PanelResults | null>; onRetry: () => void; stage?: PanelEntry['stage']; links?: PanelLinks }) {
   if (record.status === 'idle' || record.status === 'loading') return <LoadingPanel>Loading the panel record…</LoadingPanel>
   if (record.status === 'error') return <ErrorPanel error={record.error} what="The panel record" onRetry={onRetry} />
   const data = record.data
   if (data === null) return <p className="projects-muted" data-testid="panel-none">No panel is recorded for this run.</p>
+  // Panel record 1.1.0: the judged panel (features/review-panel-registry/prd.md 8); a 1.0.0 record renders below, as before.
+  if (data.version === '1.1.0') {
+    const judged = stage === undefined ? data.panels : panelsAtStage(data.panels, stage)
+    if (judged.length === 0) return <p className="projects-muted" data-testid="panel-none">No panel is recorded{stage === undefined ? '' : ` for the ${stage} stage`}.</p>
+    return (
+      <div className="provider-panels" data-testid="panels" data-source={data.source} data-count={judged.length} data-version={data.version}>
+        <p className="panel-report-only" data-testid="panel-judged-line">Judged: the judge rules on every finding, from a seat or a built-in reviewer, and decides the review</p>
+        <p className="projects-muted panel-source" data-testid="panel-source" data-source={data.source}>
+          {data.source === 'live' ? 'Read live from the run\'s panel.json' : 'Read from the run\'s export'}
+        </p>
+        {judged.map(panel => <JudgedPanel key={panel.id} panel={panel} links={links} />)}
+      </div>
+    )
+  }
   const panels = stage === undefined ? data.panels : panelsAtStage(data.panels, stage)
   if (panels.length === 0) return <p className="projects-muted" data-testid="panel-none">No panel is recorded{stage === undefined ? '' : ` for the ${stage} stage`}.</p>
   return (

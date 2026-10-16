@@ -1,0 +1,33 @@
+#!/usr/bin/env python3
+"""A stand-in `agy` (the Antigravity CLI) for the judged panel's cli tests (never the real CLI): `--output-format json` prints one
+JSON object `{status, response, ...}`. Its behaviour comes from `control.json` beside this file (key `agy`), and it records what it
+saw in `seen-<n>.json` there."""
+import json
+import os
+import sys
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+argv = sys.argv[1:]
+control = json.loads((HERE / "control.json").read_text()) if (HERE / "control.json").exists() else {}
+spec = control.get("agy", {})
+if argv == ["--version"]:
+    print(spec.get("version", "agy 0.9.3"))
+    sys.exit(int(spec.get("version_exit", 0)))
+stdin_target = os.readlink("/proc/self/fd/0")
+stdin_text = "" if stdin_target == "/dev/null" else sys.stdin.read()
+seen = {"argv": argv, "cwd": os.getcwd(), "env": dict(os.environ), "stdin": stdin_target, "stdin_text": stdin_text, "pid": os.getpid()}
+number = len(list(HERE.glob("seen-*.json"))) + 1
+(HERE / f"seen-{number}.json").write_text(json.dumps(seen))
+mode = spec.get("mode", "ok")
+if mode == "auth":
+    sys.stderr.write("agy: authentication required: run `agy login`\n")
+    sys.exit(3)
+if mode == "quota":
+    sys.stderr.write("agy: 429 RESOURCE_EXHAUSTED: quota exceeded for model gemini-4-argon\n")
+    print(json.dumps({"status": "ERROR", "response": None}))
+    sys.exit(1)
+if mode == "failed":
+    print(json.dumps({"status": "ERROR", "response": None}))
+    sys.exit(0)
+print(json.dumps({"status": "SUCCESS", "response": json.dumps(spec.get("findings", [])), "usage": None}))

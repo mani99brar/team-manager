@@ -552,6 +552,10 @@
           "type": "null"
         }
       ]
+    },
+    "judged_panel": {
+      "type": "boolean",
+      "const": true
     }
   },
   "required": [

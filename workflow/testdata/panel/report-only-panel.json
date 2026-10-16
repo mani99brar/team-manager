@@ -1,0 +1,88 @@
+{
+  "version": "1.0.0",
+  "panels": [
+    {
+      "id": "review-panel",
+      "stage": "review",
+      "status": "succeeded",
+      "overlap_threshold": 2,
+      "context_bytes": 1132,
+      "providers": [
+        {
+          "transport": "claude",
+          "model": null,
+          "effort": "high",
+          "status": "ok",
+          "cost_usd": 0.021,
+          "context_bytes": 1132,
+          "finding_ids": [
+            "f1",
+            "f2"
+          ],
+          "error": null
+        },
+        {
+          "transport": "pi",
+          "model": "openai-codex/gpt-6-sol",
+          "effort": null,
+          "status": "ok",
+          "cost_usd": 0.0047,
+          "context_bytes": 1132,
+          "finding_ids": [
+            "f1",
+            "f3"
+          ],
+          "error": null
+        }
+      ],
+      "findings": [
+        {
+          "id": "f1",
+          "severity": "P0",
+          "file": "workflow/x.py",
+          "line": 2,
+          "title": "Missing owner check in withdraw",
+          "detail": "anyone withdraws",
+          "providers_raised": [
+            "claude",
+            "openai-codex/gpt-6-sol"
+          ],
+          "accepted": true,
+          "unanchored": false
+        },
+        {
+          "id": "f2",
+          "severity": "P2",
+          "file": "workflow/new.py",
+          "line": 1,
+          "title": "Unused constant",
+          "detail": "NEW is never read",
+          "providers_raised": [
+            "claude"
+          ],
+          "accepted": false,
+          "unanchored": false
+        },
+        {
+          "id": "f3",
+          "severity": "P2",
+          "file": "src/elsewhere.ts",
+          "line": 9,
+          "title": "Ghost",
+          "detail": "cites no label",
+          "providers_raised": [
+            "openai-codex/gpt-6-sol"
+          ],
+          "accepted": false,
+          "unanchored": true
+        }
+      ],
+      "started_at": "2026-09-21T14:13:20Z",
+      "ended_at": "2026-09-21T14:13:20Z",
+      "budget_usd": 5,
+      "error": null,
+      "delta_from": null,
+      "context_truncated": null
+    }
+  ]
+}

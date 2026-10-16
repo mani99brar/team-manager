@@ -195,6 +195,32 @@ class FeatureLaunchTests(unittest.TestCase):
         self.assertEqual(printed["critique"]["critique_app"]["ready_path"], "/")
         self.assertIn("guard", printed["critique"])
 
+    def judged_feature(self) -> None:
+        """features/project-workflows as a 2.11.0 feature with a judged review panel (features/review-panel-registry/prd.md 6)."""
+        folder = self.repo / "features/project-workflows"
+        manifest = read_json(folder / "feature.json")
+        manifest.update(version="2.11.0", panels=[{"id": "review", "stage": "review", "report_only": False, "seats": ["muse"]}])
+        save_json(folder / "feature.json", manifest)
+        brief = "## Goal\n\nBuild it.\n\n## Acceptance\n\nIt runs.\n\n## Stop\n\nAfter three failed fixes.\n"
+        for name in ("ui-task.md", "adapter-task.md"):
+            (folder / name).write_text(brief)
+        (folder / "decisions.md").write_text("# Decisions\n\n## Operator decisions\n\n- [O1] Build it.\n")
+        self.git("add", "."), self.git("commit", "-qm", "judged panel")
+
+    def test_launch_refuses_a_judged_panel_without_judge_model_dry_run_included(self):
+        """Design-challenge note 3: without --judge-model the judge's pinned model would be null and every judging would fall
+        back, so a judged panel is refused before the list is read and before any Git action, by the command itself too."""
+        self.judged_feature()
+        listing = self.root / "reviewers.json"
+        listing.write_bytes((Path(__file__).resolve().parents[1] / "features" / "review-panel-registry" / "examples" / "reviewers.example.json").read_bytes())
+        with patch.dict(os.environ, {"WORKFLOW_REVIEWERS_FILE": str(listing)}), patch("workflow.reviewers.read", side_effect=AssertionError("list read")):
+            with self.assertRaisesRegex(ValueError, "judged panel \\(report_only: false\\): launch it with --judge-model"):
+                launch_commands(self.repo, "project-workflows", "pw-001", self.root / "runs")
+        result = self.dry_run(WORKFLOW_REVIEWERS_FILE=str(listing))
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("launch it with --judge-model", result.stdout + result.stderr)
+        self.assertFalse((self.root / "runs").exists())
+
     def attack_feature(self, attack_check: bool = True) -> None:
         """features/project-workflows as a 2.5.0 feature with `attack` (and its policy's attack_check unless told otherwise)."""
         folder = self.repo / "features/project-workflows"

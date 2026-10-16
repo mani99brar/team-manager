@@ -10,8 +10,8 @@ import assert from 'node:assert/strict'
 import type { NightShiftDecision, SessionRow, Sessions } from '../../contracts/projects/sessions.ts'
 import {
   aggregateCostText, costText, decisionsForNode, durationText, fixRoundShort, fixRoundText, groupSessions, jevText, laneResultText,
-  nightShiftCountText, nightShiftNodes, outcomeText, panelMeaning, providerText, resumeText, RESUME_NOTE, reviewerRoundsOf, reviewerTone, sessionsForNode,
-  sessionsCueText, spentText, stageCardOf, totalsText,
+  nightShiftCountText, nightShiftNodes, outcomeText, panelMeaning, providerText, JUDGE_RESUME_NOTE, resumeText, RESUME_NOTE, reviewerRoundsOf, reviewerTone,
+  sessionsForNode, sessionsCueText, spentText, stageCardOf, totalsText,
 } from '../../src/projects/sessions/model.ts'
 import { stageExecutor } from '../../src/projects/signal/executor.ts'
 import { stageNodes } from '../../src/projects/signal/model.ts'
@@ -44,13 +44,13 @@ test('stageCardOf: the panel card aggregates its providers; costs stay apart', (
   assert.equal(stageCardOf(PAYLOAD, 'panel')!.word, 'not recorded')
 })
 
-type PanelEntry = (typeof PANEL)['panels'][number]
+type PanelEntry = import('../../contracts/projects/v1.ts').PanelEntry
 const provider = (model: string, status: PanelEntry['providers'][number]['status']): PanelEntry['providers'][number] =>
   ({ transport: 'pi', model, effort: null, status, cost_usd: 0.1, context_bytes: 1, finding_ids: [], error: status === 'ok' ? null : 'timed out after 600s' })
 const finding = (id: string, severity: 'P0' | 'P1' | 'P2', accepted: boolean, raised: string[]): PanelEntry['findings'][number] =>
   ({ id, severity, file: 'a.ts', line: 1, title: id, detail: id, providers_raised: raised, accepted, unanchored: false })
 const panelRecord = (status: PanelEntry['status'], providers: PanelEntry['providers'], findings: PanelEntry['findings'] = []) =>
-  ({ panels: [{ ...PANEL.panels[0]!, status, providers, findings }] })
+  ({ panels: [{ ...(PANEL.panels[0] as PanelEntry), status, providers, findings }] })
 
 test('panelCard: the word follows the panel\'s own recorded status, the sheet counts the providers that answered ([L12] 1)', () => {
   // A succeeded panel with one provider timed out: reviewed, "2 of 3 providers answered", whatever the provider rows say.
@@ -97,12 +97,12 @@ test('panelCard: when the panels route fails or has not answered, the card never
 test('panelCard: the Panel card reads the review-stage panels only, never the design challenge\'s (run-sessions-006 review D)', () => {
   // The panel-challenge shape: a challenge-stage panel that succeeded (two providers answered, one accepted P1) beside the
   // review stage's pending panel. The card is the review panel's: not started, no providers answered, no open P0/P1.
-  const challenge = { ...PANEL.panels[0]!, id: 'challenge-panel', stage: 'challenge' as const, status: 'succeeded' as const, providers: [provider('a/x', 'ok'), provider('b/y', 'ok')], findings: [finding('f1', 'P1', true, ['a/x', 'b/y'])] }
-  const review = { ...PANEL.panels[0]!, status: 'pending' as const, started_at: null, ended_at: null, providers: [provider('a/x', 'pending'), provider('b/y', 'pending')], findings: [] }
+  const challenge = { ...(PANEL.panels[0] as PanelEntry), id: 'challenge-panel', stage: 'challenge' as const, status: 'succeeded' as const, providers: [provider('a/x', 'ok'), provider('b/y', 'ok')], findings: [finding('f1', 'P1', true, ['a/x', 'b/y'])] }
+  const review = { ...(PANEL.panels[0] as PanelEntry), status: 'pending' as const, started_at: null, ended_at: null, providers: [provider('a/x', 'pending'), provider('b/y', 'pending')], findings: [] }
   const card = stageCardOf(PAYLOAD, 'panel', { panels: [challenge, review] })!
   assert.deepEqual([card.word, card.tone, card.openP01, card.did, card.startedAt], ['not started', 'idle', null, 'Not started.', null])
   // Once the review panel ran, the counts are its own: 1 of 2 answered, 0 open (the challenge's accepted P1 is not counted).
-  const ran = { ...review, status: 'succeeded' as const, started_at: PANEL.panels[0]!.started_at, ended_at: PANEL.panels[0]!.ended_at, providers: [provider('c/z', 'ok'), provider('d/w', 'timed_out')] }
+  const ran = { ...review, status: 'succeeded' as const, started_at: (PANEL.panels[0] as PanelEntry).started_at, ended_at: (PANEL.panels[0] as PanelEntry).ended_at, providers: [provider('c/z', 'ok'), provider('d/w', 'timed_out')] }
   const after = stageCardOf(PAYLOAD, 'panel', { panels: [challenge, ran] })!
   assert.deepEqual([after.word, after.openP01, after.did, after.models], ['reviewed', 0, '1 of 2 providers answered; 0 open P0/P1.', ['c/z', 'd/w']])
   // A failed challenge panel does not turn the review card red; a record with no review-stage panel reads not recorded.
@@ -115,7 +115,7 @@ test('panelMeaning: a failed or timed-out review panel says so on its succeeded 
     assert.equal(panelMeaning(panelRecord(status, [provider('a/x', 'error')])), `The panel ${word} (report-only; the run's verdict is unchanged). Its error is below.`)
   }
   assert.equal(panelMeaning(panelRecord('succeeded', [provider('a/x', 'ok')])), null)
-  assert.equal(panelMeaning({ panels: [{ ...PANEL.panels[0]!, stage: 'challenge', status: 'failed' }] }), null)
+  assert.equal(panelMeaning({ panels: [{ ...(PANEL.panels[0] as PanelEntry), stage: 'challenge', status: 'failed' }] }), null)
   assert.equal(panelMeaning(null), 'The panel record did not load, so whether the panel failed is not recorded.')
 })
 
@@ -191,6 +191,17 @@ test('resumeText: the ~/ form copies whole with no note; the bare form says to r
   assert.equal(RESUME_NOTE, "run it in the session's worktree")
   const pi = PAYLOAD.sessions.find(row => row.transport === 'pi')!
   assert.equal(resumeText(pi), null)
+})
+
+test('resumeText: a panel judge\'s bare command says its worktree was removed, live and archived rounds alike (PRD 8, C2)', () => {
+  const bare = BARE.sessions.find(row => row.key === 'worker:server')!
+  for (const key of ['panel:0:judge', 'panel:round-2:1:judge']) {
+    const judge = { ...bare, key, role: 'panel_provider' as const }
+    assert.deepEqual(resumeText(judge), { command: `claude --resume ${bare.session_id}`, note: JUDGE_RESUME_NOTE }, key)
+  }
+  assert.equal(JUDGE_RESUME_NOTE, 'its worktree was removed; run it from any directory')
+  // A seat row of the same panel keeps the worktree note.
+  assert.equal(resumeText({ ...bare, key: 'panel:0:1', role: 'panel_provider' })?.note, RESUME_NOTE)
 })
 
 test('reviewerRoundsOf and sessionsForNode: the latest round first, then the earlier rounds; a challenge has one block per attempt', () => {

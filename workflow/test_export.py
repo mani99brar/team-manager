@@ -833,3 +833,73 @@ class FixLoopExportTests(unittest.TestCase):
         self.assertEqual(export_of(directory)["review"]["delta_from"], "e" * 40)
         (directory / "review.delta.diff").unlink()
         self.assertIsNone(export_of(directory)["review"]["delta_from"])
+
+
+JUDGED_PANEL = {"id": "review", "stage": "review", "report_only": False, "seats": [], "judge": {"model": "claude-opus-5-5", "effort": "high",
+                "timeout_minutes": 30, "budget_usd": 15, "input_cap_bytes": 600000}}
+REPORT_ONLY_PANEL = {"id": "review-panel", "stage": "review", "report_only": True, "providers": [{"transport": "pi", "model": "openai-codex/gpt-6-sol", "effort": None}]}
+
+
+class JudgedReviewExportTests(unittest.TestCase):
+    """features/review-panel-registry/prd.md 7.4 and decisions [L3]: ExportRuntime validates review.json with the judged-plan
+    context of the run's plan. A judge-approved record whose built-in entries read blocked exports on a judged plan and is
+    refused on any other; critique still blocks. The panels section is the seats lane's (patched out here)."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        port = patch("workflow.export_state.panel_section", return_value=None)
+        port.start()
+        self.addCleanup(port.stop)
+
+    def judged_run(self, panels, *, critique: str | None = None) -> Path:
+        directory = legacy_run(self.root)
+        plan = read_json(directory / "plan.json")
+        plan["reviewers"] = [{"reviewer_id": "general", "prompt": "General."}, {"reviewer_id": "coverage", "prompt": "Coverage."}]
+        if panels is not None:
+            plan["panels"] = panels
+        save_json(directory / "plan.json", plan)
+        review = read_json(directory / "review.json")
+        entries = [{"reviewer_id": "general", "session_id": REVIEWER, "verdict": "blocked", "accepted_at": "2026-09-21T15:40:00.000000Z"},
+                   {"reviewer_id": "coverage", "session_id": "11111111-adec-4efe-bcd4-bbadc3525d95", "verdict": "blocked", "accepted_at": "2026-09-21T15:41:00.000000Z"},
+                   {"reviewer_id": "judge", "session_id": "5f0c2a8e-7d4b-4f1e-9a63-2b8d1c0e4f71", "verdict": "approved", "accepted_at": "2026-09-21T15:50:00Z"}]
+        verdict = "approved"
+        if critique is not None:
+            entries.append({"reviewer_id": "critique", "session_id": "c0c0c0c0-1111-4222-8333-444455556666", "verdict": critique,
+                            "accepted_at": "2026-09-21T15:55:00Z"})
+            verdict = "blocked" if critique != "approved" else "approved"
+        findings = [{"severity": "P2", "message": "[J1 from general-1, C1] Stale task error (ui.txt:1): the stale error overrides success.",
+                     "disposition": "open", "worker": "ui", "reviewer": "judge"}]
+        review.update(reviewer=", ".join(entry["session_id"] for entry in entries), verdict=verdict, findings=findings, reviewers=entries)
+        save_json(directory / "review.json", review)
+        save_json(directory / "automatic-review.json", {"transport": "native", "status": "succeeded" if verdict == "approved" else "blocked",
+                                                        "reviewers": ["general", "coverage"], "accepted_at": "2026-09-21T15:56:00.000000Z"})
+        return directory
+
+    def test_a_judge_approved_record_with_blocked_built_in_entries_exports_on_a_judged_plan(self):
+        directory = self.judged_run([JUDGED_PANEL])
+        exported = export_run(ExportRuntime(directory))
+        self.assertEqual((exported["version"], exported["review"]["verdict"]), (EXPORT_VERSION, "approved"))
+        self.assertEqual([(entry["reviewer_id"], entry["verdict"]) for entry in exported["review"]["reviewers"]],
+                         [("general", "blocked"), ("coverage", "blocked"), ("judge", "approved")])
+        self.assertEqual([finding["reviewer"] for finding in exported["review"]["findings"]], ["judge"])
+
+    def test_the_same_record_on_a_legacy_report_only_or_missing_plan_context_is_refused(self):
+        for name, panels in (("legacy", None), ("report-only", [REPORT_ONLY_PANEL]), ("missing", [])):
+            with self.subTest(name):
+                self.root = Path(tempfile.mkdtemp(dir=self.temp.name))
+                directory = self.judged_run(panels)
+                with self.assertRaisesRegex(ValueError, "reserved reviewer judge"):
+                    ExportRuntime(directory)
+
+    def test_critique_still_blocks_on_its_own_in_the_export(self):
+        directory = self.judged_run([JUDGED_PANEL], critique="blocked")
+        self.assertEqual(export_run(ExportRuntime(directory))["review"]["verdict"], "blocked")
+        review = read_json(directory / "review.json")
+        save_json(directory / "review.json", {**review, "verdict": "approved"})  # An approval over critique's block is contradictory.
+        with self.assertRaisesRegex(ValueError, "judge's approval"):
+            ExportRuntime(directory)
+
+    def test_export_version_is_unchanged(self):
+        self.assertEqual(EXPORT_VERSION, "1.12.0")  # [G22]: no EXPORT_VERSION bump; the panel record carries its own version.

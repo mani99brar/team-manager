@@ -4,6 +4,7 @@
  * a single-reviewer case: the combined verdict is unanimous, and a blocked run is explained by the reviewers that caused it.
  * Pure helpers, kept out of the component file so it only exports components.
  */
+import { judgeDecided, servedReviewContext } from '../../contracts/projects/v1.ts'
 import { isBlockingFinding, type ReviewFinding, type ReviewResult } from './api.ts'
 
 export type Reviewer = ReviewResult['reviewers'][number]
@@ -88,4 +89,45 @@ export function blockedByWording(review: Pick<ReviewResult, 'verdict' | 'reviewe
     : `Blocked by ${list(reasons)}.`
   const tail = stopped.length === 0 ? '' : ` ${list(stopped)} ${stopped.length === 1 ? 'was' : 'were'} superseded: stopped after that decision, no verdict recorded.`
   return head + tail
+}
+
+export { ADVISORY_WORDING, DECIDING_WORDING, reviewerRole } from '../../contracts/projects/v1.ts'
+
+/**
+ * Whether the judge decided the review: the served result says its run pins a judged panel and it lists `judge`. A fallback
+ * record on a judged run (no `judge` entry) is decided by its built-in reviewers, as today, and labels none advisory.
+ */
+export function isJudgedReview(review: Pick<ReviewResult, 'reviewers' | 'judged_panel'>): boolean {
+  return judgeDecided(review, servedReviewContext(review))
+}
+
+/**
+ * An advisory reviewer's verdict in words: it advised, the judge decided (never "blocked the candidate"). One that gave no
+ * verdict (the deadline expired or its completion file was rejected: status blocked) says so, never that it blocked or advised.
+ */
+export function advisedWording(reviewer: Pick<Reviewer, 'status' | 'verdict'>): string {
+  if (reviewer.verdict === 'blocked') return 'advised blocking'
+  if (reviewer.verdict === 'approved') return 'advised approval'
+  if (reviewer.status === 'blocked') return 'gave no verdict (the judge ruled on the others)'
+  return `${statusWording(reviewer.status)}, no advice recorded`
+}
+
+/** What an advisory card says in place of its counts: its findings went to the judge, which ruled on each. */
+export const ADVISORY_FINDINGS_WORDING = 'findings passed to the judge'
+
+/** An advisory card's counts line: its findings went to the judge only when it gave a verdict; else its own (none) counts. */
+export function advisoryFindingsWording(reviewer: Pick<Reviewer, 'verdict' | 'findings'>): string {
+  return reviewer.verdict !== null ? ADVISORY_FINDINGS_WORDING : severityCounts(reviewer.findings)
+}
+
+/**
+ * The Findings legend under the list. A judged record says the judge's confirmed rulings (and critique's own findings) block,
+ * the built-ins reach the list only through a ruling, and each ruling names the findings it merged; every other record reads
+ * exactly as before.
+ */
+export function findingsLegend(judged: boolean, critique: boolean, lanes: readonly string[]): string {
+  const files = 'A finding links to a captured file only where its message names the file\'s path verbatim.'
+  const workers = `Workers are the lanes this run had${lanes.length > 0 ? ` (${lanes.join(', ')})` : ''}; “multiple workers” covers findings that concern more than one lane.`
+  if (!judged) return `${files} Blocking means an unresolved P0 or P1 finding from any reviewer; a quote links only where the task text contains it verbatim. ${workers} Reviewer names the reviewer that raised the finding; the same finding raised by several reviewers is listed once per reviewer, never merged.`
+  return `${files} Blocking means an unresolved P0 or P1 ruling the judge confirmed${critique ? ', or an unresolved P0 or P1 critique finding' : ''}; the built-in reviewers are advisory and reach this list only through a ruling; a quote links only where the task text contains it verbatim. ${workers} Each ruling's Reviewer is the judge, and its [J<n> from …] prefix names the findings it merged.`
 }

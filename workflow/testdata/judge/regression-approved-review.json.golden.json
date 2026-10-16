@@ -1,0 +1,32 @@
+{
+  "run_id": "run",
+  "bundle_sha256": "<SHA256>",
+  "candidate_commit": "<COMMIT>",
+  "reviewer": "<UUID1>, <UUID2>",
+  "independent": true,
+  "verdict": "approved",
+  "findings": [
+    {
+      "severity": "P2",
+      "message": "No test asserts the empty state.",
+      "disposition": "open",
+      "worker": "ui",
+      "requirement": null,
+      "reviewer": "general"
+    }
+  ],
+  "reviewers": [
+    {
+      "reviewer_id": "general",
+      "session_id": "<UUID1>",
+      "verdict": "approved",
+      "accepted_at": "<TIME>"
+    },
+    {
+      "reviewer_id": "coverage",
+      "session_id": "<UUID2>",
+      "verdict": "approved",
+      "accepted_at": "<TIME>"
+    }
+  ]
+}

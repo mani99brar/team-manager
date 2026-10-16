@@ -41,10 +41,13 @@ def isolate_registry() -> None:
     a test that sets the variable itself still wins. CLAUDECODE is emptied too: run from a Claude Code session the event texts
     would name it (actor.actor_text), and the tests that expect the marker set it themselves. CLAUDE_CONFIG_DIR names an empty
     directory there as well, so a confirmed stop's cost record (costs.record_session_cost) never reads the operator's
-    transcripts."""
+    transcripts, and WORKFLOW_REVIEWERS_FILE a reviewer list that does not exist."""
     temp = tempfile.TemporaryDirectory()
+    # WORKFLOW_REVIEWERS_FILE names a list that does not exist, so no test reads the operator's shared reviewer list
+    # (~/.local/share/agent-memory/...); a test of the judged panel points it at its own temporary file.
     environment = patch.dict(os.environ, {"MD_MANAGER_PROJECTS_CONFIG": str(Path(temp.name) / "config" / "projects.json"), "CLAUDECODE": "",
-                                          "CLAUDE_CONFIG_DIR": str(Path(temp.name) / "claude")})
+                                          "CLAUDE_CONFIG_DIR": str(Path(temp.name) / "claude"),
+                                          "WORKFLOW_REVIEWERS_FILE": str(Path(temp.name) / "no-reviewer-list.json")})
     environment.start()
     unittest.addModuleCleanup(temp.cleanup)
     unittest.addModuleCleanup(environment.stop)
@@ -2456,7 +2459,7 @@ class PanelLaunchGuards(unittest.TestCase):
         from . import attack, guardrails, panel, sidecar
         from .launch import load_feature
         flags = {}
-        for version in ("2.6.0", "2.7.0", "2.8.0", "2.9.0", "2.10.0"):
+        for version in ("2.6.0", "2.7.0", "2.8.0", "2.9.0", "2.10.0", "2.11.0"):
             self.write_feature(version=version)
             manifest = load_feature(self.folder)
             self.assertTrue(guardrails.is_guarded(manifest), version)
@@ -2473,6 +2476,7 @@ class PanelLaunchGuards(unittest.TestCase):
         self.assertEqual(flags["2.8.0"], flags["2.7.0"])  # a 2.8.0 feature without skills launches with the same flags
         self.assertEqual(flags["2.9.0"], flags["2.8.0"])  # a 2.9.0 feature without critique launches with the same flags
         self.assertEqual(flags["2.10.0"], flags["2.9.0"])  # a 2.10.0 feature without lane_review launches with the same flags
+        self.assertEqual(flags["2.11.0"], flags["2.10.0"])  # a 2.11.0 feature with a report-only panel launches with the same flags
         self.write_feature(version="2.8.0", tryout=True)
         self.assertTrue(load_feature(self.folder)["tryout"])
 
@@ -2559,6 +2563,222 @@ class PanelLaunchGuards(unittest.TestCase):
                                     "--panel-settings", json.dumps(settings))
         self.assertNotEqual(code, 0)
         self.assertIn("--panel-settings applies to prepare --guardrails", err)
+
+
+FAKE_SEAT_CLAUDE = """#!/bin/sh
+# A stand-in claude for a judged launch: --help lists every flag preflight and a claude seat need, auth status is logged in.
+case "$1" in
+  --version) echo '2.1.300 (Claude Code)';;
+  --help) echo '--bg --settings --safe-mode --setting-sources --plugin-dir --tools --permission-mode --dangerously-skip-permissions --add-dir --allowedTools --json-schema --print --permission-prompts --effort --max-budget-usd';;
+  auth) echo '{"loggedIn": true}';;
+  *) exit 2;;
+esac
+"""
+
+
+class JudgedPanelLaunch(PanelLaunchGuards):
+    """feature.json 2.11.0's judged panel at launch and prepare (features/review-panel-registry/prd.md 4.3, 6; seats task
+    Acceptance 3 and 8): the shared list is read only for a judged panel (WORKFLOW_REVIEWERS_FILE, a temporary file), its seats are
+    resolved with fake binaries on PATH and pinned with the list's sha256, the run never reads the list again, and every
+    refusal comes before any Git action."""
+
+    EXAMPLES = Path(__file__).resolve().parents[1] / "features" / "review-panel-registry" / "examples"
+
+    def setUp(self):
+        super().setUp()
+        self.bin = self.tmp / "fake-bin"
+        self.bin.mkdir()
+        testdata = Path(__file__).resolve().parent / "testdata" / "panel"
+        for name in ("muse", "agy"):
+            shutil.copyfile(testdata / f"fake-{name}", self.bin / name)
+        (self.bin / "claude").write_text(FAKE_SEAT_CLAUDE)
+        (self.bin / "node").write_text("#!/bin/sh\necho v24.0.0\n")  # preflight only looks it up.
+        (self.bin / "pi").write_text("#!/bin/sh\n[ \"$1\" = --version ] && { [ -f \"$(dirname \"$0\")/pi-fails\" ] && exit 1; echo 0.85.1; exit 0; }\nexit 2\n")
+        for path in self.bin.iterdir():
+            path.chmod(0o755)
+        self.listing = self.tmp / "reviewers.json"
+        self.listing.write_bytes((self.EXAMPLES / "reviewers.example.json").read_bytes())
+        # PATH holds only the fakes and the system dirs: no test reaches the host's real muse, agy, pi or claude.
+        environment = patch.dict(os.environ, {"WORKFLOW_REVIEWERS_FILE": str(self.listing), "PATH": f"{self.bin}:/usr/bin:/bin"})
+        environment.start()
+        self.addCleanup(environment.stop)
+        self.judged = {"id": "review", "stage": "review", "report_only": False, "seats": ["claude", "gpt", "muse", "argon"],
+                       "requirements": ["docs/security/requirements.md"]}
+
+    def launch_judged(self, **kwargs):
+        return self.launch(roles={"judge_model": "claude-opus-5-5", **kwargs.pop("roles", {})}, **kwargs)
+
+    def test_launch_resolves_and_pins_the_seats_and_prepare_pins_them_into_plan_panels_0(self):
+        import hashlib
+        from . import panel
+        self.write_feature(version="2.11.0", panels=[self.judged])
+        run, commands, _ = self.launch_judged()
+        preflight, prepare = commands[0], commands[2]
+        self.assertNotIn("--panels", preflight)  # A judged panel's seats were probed at launch and never block (note 4).
+        settings = json.loads(prepare[prepare.index("--panel-settings") + 1])
+        [item] = settings["panels"]
+        self.assertEqual([(s["name"], s["status"], s["error"]) for s in item["seats"]],
+                         [("claude", "pending", None), ("gpt", "pending", None), ("muse", "pending", None), ("argon", "unavailable", "disabled in the reviewer list")])
+        self.assertEqual([s["bin"] for s in item["seats"]], [str(self.bin / "claude"), str(self.bin / "pi"), str(self.bin / "muse"), None])
+        self.assertEqual(item["seats"][2]["cli_version"], "Muse Code 1.4.7 (1.4.7-R6101.1)")
+        self.assertEqual(item["reviewers_file"], {"label": str(self.listing), "sha256": hashlib.sha256(self.listing.read_bytes()).hexdigest()})
+        self.assertEqual(item["judge"], {"model": "claude-opus-5-5", "effort": "high", "timeout_minutes": 30, "budget_usd": 15, "input_cap_bytes": 600000})
+        self.assertEqual(item["prompt"], str(panel.JUDGED_BRIEF))
+        self.assertEqual(settings["pi_bin"], str(self.bin))
+        # prepare pins exactly the PRD's plan-panel-judged key set.
+        from .sidecar import BUILTIN_BRIEFS
+        subprocess.run(["git", "-C", str(self.repo), "switch", "-q", "-c", "feature/project-workflows/pw-001"], check=True)
+        code, _, err = pipeline_cli("prepare", str(run), "--repo", str(self.repo), "--policy", str(self.folder / "policy.json"),
+                                    "--task", f"ui={self.folder / 'ui-task.md'}", "--task", f"adapter={self.folder / 'adapter-task.md'}",
+                                    "--guardrails", "--decisions", str(self.folder / "decisions.md"), "--prd", str(self.repo / "docs" / "PRD.md"),
+                                    "--sidecar-brief", str(BUILTIN_BRIEFS / "senior-review.md"),
+                                    "--attack-settings", json.dumps({"angles": ["auth-funds"], "requirements": ["docs/security/requirements.md"]}),
+                                    "--panel-settings", json.dumps(settings), "--automatic", "--judge-model", "claude-opus-5-5")
+        self.assertEqual(code, 0, err)
+        plan = read_json(run / "plan.json")
+        [pinned] = plan["panels"]
+        from .test_panel import prd_literal
+        self.assertEqual(set(pinned), set(prd_literal("plan-panel-judged")))
+        self.assertEqual(pinned["seats"], item["seats"])
+        self.assertEqual(pinned["reviewers_file"], item["reviewers_file"])
+        self.assertEqual(pinned["prompt"]["text"], panel.JUDGED_BRIEF.read_text())
+        panel.validate_plan(plan)
+        # Editing (then deleting) the shared list after prepare changes nothing in the run: the plan carries the seats.
+        listing = json.loads(self.listing.read_text())
+        listing["reviewers"][2]["enabled"] = False
+        listing["reviewers"][2]["cli"]["argv"][0] = "/elsewhere/muse"
+        self.listing.write_text(json.dumps(listing))
+        self.assertEqual(read_json(run / "plan.json")["panels"][0]["seats"], item["seats"])
+        self.listing.unlink()
+        with patch("workflow.reviewers.read", side_effect=AssertionError("the run read the reviewer list")):
+            record = panel.pending_record(read_json(run / "plan.json"))
+            from .export_state import export_state
+            from .pipeline import ExportRuntime
+            exported = export_state(ExportRuntime(run), SimpleNamespace(tasks=[], values={}, next=[]))
+        self.assertEqual([(p["name"], p["status"]) for p in record["panels"][0]["providers"]],
+                         [("claude", "pending"), ("gpt", "pending"), ("muse", "pending"), ("argon", "unavailable")])
+        self.assertEqual(exported["panels"], record)
+
+    def test_a_failing_pi_probe_pins_gpt_unavailable_and_preflight_passes(self):
+        """Design-challenge note 4 / [G27]: a seat's failed probe never blocks the launch, and preflight proves no seat transport."""
+        (self.bin / "pi-fails").write_text("")
+        self.write_feature(version="2.11.0", panels=[self.judged])
+        run, commands, _ = self.launch_judged()
+        settings = json.loads(commands[2][commands[2].index("--panel-settings") + 1])
+        gpt = settings["panels"][0]["seats"][1]
+        self.assertEqual((gpt["name"], gpt["status"], gpt["error"]), ("gpt", "unavailable", "`pi --version` failed: exit 1"))
+        self.assertIsNone(settings["pi_bin"])
+        with patch.dict(os.environ, {"HERDR_ENV": "1"}):
+            code, out, err = pipeline_cli(*commands[0][3:])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out)["preflight"], "passed")
+        # Every seat unavailable: the launch still proceeds (the judge then rules on the built-in reviewers' findings only).
+        for name in ("claude", "muse"):
+            (self.bin / name).unlink()
+        _, commands, _ = self.launch_judged()
+        settings = json.loads(commands[2][commands[2].index("--panel-settings") + 1])
+        self.assertEqual([s["status"] for s in settings["panels"][0]["seats"]], ["unavailable"] * 4)
+
+    def test_every_judged_refusal_comes_before_any_git_action_dry_run_included(self):
+        from .launch import main
+        self.write_feature(version="2.11.0", panels=[self.judged])
+        with self.assertRaisesRegex(ValueError, "launch it with --judge-model"):
+            self.launch()
+        err = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err), self.assertRaises(SystemExit):
+            main(["project-workflows", "--repo", str(self.repo), "--run-root", str(self.tmp / "runs"), "--dry-run", "--automatic"])
+        self.assertIn("--judge-model", err.getvalue())
+        for setup, pattern in ((lambda: self.listing.unlink(), "reviewer list does not exist"),
+                               (lambda: self.listing.write_text("{oops"), "not valid JSON"),
+                               (lambda: self.listing.write_text(json.dumps({"version": "1.0.0", "reviewers": [], "x": 1})), "Additional properties"),
+                               (lambda: self.listing.write_text(json.dumps({**json.loads((self.EXAMPLES / "reviewers.example.json").read_text()),
+                                                                            "reviewers": json.loads((self.EXAMPLES / "reviewers.example.json").read_text())["reviewers"][:1]})),
+                                "panel seat 'gpt' is not in the reviewer list")):
+            self.listing.write_bytes((self.EXAMPLES / "reviewers.example.json").read_bytes())
+            setup()
+            with self.assertRaisesRegex(ValueError, pattern) as caught:
+                self.launch_judged()
+            if "seat" not in pattern:
+                self.assertIn(str(self.listing), str(caught.exception))
+        self.listing.write_bytes((self.EXAMPLES / "reviewers.example.json").read_bytes())
+        for panels, version, pattern in (([self.judged, self.panel], "2.11.0", "beside another panel"),
+                                         ([self.judged, {**self.judged, "id": "again"}], "2.11.0", "second judged panel"),
+                                         ([{**self.judged, "stage": "challenge"}], "2.11.0", "review stage only"),
+                                         ([{**self.judged, "providers": [{"transport": "claude"}]}], "2.11.0", "providers is not a judged-panel setting"),
+                                         ([{**self.judged, "overlap_threshold": 2}], "2.11.0", "overlap_threshold is not a judged-panel setting"),
+                                         ([self.judged], "2.10.0", "needs version 2.11.0")):
+            self.write_feature(version=version, panels=panels)
+            with self.assertRaisesRegex(ValueError, pattern):
+                self.launch_judged()
+        self.assertFalse((self.tmp / "runs").exists())
+
+    def test_the_list_is_read_only_for_a_judged_panel_and_both_default_prompts_pick_the_brief_by_kind(self):
+        from . import panel
+        self.listing.unlink()  # A report-only 2.11.0 panel launches with no list at all.
+        self.write_feature(version="2.11.0", panels=[{**self.panel, "prompt": "builtin:review"}])
+        with patch("workflow.reviewers.read", side_effect=AssertionError("the list was read")):
+            prepare = self.launch()[1][2]
+        self.assertEqual(json.loads(prepare[prepare.index("--panel-settings") + 1])["panels"][0]["prompt"], str(panel.BUILTIN_BRIEFS / "review.md"))
+        self.listing.write_bytes((self.EXAMPLES / "reviewers.example.json").read_bytes())
+        for judged in (self.judged, {**self.judged, "prompt": "builtin:review"}):
+            self.write_feature(version="2.11.0", panels=[judged])
+            prepare = self.launch_judged()[1][2]
+            self.assertEqual(json.loads(prepare[prepare.index("--panel-settings") + 1])["panels"][0]["prompt"], str(panel.JUDGED_BRIEF))
+        self.write_feature(version="2.11.0", panels=[{**self.judged, "prompt": "panels/review.md"}])
+        prepare = self.launch_judged()[1][2]
+        self.assertTrue(json.loads(prepare[prepare.index("--panel-settings") + 1])["panels"][0]["prompt"].endswith("features/project-workflows/panels/review.md"))
+
+    def test_the_dry_run_prints_the_resolved_seats(self):
+        from .launch import main
+        self.write_feature(version="2.11.0", panels=[self.judged])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            main(["project-workflows", "--repo", str(self.repo), "--run-root", str(self.tmp / "runs"), "--dry-run", "--automatic",
+                  "--judge-model", "claude-opus-5-5"])
+        printed = json.loads(out.getvalue())
+        self.assertEqual([s["name"] for s in printed["panels"]["panels"][0]["seats"]], ["claude", "gpt", "muse", "argon"])
+        self.assertIn("seats resolved from the reviewer list", printed["panels"]["guard"])
+        self.assertFalse((self.tmp / "runs").exists())
+
+    def test_a_report_only_panel_at_2_11_0_launches_with_the_same_panel_settings_as_2_10_0(self):
+        """The 2.11.0 half of the byte-identical regression (the panel.json half: test_panel.ReportOnlyRegression)."""
+        settings = {}
+        for version in ("2.10.0", "2.11.0"):
+            self.write_feature(version=version)
+            prepare = self.launch()[1][2]
+            settings[version] = prepare[prepare.index("--panel-settings") + 1]
+        self.assertEqual(settings["2.11.0"], settings["2.10.0"])
+
+    def test_a_2_11_0_feature_keeps_everything(self):
+        """[G24] / PRD 6: prd, sidecar, attack, critical, a report-only panel, per-lane model/effort/skills, critique and
+        lane_review on one 2.11.0 feature: each is accepted and reaches prepare."""
+        from . import attack, critique, guardrails, lane_review, panel, sidecar
+        from .launch import lane_roles, lane_skills, load_feature
+        skill = self.tmp / "home" / ".claude" / "skills" / "impeccable"
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text("---\nname: impeccable\n---\n# Impeccable\n")
+        policy = read_json(self.folder / "policy.json")
+        policy["version"] = "1.4.0"
+        policy["critique_app"] = {"argv": ["npm", "run", "dev"], "ready_path": "/", "timeout_seconds": 120}
+        save_json(self.folder / "policy.json", policy)
+        workers = [{"node_id": "ui", "task": "ui-task.md", "model": "claude-sonnet-5", "effort": "low", "skills": ["impeccable"],
+                    "lane_review": {"reviewers": [{"transport": "pi", "model": "openai-codex/gpt-6.1-sol"}]}},
+                   {"node_id": "adapter", "task": "adapter-task.md"}]
+        self.write_feature(version="2.11.0", workers=workers, critique={"lanes": ["ui"], "skills": ["impeccable"]})
+        manifest = load_feature(self.folder)
+        self.assertTrue(guardrails.is_guarded(manifest))
+        self.assertEqual(sidecar.declared(manifest)["prompt"], "builtin:senior-review")
+        self.assertEqual(attack.declared(manifest)["angles"], ["auth-funds"])
+        self.assertEqual(panel.declared(manifest)[0]["id"], "review-panel")
+        self.assertEqual(critique.declared(manifest)["lanes"], ["ui"])
+        self.assertEqual(list(lane_review.declared(manifest)), ["ui"])
+        self.assertEqual(lane_roles(manifest), {"ui": {"model": "claude-sonnet-5", "effort": "low"}})
+        self.assertEqual(lane_skills(manifest), {"ui": ["impeccable"]})
+        preflight, _, prepare = self.launch()[1][:3]
+        for flag in ("--guardrails", "--decisions", "--prd", "--critical", "--sidecar-brief", "--attack-settings", "--panel-settings",
+                     "--critique-settings", "--lane-review-settings", "--lane-model", "--lane-effort", "--lane-skills"):
+            self.assertIn(flag, prepare)
+        self.assertEqual(preflight[preflight.index("--panels") + 1], "claude,pi")
 
 
 class CritiquePrepareTests(unittest.TestCase):

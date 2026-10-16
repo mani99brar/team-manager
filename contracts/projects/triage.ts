@@ -9,7 +9,7 @@
  * placeholders; every other value the viewer cannot know (a feature name, a run id, a commit, a reason) stays a `<…>`
  * placeholder. Nothing here runs a command or changes a run.
  */
-import { isBlockingFinding, type FixLoopReviewRound, type RepairEntry, type ReviewResult, type RunAccepted, type RunDetail, type RunInputs, type RunInputWorker } from './v1.ts'
+import { isBlockingFinding, JUDGE_REVIEWER_ID, reviewerRole, servedReviewContext, type FixLoopReviewRound, type ReviewPlanContext, type RepairEntry, type ReviewResult, type RunAccepted, type RunDetail, type RunInputs, type RunInputWorker } from './v1.ts'
 import type { WorkerResult, WorkflowEvent } from '../workflow/v1.ts'
 
 export type NodeStatus = RunDetail['snapshot']['status']
@@ -599,18 +599,27 @@ function close(span: Span, status: SpanStatus, end: Instant, outcome: string) {
 function reviewOutcome(review: ReviewResult): string {
   const counts = (['P0', 'P1', 'P2'] as const).map(severity => [severity, review.findings.filter(finding => finding.severity === severity).length] as const)
     .filter(([, count]) => count > 0).map(([severity, count]) => `${count} ${severity}`)
+  // On a judged review only the deciding reviewers (the judge, and critique) are named: the built-ins are advisory (PRD 7.4).
+  const deciding = review.reviewers.filter(entry => reviewerRole(review, entry.reviewer_id) !== 'advisory')
   const who = review.verdict === 'blocked'
-    ? `blocked by ${review.reviewers.filter(entry => entry.status === 'blocked').map(entry => entry.reviewer_id).join(', ') || 'review'}`
-    : `approved by ${review.reviewers.map(entry => entry.reviewer_id).join(' and ')}`
+    ? `blocked by ${deciding.filter(entry => entry.status === 'blocked').map(entry => entry.reviewer_id).join(', ') || 'review'}`
+    : `approved by ${deciding.map(entry => entry.reviewer_id).join(' and ')}`
   return [who, ...counts].join(' · ')
 }
 
-/** An archived review round in the words of `reviewOutcome`: who blocked it and its findings by severity. */
-function roundOutcome(round: FixLoopReviewRound): string {
+/**
+ * An archived review round in the words of `reviewOutcome`: who blocked it and its findings by severity. A round records no
+ * plan context of its own, so the run's (from its served review) says whether the judge decided it. While round k>1 runs no
+ * review is served (review.json is archived): then the round's own `judge` entry says so, since the id is reserved to a judged
+ * plan; a fallback round has none and stays unjudged.
+ */
+function roundOutcome(round: FixLoopReviewRound, review: ReviewResult | null): string {
+  const context: ReviewPlanContext = review ? servedReviewContext(review) : { judgedPanel: round.reviewers.some(entry => entry.reviewer_id === JUDGE_REVIEWER_ID) }
   const counts = (['P0', 'P1', 'P2'] as const).map(severity => [severity, round.findings.filter(finding => finding.severity === severity).length] as const)
     .filter(([, count]) => count > 0).map(([severity, count]) => `${count} ${severity}`)
-  const blockers = round.reviewers.filter(entry => entry.verdict === 'blocked').map(entry => entry.reviewer_id)
-  const who = round.verdict === 'blocked' ? `blocked by ${blockers.join(', ') || round.lane}` : `approved by ${round.reviewers.map(entry => entry.reviewer_id).join(' and ') || 'review'}`
+  const deciding = round.reviewers.filter(entry => reviewerRole(round, entry.reviewer_id, context) !== 'advisory')
+  const blockers = deciding.filter(entry => entry.verdict === 'blocked').map(entry => entry.reviewer_id)
+  const who = round.verdict === 'blocked' ? `blocked by ${blockers.join(', ') || round.lane}` : `approved by ${deciding.map(entry => entry.reviewer_id).join(' and ') || 'review'}`
   return [`round ${round.round} ${who}`, ...counts].join(' · ')
 }
 
@@ -773,7 +782,7 @@ function computeTimeline(run: RunData): Timeline {
       const fed = round.round === 1 ? undefined : repairsOf(detail).find(repair => repair.review_round === round.round - 1)?.applied_at ?? archived[round.round - 2]?.started_at
       const startAt = round.round === 1 ? first ?? candidateEnd : fed
       const span = newSpan('review', null, round.round, startAt ? { at: startAt, source: round.round === 1 && !first ? 'inferred' : 'receipt', note: round.round === 1 ? 'first review event' : 'the repair of the previous round applied' } : null)
-      close(span, round.verdict === 'approved' ? 'succeeded' : 'failed', { at: round.started_at, source: 'receipt', note: 'review round recorded' }, roundOutcome(round))
+      close(span, round.verdict === 'approved' ? 'succeeded' : 'failed', { at: round.started_at, source: 'receipt', note: 'review round recorded' }, roundOutcome(round, review ?? null))
       spans.push(span)
     }
   }
@@ -1657,8 +1666,13 @@ function checkFailedNow(context: Context): Draft | null {
 function reviewBlockedNow(context: Context): Draft | null {
   const review = context.run.review
   if (review?.verdict !== 'blocked') return null
-  // The cause first: the reviewers that blocked, then the others in their declared order.
-  const ordered = [...review.reviewers].sort((a, b) => Number(b.status === 'blocked') - Number(a.status === 'blocked'))
+  // The cause first: the reviewers that blocked, then the others in their declared order. On a judged review only the deciding
+  // reviewers (the judge, and critique) are the cause; the built-ins are advisory and named as such, never as blockers (PRD 7.4).
+  // A built-in that gave no verdict (deadline expired or file rejected) advised nothing and is named so.
+  const advisoryEntries = review.reviewers.filter(entry => reviewerRole(review, entry.reviewer_id) === 'advisory')
+  const advisory = advisoryEntries.filter(entry => entry.verdict !== null).map(entry => entry.reviewer_id)
+  const silent = advisoryEntries.filter(entry => entry.verdict === null).map(entry => entry.reviewer_id)
+  const ordered = review.reviewers.filter(entry => !advisoryEntries.includes(entry)).sort((a, b) => Number(b.status === 'blocked') - Number(a.status === 'blocked'))
   const reviewers = ordered.map(entry => {
     if (entry.status === 'superseded') return `${entry.reviewer_id} was superseded (no verdict)`
     if (entry.status === 'pending') return `${entry.reviewer_id} gave no verdict`
@@ -1668,6 +1682,8 @@ function reviewBlockedNow(context: Context): Draft | null {
       .filter(([, count]) => count > 0).map(([severity, count]) => `${count} open ${severity}`).join(' and ')
     return `${entry.reviewer_id} blocked the candidate: ${counts} — ${firstSentence(blocking[0].message)}`
   })
+  if (advisory.length) reviewers.push(`${advisory.join(' and ')} advised (the judge decided)`)
+  for (const id of silent) reviewers.push(`${id} gave no verdict`)
   const label = context.focus?.node_id === 'review' ? context.focus.label : labelOf(context.run.detail, 'review')
   return {
     situation: 'review_blocked', tone: 'blocked', glyph: '✗', since: review.reviewed_at,
@@ -1792,7 +1808,7 @@ function succeededNow(context: Context): Draft | null {
   if (runEnd) headline.push(' · took ', { kind: 'span', ms: ms(runEnd.at) - ms(runStart.at) })
   const review = context.run.review
   if (review) {
-    const approvers = review.reviewers.filter(entry => entry.verdict === 'approved').map(entry => entry.reviewer_id)
+    const approvers = review.reviewers.filter(entry => entry.verdict === 'approved' && reviewerRole(review, entry.reviewer_id) !== 'advisory').map(entry => entry.reviewer_id)
     const openP2 = review.findings.filter(finding => finding.severity === 'P2' && finding.disposition === 'open').length
     headline.push(` · review approved${approvers.length ? ` by ${approvers.join(' and ')}` : ''}${openP2 ? ` · ${openP2} open P2` : ''}`)
   }

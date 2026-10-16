@@ -26,6 +26,17 @@ A report-only, configurable panel of providers beside the review of an automatic
   non-terminal so `resume` reruns the non-terminal providers (each from its own start, into a new numbered output file).
 
 A plan without `panels`, every feature before 2.6.0 and every run prepared before this change touch none of this.
+
+feature.json 2.11.0 adds the JUDGED review panel (features/review-panel-registry/prd.md sections 4-7, Appendix A; RUNBOOK
+"Judged review panel (feature.json 2.11.0)"): `report_only: false`, seats named from the shared reviewer list
+(workflow/reviewers.py), resolved at launch and pinned at prepare with the list's sha256 ([G2], [G3]). At most one per feature,
+at the review stage, and in step 1 alone ([L5]). Its seats run blind, beside the built-in reviewers, through the `claude` and
+`pi` transports (today's commands and placement, [G19], [L1]) or the generic `cli` one (a throwaway worktree of the candidate
+and a scratch dir outside the run directory, an environment built from nothing, PRD 5). Their context adds the pinned
+decisions.md, their brief defaults to `review-judged.md` ([G13]; `review.md` stays the report-only brief), their findings are
+numbered `<prefix><n>` with no overlap clustering, and they never write attention. `settle` waits for every seat and returns
+them for the judge; `record_judge` stores the judge's object in `panel.json` 1.1.0 and sets each finding's `accepted` ([L4]).
+Report-only panels keep record 1.0.0 and every behaviour above, byte for byte.
 """
 from __future__ import annotations
 
@@ -38,6 +49,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from datetime import datetime, timezone
@@ -48,8 +60,10 @@ from .verification import CONTRACTS, validate_schema
 
 PANEL = "panel"
 PANEL_VERSION = "2.6.0"  # The feature version that may declare `panels`.
-PANEL_VERSIONS = frozenset({PANEL_VERSION, "2.7.0", "2.8.0", "2.9.0", "2.10.0"})  # 2.7.0 (per-lane worker pins), 2.8.0 (per-lane skills), 2.9.0 (critique) and 2.10.0 (per-lane reviewer) keep the panels.
+PANEL_VERSIONS = frozenset({PANEL_VERSION, "2.7.0", "2.8.0", "2.9.0", "2.10.0", "2.11.0"})  # 2.7.0 (per-lane worker pins), 2.8.0 (per-lane skills), 2.9.0 (critique), 2.10.0 (per-lane reviewer) and 2.11.0 (judged panel) keep the panels.
+JUDGED_VERSION = "2.11.0"  # The feature version that may declare a judged panel (`report_only: false`).
 RECORD_VERSION = "1.0.0"
+JUDGED_RECORD_VERSION = "1.1.0"  # panel.json of a run whose plan has a judged panel (PRD Appendix A).
 SCHEMA = CONTRACTS / "panel.schema.json"
 RECORD = "panel.json"
 DIR = "panel"  # `<run>/panel/<id>/`: the context file, each provider's prompt/output/stderr files and the pi scratch dirs.
@@ -67,6 +81,21 @@ LIVE_STAGES = ("review",)  # This slice; `challenge` is refused at launch (PRD 4
 TRANSPORTS = ("claude", "pi")
 BUILTIN_BRIEFS = Path(__file__).resolve().parent / "prompts" / "panels"
 BUILTIN_PREFIX = "builtin:"
+# A judged panel's default brief ([G13], design-challenge note 1): `builtin:review` (or no prompt) resolves here for a judged
+# panel only; report-only panels keep review.md byte for byte. Not listed by builtin_briefs, so no report-only panel names it.
+JUDGED_BRIEF = BUILTIN_BRIEFS / "review-judged.md"
+JUDGED_DEFAULT_PROMPT = "builtin:review"
+SEAT_TRANSPORTS = ("claude", "pi", "cli")
+MAX_SEATS = 16
+JUDGE_DEFAULTS = {"timeout_minutes": 30, "budget_usd": 15}
+JUDGE_BOUNDS = {"timeout_minutes": (5, 60), "budget_usd": (1, 50)}
+JUDGE_EFFORT = "high"
+JUDGE_INPUT_CAP_BYTES = 600_000
+JUDGED_KEYS = {"id", "stage", "report_only", "seats", "prompt", "requirements", "judge"}
+JUDGED_REFUSED = ("providers", "overlap_threshold", "budget_usd", "timeout_minutes")
+TERMINAL_SEAT = frozenset({"ok", "timed_out", "error", "parse_failed", "unavailable", "auth_required", "usage_limit", "model_mismatch"})
+JUDGE_STATUSES = ("pending", "running", "judged", "failed", "timed_out", "incomplete")
+KILL_GRACE_SECONDS = 10  # A cli seat past its timeout: SIGTERM to its group, SIGKILL this long after (PRD 5.1).
 DEFAULTS = {"budget_usd": 5, "timeout_minutes": 15, "overlap_threshold": 2}
 BOUNDS = {"budget_usd": (0.5, 50), "timeout_minutes": (1, 180)}
 # A panel with a claude provider and no budget_usd gets this per-call budget (RUNBOOK "Multi-provider panel"): a large context
@@ -136,13 +165,17 @@ def provider_settings(value, where: str) -> dict:
     return {"transport": transport, "model": model, "effort": effort}
 
 
-def settings(value, where: str = "panels[] ") -> dict:
+def settings(value, where: str = "panels[] ", *, feature: bool = False) -> dict:
     """One panel's settings with the defaults filled in; a missing, unknown or out-of-range value is refused, naming the key.
-    `report_only` must be true (blocking is not in v1, [O4]). Without `budget_usd`, a panel with a claude provider gets
-    CLAUDE_BUDGET_USD per claude call and a pi-only one the default 5; a given value is kept."""
+    `report_only` must be true (blocking is not in v1, [O4]), except a judged panel (`report_only: false`, judged_settings):
+    `feature` says the value is a feature.json entry (seat names), else a pinned one (--panel-settings, the plan). Without
+    `budget_usd`, a report-only panel with a claude provider gets CLAUDE_BUDGET_USD per claude call and a pi-only one the
+    default 5; a given value is kept."""
     from .attack import requirements_of
     if not isinstance(value, dict):
         raise ValueError(f"{where}must be an object")
+    if value.get("report_only") is False:
+        return judged_settings(value, where, feature=feature)
     known = {"id", "stage", "providers", "prompt", "requirements", "report_only", *DEFAULTS}
     unknown = sorted(set(value) - known)
     if unknown:
@@ -186,6 +219,107 @@ def settings(value, where: str = "panels[] ") -> dict:
     return result
 
 
+def _bounded(value: dict, key: str, low, high, integer: bool, where: str):
+    item = value[key]
+    if not (type(item) is int if integer else _number(item)) or not low <= item <= high:
+        raise ValueError(f"{where}{key} must be {'an integer' if integer else 'a number'} from {low} to {high}, got {item!r}")
+    return item
+
+
+def judged_settings(value: dict, where: str, *, feature: bool) -> dict:
+    """A judged panel (feature.json 2.11.0, PRD 6), closed keys `{id, stage: review, report_only: false, seats?, prompt?,
+    requirements?, judge?}`. From feature.json (`feature`) `seats` holds 1-16 distinct reviewer names and `judge` only
+    `{timeout_minutes 5..60, budget_usd 1..50}`; a resolved seat object, `reviewers_file` or `judge.model` there is refused, so a
+    feature file can never inline a command or a credential (design-challenge note 5). Pinned (--panel-settings, the plan) it
+    holds the resolved seats (reviewers.check_seat), `reviewers_file {label, sha256}` and the full `judge`."""
+    from .attack import requirements_of
+    from . import reviewers
+    for key in JUDGED_REFUSED:
+        if key in value:
+            raise ValueError(f"{where}{key} is not a judged-panel setting: a judged panel (report_only: false) takes its seats from the "
+                             "reviewer list and its caps from each entry (PRD 6)")
+    known = JUDGED_KEYS if feature else JUDGED_KEYS | {"reviewers_file"}
+    unknown = sorted(set(value) - known)
+    if unknown:
+        raise ValueError(f"{where}{unknown[0]} is not a judged-panel setting ({', '.join(sorted(known))})")
+    for key in ("id", "stage") if feature else ("id", "stage", "seats", "prompt", "reviewers_file", "judge"):
+        if key not in value:
+            raise ValueError(f"{where}{key} is required")
+    panel_id = value["id"]
+    if not isinstance(panel_id, str) or not ID_PATTERN.fullmatch(panel_id):
+        raise ValueError(f"{where}id must be lower-case, at most 32 characters, starting with a letter, got {panel_id!r}")
+    if value["stage"] == "challenge":
+        raise ValueError(f"{where}stage challenge: a judged panel runs at the review stage only (the design-challenge panel is step 2)")
+    if value["stage"] != "review":
+        raise ValueError(f"{where}stage must be review for a judged panel, got {value['stage']!r}")
+    prompt = value.get("prompt", JUDGED_DEFAULT_PROMPT)
+    if not isinstance(prompt, str) or not prompt.strip():
+        raise ValueError(f"{where}prompt must name a brief file in the feature directory or builtin:review")
+    seats = value.get("seats")
+    if feature:
+        if seats is not None and (not isinstance(seats, list) or not 1 <= len(seats) <= MAX_SEATS
+                                  or not all(isinstance(name, str) and ID_PATTERN.fullmatch(name) for name in seats)
+                                  or len(set(seats)) != len(seats)):
+            raise ValueError(f"{where}seats must be 1 to {MAX_SEATS} distinct reviewer names from the reviewer list (never inline "
+                             f"entries), got {seats!r}")
+    else:
+        if not isinstance(seats, list) or len(seats) > MAX_SEATS:
+            raise ValueError(f"{where}seats must be a list of at most {MAX_SEATS} resolved seats")
+        seats = [reviewers.check_seat(seat, f"{where}seats[{index}].") for index, seat in enumerate(seats)]
+        for key in ("name", "prefix"):
+            found = [seat[key] for seat in seats]
+            if len(set(found)) != len(found):
+                raise ValueError(f"{where}seats repeat a {key}: {found}")
+        listed = value["reviewers_file"]
+        if not isinstance(listed, dict) or set(listed) != {"label", "sha256"} or not isinstance(listed["label"], str) or not listed["label"] \
+                or not isinstance(listed["sha256"], str) or not re.fullmatch(r"[0-9a-f]{64}", listed["sha256"]):
+            raise ValueError(f"{where}reviewers_file must be {{label, sha256}} of the reviewer list read at launch")
+    judge = value.get("judge", {})
+    if not isinstance(judge, dict):
+        raise ValueError(f"{where}judge must be an object")
+    allowed = set(JUDGE_DEFAULTS) if feature else {"model", "effort", *JUDGE_DEFAULTS, "input_cap_bytes"}
+    unknown = sorted(set(judge) - allowed)
+    if unknown:
+        raise ValueError(f"{where}judge.{unknown[0]} is not a judge setting ({', '.join(sorted(allowed))})")
+    pinned_judge = {**JUDGE_DEFAULTS}
+    for key, (low, high) in JUDGE_BOUNDS.items():
+        if key in judge:
+            pinned_judge[key] = _bounded(judge, key, low, high, key == "timeout_minutes", f"{where}judge.")
+    result = {"id": panel_id, "stage": "review", "report_only": False, "prompt": prompt, "requirements": requirements_of(value, where)}
+    if feature:
+        return {**result, "seats": seats, "judge": pinned_judge}
+    model, effort = judge.get("model"), judge.get("effort")
+    if not isinstance(model, str) or not model.strip():
+        raise ValueError(f"{where}judge.model must be the run's judge model (launch --judge-model)")
+    if effort != JUDGE_EFFORT or judge.get("input_cap_bytes") != JUDGE_INPUT_CAP_BYTES or set(judge) != allowed:
+        raise ValueError(f"{where}judge must be {{model, effort: {JUDGE_EFFORT}, timeout_minutes, budget_usd, input_cap_bytes: {JUDGE_INPUT_CAP_BYTES}}}")
+    return {**result, "reviewers_file": dict(value["reviewers_file"]), "seats": seats,
+            "judge": {"model": model, "effort": JUDGE_EFFORT, **pinned_judge, "input_cap_bytes": JUDGE_INPUT_CAP_BYTES}}
+
+
+def is_judged(item) -> bool:
+    """A judged panel item (feature, --panel-settings or plan form): `report_only` is false."""
+    return isinstance(item, dict) and item.get("report_only") is False
+
+
+def judged_item(plan: dict) -> dict | None:
+    """The plan's one judged panel item, else None (the seats lane's own check; judge.judged is the judge lane's)."""
+    items = plan.get("panels") if isinstance(plan, dict) else None
+    if not isinstance(items, list):
+        return None
+    return next((item for item in items if is_judged(item)), None)
+
+
+def check_alone(items: list[dict], where: str) -> None:
+    """At most one judged panel, and in step 1 no other panel beside it ([L5])."""
+    judged = [item for item in items if is_judged(item)]
+    if len(judged) > 1:
+        raise ValueError(f"{where}declares a second judged panel: at most one judged panel per feature (PRD 6)")
+    if judged and len(items) > 1:
+        raise ValueError(f"{where}declares a judged panel beside another panel: in step 1 a judged panel runs alone ([L5]); "
+                         "drop the report-only panel or the judged one")
+
+
 def declared(manifest: dict) -> list[dict] | None:
     """The feature's `panels` with the defaults filled in; None without the key. Refused, naming feature.json and the key:
     `panels` before 2.6.0, a value that is not a non-empty list, a duplicate id, and every per-panel refusal of `settings`."""
@@ -196,10 +330,14 @@ def declared(manifest: dict) -> list[dict] | None:
         raise ValueError(f"feature.json panels needs version {PANEL_VERSION} or later (this file is {manifest.get('version')})")
     if not isinstance(value, list) or not value:
         raise ValueError("feature.json panels must be a non-empty list of panel objects")
-    panels = [settings(item, f"feature.json panels[{index}].") for index, item in enumerate(value)]
+    if manifest.get("version") != JUDGED_VERSION and any(is_judged(item) for item in value):
+        raise ValueError(f"feature.json panels[].report_only must be true before {JUDGED_VERSION}: report_only false (a judged panel) "
+                         f"needs version {JUDGED_VERSION} (this file is {manifest.get('version')})")
+    panels = [settings(item, f"feature.json panels[{index}].", feature=True) for index, item in enumerate(value)]
     ids = [item["id"] for item in panels]
     if len(set(ids)) != len(ids):
         raise ValueError("feature.json panels declares a panel id twice")
+    check_alone(panels, "feature.json panels ")
     return panels
 
 
@@ -209,11 +347,14 @@ def has_panels(plan: dict) -> bool:
 
 
 def builtin_briefs() -> list[str]:
-    return sorted(path.stem for path in BUILTIN_BRIEFS.glob("*.md"))
+    return sorted(path.stem for path in BUILTIN_BRIEFS.glob("*.md") if path != JUDGED_BRIEF)
 
 
-def brief_path(folder: Path, prompt: str) -> Path:
-    """`builtin:<stage>` names a brief bundled in workflow/prompts/panels/, anything else an existing non-empty feature file."""
+def brief_path(folder: Path, prompt: str, judged: bool = False) -> Path:
+    """`builtin:<stage>` names a brief bundled in workflow/prompts/panels/, anything else an existing non-empty feature file.
+    A judged panel's `builtin:review` (its default) is the judged brief, review-judged.md ([G13], design-challenge note 1)."""
+    if judged and prompt == JUDGED_DEFAULT_PROMPT:
+        return JUDGED_BRIEF
     if prompt.startswith(BUILTIN_PREFIX):
         name = prompt[len(BUILTIN_PREFIX):]
         if name not in builtin_briefs():
@@ -268,8 +409,16 @@ def deepseek_guard(environ=None, fingerprint: Path | None = None, pi_store: Path
 
 
 def check_launch(panels: list[dict], environ=None, fingerprint: Path | None = None, pi_store: Path | None = None) -> None:
-    """The launch refusals that need no binary: the stage this slice runs, and the DeepSeek key guard."""
+    """The launch refusals that need no binary: the stage this slice runs, and the DeepSeek key guard (a judged panel's
+    resolved `pi` seats included; seat names are checked once launch has resolved them)."""
+    check_alone(panels, "feature.json panels ")
     for item in panels:
+        if is_judged(item):
+            for seat in item.get("seats") or []:
+                if isinstance(seat, dict) and seat["transport"] == "pi" and seat["status"] == "pending" \
+                        and seat["model"].split("/", 1)[0] == "deepseek":
+                    deepseek_guard(environ, fingerprint, pi_store)
+            continue
         if item["stage"] not in LIVE_STAGES:
             raise ValueError(f"feature.json panels[].stage {item['stage']!r} is not run by this slice: a panel runs at the review stage only "
                              "(the challenge stage is the follow-up slice, PRD_MULTI_PROVIDER_PANEL 5)")
@@ -336,14 +485,22 @@ def pin(plan: dict, panels: list[dict], briefs: dict[str, tuple[str, str]], requ
         missing = [rel for rel in item["requirements"] if rel not in requirement_docs]
         if missing:
             raise ValueError(f"Panel {item['id']} requirements not read: {', '.join(missing)}")
+        if is_judged(item):  # PRD Appendix B `plan-panel-judged`: the resolved seats, the list's label and sha256, the judge pins.
+            pinned.append({"id": item["id"], "stage": item["stage"], "report_only": False,
+                           "prompt": {"source": source, "text": text, "sha256": digest_text(text)}, "requirements": item["requirements"],
+                           "requirement_docs": {rel: requirement_docs[rel] for rel in item["requirements"]}, "pi_bin": pi_bin,
+                           "prd_label": prd_label, "reviewers_file": item["reviewers_file"], "seats": item["seats"], "judge": item["judge"]})
+            continue
         pinned.append({**item, "prompt": {"source": source, "text": text, "sha256": digest_text(text)},
                        "requirement_docs": {rel: requirement_docs[rel] for rel in item["requirements"]},
                        "pi_bin": pi_bin, "prd_label": prd_label})
+    check_alone(pinned, "--panel-settings ")
     plan["panels"] = pinned
     plan["feature_version"] = PANEL_VERSION
 
 
 PLAN_KEYS = {"id", "stage", "providers", "prompt", "requirements", "report_only", *DEFAULTS, "requirement_docs", "pi_bin", "prd_label"}
+JUDGED_PLAN_KEYS = {"id", "stage", "report_only", "prompt", "requirements", "requirement_docs", "pi_bin", "prd_label", "reviewers_file", "seats", "judge"}
 
 
 def validate_plan(plan: dict) -> None:
@@ -352,7 +509,14 @@ def validate_plan(plan: dict) -> None:
         return
     if not isinstance(items, list) or not items:
         raise ValueError("Malformed plan.panels: expected a non-empty list")
+    check_alone([item for item in items if isinstance(item, dict)], "Malformed plan.panels: ")
     for item in items:
+        if is_judged(item):
+            if set(item) != JUDGED_PLAN_KEYS or not isinstance(item["prompt"], dict) or set(item["prompt"]) != {"source", "text", "sha256"}:
+                raise ValueError("Malformed plan.panels: a judged panel expects {" + ", ".join(sorted(JUDGED_PLAN_KEYS)) + "} with prompt {source, text, sha256}")
+            settings({key: item[key] for key in ("id", "stage", "report_only", "seats", "requirements", "reviewers_file", "judge")}
+                     | {"prompt": item["prompt"]["source"]}, "plan.panels[] ")
+            continue
         if not isinstance(item, dict) or set(item) != PLAN_KEYS or not isinstance(item["prompt"], dict) \
                 or set(item["prompt"]) != {"source", "text", "sha256"}:
             raise ValueError("Malformed plan.panels: expected {" + ", ".join(sorted(PLAN_KEYS)) + "} with prompt {source, text, sha256}")
@@ -372,9 +536,22 @@ def load_record(directory: Path) -> dict | None:
     return read_json(path) if path.exists() else None
 
 
+def validate_record(record) -> None:
+    """The panel schema, applied through the record's own version (1.0.0 or 1.1.0) so a refusal names the field that broke it
+    rather than the root's `oneOf`; any other version is refused by the whole schema."""
+    from jsonschema import Draft202012Validator, FormatChecker
+    schema = json.loads(SCHEMA.read_text())
+    version = record.get("version") if isinstance(record, dict) else None
+    branch = {RECORD_VERSION: "record100", JUDGED_RECORD_VERSION: "record110"}.get(version)
+    if branch is None:
+        validate_schema("panel", record)
+        return
+    Draft202012Validator({"$ref": f"#/$defs/{branch}", "$defs": schema["$defs"]}, format_checker=FormatChecker()).validate(record)
+
+
 def save_record(directory: Path, record: dict) -> None:
     """Validate against the schema and replace atomically; the controller holds `controller.lock` (its sole writer)."""
-    validate_schema("panel", record)
+    validate_record(record)
     save_json(record_path(directory), record)
 
 
@@ -383,8 +560,43 @@ def pending_provider(entry: dict) -> dict:
             "status": "pending", "cost_usd": None, "context_bytes": None, "finding_ids": [], "error": None}
 
 
+def seat_effort(plan: dict, seat: dict) -> str | None:
+    """A claude seat's effective effort: its own, else the judges' pinned one (claude_command's rule); null for pi and cli."""
+    if seat["transport"] != "claude":
+        return None
+    if seat.get("effort"):
+        return seat["effort"]
+    pins = role_flags(plan, "judges")
+    return pins[pins.index("--effort") + 1] if "--effort" in pins else None
+
+
+def pending_seat(plan: dict, seat: dict) -> dict:
+    """A seat's record entry before it runs: `unavailable` with its reason when launch pinned it so, else `pending`."""
+    unavailable = seat["status"] == "unavailable"
+    return {"name": seat["name"], "prefix": seat["prefix"], "transport": seat["transport"], "model": seat["model"], "served_model": None,
+            "cli_version": seat.get("cli_version"), "effort": seat_effort(plan, seat), "status": "unavailable" if unavailable else "pending",
+            "cost_usd": None, "context_bytes": None, "finding_ids": [], "error": clip(seat.get("error"), 4000) if unavailable else None}
+
+
+def pending_judge(item: dict) -> dict:
+    """The `pending` judge object of PRD Appendix B (`judge-states`), with the plan's judge model (design-challenge note 2)."""
+    return {"status": "pending", "fallback": False, "model": item["judge"]["model"], "effort": JUDGE_EFFORT, "session_id": None,
+            "started_at": None, "ended_at": None, "cost_usd": None, "error": None, "inputs": [], "reviewer_findings": [], "rulings": []}
+
+
+def judged_pending_record(plan: dict, item: dict) -> dict:
+    """Record 1.1.0 of a judged plan before any seat ran: every seat pending (or unavailable), the judge `pending`."""
+    entry = {"id": item["id"], "stage": item["stage"], "status": "pending", "judged": True, "overlap_threshold": None, "context_bytes": None,
+             "providers": [pending_seat(plan, seat) for seat in item["seats"]], "findings": [], "started_at": None, "ended_at": None,
+             "budget_usd": DEFAULTS["budget_usd"], "error": None, "delta_from": None, "context_truncated": None, "judge": pending_judge(item)}
+    return {"version": JUDGED_RECORD_VERSION, "panels": [entry]}
+
+
 def pending_record(plan: dict) -> dict:
-    """The export's `pending` record (Appendix A) built from `plan.panels`, before panel.json exists."""
+    """The export's `pending` record (Appendix A) built from `plan.panels`, before panel.json exists (1.1.0 for a judged plan)."""
+    item = judged_item(plan)
+    if item is not None:
+        return judged_pending_record(plan, item)
     panels = [{"id": item["id"], "stage": item["stage"], "status": "pending", "overlap_threshold": item["overlap_threshold"],
                "context_bytes": None, "providers": [pending_provider(entry) for entry in item["providers"]], "findings": [],
                "started_at": None, "ended_at": None, "budget_usd": item["budget_usd"], "error": None} for item in plan["panels"]]
@@ -408,7 +620,7 @@ def export_section(directory: Path, plan: dict) -> dict | None:
         reason = None
     if item is not None:
         try:
-            validate_schema("panel", item)
+            validate_record(item)
             return item
         except ValidationError as error:
             reason = error.message
@@ -578,6 +790,23 @@ def delta_from(directory: Path, plan: dict) -> tuple[str, list[str]] | None:
     return delta_base(SimpleNamespace(directory=Path(directory), plan=plan), Path(directory) / "review-worktree")
 
 
+def decisions_label(plan: dict) -> str | None:
+    """The pinned decisions.md's repository label (`features/<f>/decisions.md`): its path relative to the run's repository,
+    else from its last `features/` segment; None without a pinned decisions.md."""
+    decisions = plan.get("decisions")
+    if not isinstance(decisions, dict) or not decisions.get("path"):
+        return None
+    path = Path(decisions["path"])
+    try:
+        return str(path.relative_to(Path(plan.get("repository") or "/nonexistent")))
+    except ValueError:
+        parts = path.parts
+        if "features" in parts:
+            index = len(parts) - 1 - parts[::-1].index("features")
+            return "/".join(parts[index:])
+        return path.name
+
+
 def assemble_review_context(directory: Path, plan: dict, item: dict) -> tuple[Path, int, dict | None]:
     """`<run>/panel/<id>/context.txt`: the candidate's touched files (diff + full text, from the frozen candidate; on a
     follow-up only the files the delta touches, diffed from the followed candidate: delta_from), then the pinned PRD copy and
@@ -605,6 +834,12 @@ def assemble_review_context(directory: Path, plan: dict, item: dict) -> tuple[Pa
             sections.append(Section(item["prd_label"], text, document=True))
     for rel, text in (item.get("requirement_docs") or {}).items():
         sections.append(Section(rel, text, document=True))
+    if is_judged(item):  # A judged panel's seats also read the pinned decisions.md ([G13], PRD 5.2), unless a pinned requirement
+        # already is it; a candidate's own edit of the file (a touched-file section of that label) never stands in for the pinned text.
+        decisions = plan.get("decisions")
+        label = decisions_label(plan)
+        if isinstance(decisions, dict) and decisions.get("text") and label and label not in [section.label for section in sections if section.document]:
+            sections.append(Section(label, decisions["text"], document=True))
     truncated = cap_sections(sections)
     data = "".join(section.render() for section in sections).encode()
     if len(data) > MAX_CONTEXT_BYTES:  # cap_sections raises first; never send an oversized context whatever happens above.
@@ -886,6 +1121,8 @@ class Job:
         self.process, self.launched, self.timeout = process, launched, timeout
         self.stdout, self.session_id, self.number = stdout, session_id, number
         self.result = None  # The parsed reply once reaped.
+        self.expired = False  # Set by a seat's watchdog before its first signal ([L13]); only this makes an exited seat timed_out.
+        self.watchdog, self.watchdog_cancelled = None, None
 
     @property
     def transport(self):
@@ -1002,6 +1239,8 @@ def ensure_started(runtime, *, clock=time.time) -> None:
         return
     if getattr(runtime, "panel_jobs", None) is not None:
         return  # Already started by this controller process.
+    if judged_item(plan) is not None:
+        return _ensure_seats(runtime, clock)
     directory = Path(runtime.directory)
     jobs: dict[str, list[Job]] = {}
     try:
@@ -1151,7 +1390,9 @@ def collect(runtime, error: BaseException | None = None, *, clock=time.time, sle
         return
     jobs = getattr(runtime, "panel_jobs", None)
     if jobs is None:
-        return  # Nothing was started by this process (the reconciliation raise): the record is left for the next resume.
+        return  # Nothing was started by this process (the reconciliation raise), or `settle` already ended them: a no-op.
+    if judged_item(plan) is not None:
+        return _collect_seats(runtime, error, clock, sleep)
     runtime.panel_jobs = None
     from .sessions import TransientInfraError
     directory = Path(runtime.directory)
@@ -1250,12 +1491,716 @@ def collect(runtime, error: BaseException | None = None, *, clock=time.time, sle
             _warn(f"could not record the panel failure: {type(second).__name__}: {second} (after {type(failure).__name__}: {failure})")
 
 
+# ---- The judged panel's seats (features/review-panel-registry/prd.md 5, 7.1, 7.2, 7.6, Appendix A) ---------------------
+
+def seat_entry(seat: dict) -> dict:
+    """A claude or pi seat as the provider entry today's builders take ([G19], [L1]: the same argv as a report-only provider)."""
+    return {"transport": seat["transport"], "model": seat["model"], "effort": seat["effort"] if seat["transport"] == "claude" else None}
+
+
+def seat_argv(seat: dict, prompt_file: Path, worktree: Path) -> list[str]:
+    """A cli seat's argv: the entry's argv with its placeholders filled and argv[0] the pinned binary. The prompt itself is never
+    in it (only `{prompt_file}`'s path, in a scratch dir outside the run directory), nor any credential (PRD 5, [L1])."""
+    from .reviewers import PLACEHOLDER
+    values = {"{model}": seat["model"] or "", "{prompt_file}": str(prompt_file), "{worktree}": str(worktree),
+              "{timeout_minutes}": str(seat["cap"]["timeout_minutes"])}
+    argv = [PLACEHOLDER.sub(lambda match: values[match.group(0)], argument) for argument in seat["cli"]["argv"]]
+    argv[0] = seat["bin"]
+    return argv
+
+
+def seat_file_pattern(slug: str) -> re.Pattern:
+    return re.compile(rf"{re.escape(slug)}-(\d+)\.(?:pid|stdout\.jsonl?|stdout\.txt|prompt\.txt)")
+
+
+def next_seat_number(panel_dir: Path, slug: str) -> int:
+    pattern = seat_file_pattern(slug)
+    found = [int(match.group(1)) for path in panel_dir.iterdir() if (match := pattern.fullmatch(path.name))] if panel_dir.exists() else []
+    return max(found, default=0) + 1
+
+
+def remove_worktree(repository: str, worktree: Path) -> None:
+    """`git worktree remove --force` then `prune` (lane_review's rule): a stale worktree never stays registered."""
+    from .worktrees import git_worktree
+    try:
+        if worktree.exists():
+            git_worktree(repository, "remove", "--force", str(worktree))
+    except Exception:  # noqa: BLE001 - pruned below whatever remove said.
+        pass
+    shutil.rmtree(worktree, ignore_errors=True)
+    try:
+        git_worktree(repository, "prune")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def kill_orphan_seat(panel_dir: Path, slug: str, repository: str) -> None:
+    """A seat a crashed controller left behind: its latest pid file's process group is killed (when that pid still runs with
+    the recorded cwd and marker), and the throwaway worktree and scratch dir it recorded are removed, before the rerun."""
+    pattern = re.compile(rf"{re.escape(slug)}-(\d+)\.pid")
+    pids = sorted((int(match.group(1)), path) for path in panel_dir.glob("*.pid") if (match := pattern.fullmatch(path.name))) if panel_dir.exists() else []
+    if not pids:
+        return
+    try:
+        info = read_json(pids[-1][1])
+    except (OSError, ValueError):
+        return
+    pid, cwd, marker = info.get("pid"), info.get("cwd"), info.get("marker")
+    if isinstance(pid, int) and pid > 0:
+        try:
+            command = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace")
+            current = os.readlink(f"/proc/{pid}/cwd")
+        except OSError:
+            command, current = "", None
+        if marker and marker in command and current == cwd:
+            for sig in (signal.SIGTERM, signal.SIGKILL):
+                try:
+                    os.killpg(pid, sig)
+                except (ProcessLookupError, PermissionError):
+                    break
+                for _ in range(30):
+                    if _gone(pid):
+                        break
+                    time.sleep(0.1)
+                else:
+                    continue
+                break
+            try:  # What the leader left in its group (a child ignoring SIGTERM) is SIGKILLed too, as stop_seat does (PRD 7.6).
+                os.killpg(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+    if info.get("worktree"):
+        remove_worktree(repository, Path(info["worktree"]))
+    if info.get("scratch"):
+        shutil.rmtree(info["scratch"], ignore_errors=True)
+
+
+def start_seat(runtime, index: int, item: dict, seat: dict, context: Path, clock) -> Job:
+    """One seat in its own process group, stdout/stderr to files (never a PIPE), a `.pid` file under `<run>/panel/<id>/`.
+    claude: today's read-only print job in the review worktree; pi: today's tool-less job in a neutral scratch cwd; cli: its own
+    tools in a throwaway worktree of the candidate (`review-seat-*`) with the prompt in a scratch dir (`review-seat-ctx-*`), both
+    outside the run directory and removed on every path ([G7], [G19])."""
+    directory = Path(runtime.directory)
+    plan = runtime.plan
+    panel_dir = directory / DIR / item["id"]
+    panel_dir.mkdir(parents=True, exist_ok=True)
+    from .reviewers import cli_env, credential_env
+    slug = seat["name"]
+    kill_orphan_seat(panel_dir, slug, plan["repository"])
+    number = next_seat_number(panel_dir, slug)
+    stem = panel_dir / f"{slug}-{number}"
+    brief = item["prompt"]["text"]  # The pinned text, never re-read from a checkout.
+    material = brief.rstrip() + "\n\n=== MATERIAL ===\n\n" + context.read_text(errors="replace")
+    session_id = str(uuid.uuid4())
+    worktree = scratch = None
+    if seat["transport"] == "claude":
+        cwd = directory / "review-worktree"
+        stdout_path, stderr_path = stem.with_name(stem.name + ".stdout.json"), stem.with_name(stem.name + ".stderr.log")
+        prompt_path = stem.with_name(stem.name + ".prompt.txt")
+        prompt_path.write_text(material)
+        os.chmod(prompt_path, 0o600)
+        budget = {"budget_usd": seat["cap"].get("budget_usd", DEFAULTS["budget_usd"])}
+        command = claude_command(_executable(runtime), session_id, seat_entry(seat), budget, directory, plan)
+        with prompt_path.open() as stdin, stdout_path.open("w") as out, stderr_path.open("w") as err:
+            process = popen_claude(command, cwd=cwd, env={**job_env(), **credential_env(seat)}, stdin=stdin, stdout=out, stderr=err,
+                                   text=True, start_new_session=True)
+        marker = f"--session-id {session_id}"
+    elif seat["transport"] == "pi":
+        pi_bin = str(Path(seat["bin"]).parent)
+        cwd = Path(tempfile.mkdtemp(prefix="mpp-panel-"))  # As a report-only pi provider: a neutral temp root (pi absolutizes @context.txt).
+        shutil.copyfile(context, cwd / CONTEXT)
+        stdout_path, stderr_path = stem.with_name(stem.name + ".stdout.jsonl"), stem.with_name(stem.name + ".stderr.log")
+        command = pi_command(pi_bin, seat_entry(seat), brief)
+        with stdout_path.open("w") as out, stderr_path.open("w") as err:
+            process = subprocess.Popen(command, cwd=str(cwd), env={**pi_env(pi_bin, seat["model"]), **credential_env(seat)},
+                                       stdin=subprocess.DEVNULL,
+                                       stdout=out, stderr=err, text=True, start_new_session=True)
+        marker = f"--model {seat['model']}"
+    else:
+        from .worktrees import git_worktree
+        repository = plan["repository"]
+        candidate = read_json(directory / "review-bundle.json")["candidate_commit"]
+        try:
+            worktree = Path(tempfile.mkdtemp(prefix="review-seat-"))
+            git_worktree(repository, "add", "--detach", str(worktree), candidate)
+            scratch = Path(tempfile.mkdtemp(prefix="review-seat-ctx-"))
+            prompt_file = scratch / "prompt.txt"
+            prompt_file.write_text(material)
+            os.chmod(prompt_file, 0o600)
+            stdout_path, stderr_path = scratch / "stdout.txt", scratch / "stderr.txt"
+            command = seat_argv(seat, prompt_file, worktree)
+            stdin = prompt_file.open() if seat["cli"]["prompt_via"] == "stdin" else subprocess.DEVNULL
+            try:
+                with stdout_path.open("w") as out, stderr_path.open("w") as err:
+                    process = subprocess.Popen(command, cwd=str(worktree), env=cli_env(seat), stdin=stdin, stdout=out, stderr=err,
+                                               text=True, start_new_session=True)
+            finally:
+                if stdin is not subprocess.DEVNULL:
+                    stdin.close()
+        except BaseException:
+            if worktree is not None:
+                remove_worktree(repository, worktree)
+            if scratch is not None:
+                shutil.rmtree(scratch, ignore_errors=True)
+            raise
+        cwd = worktree
+        marker = seat["bin"]
+    job = Job(0, index, seat, process, clock(), seat["cap"]["timeout_minutes"] * 60, stdout_path, session_id, number)
+    job.stderr, job.stem, job.worktree, job.scratch, job.repository = stderr_path, stem, worktree, scratch, plan["repository"]
+    try:
+        save_json(stem.with_name(stem.name + ".pid"), {"pid": process.pid, "cwd": str(Path(cwd).resolve()), "marker": marker,
+                                                      "worktree": str(worktree) if worktree else None, "scratch": str(scratch) if scratch else None})
+        arm_watchdog(job)
+    except BaseException:  # A failed `.pid` write or watchdog (PRD 5.2, 9): the spawned seat is stopped and cleaned up, never left running.
+        try:
+            stop_seat(job)
+        except Exception:  # noqa: BLE001 - the original error is the one raised.
+            pass
+        raise
+    return job
+
+
+def watchdog_timer(seconds: float, callback) -> threading.Timer:
+    """The timer behind a seat's watchdog ([L13]); tests patch this factory to shorten the cap."""
+    return threading.Timer(seconds, callback)
+
+
+def _expire_seat(job: Job) -> None:
+    """A seat's watchdog at its cap, from its own start ([L12] B1, [L13]): nothing once the seat has exited or been reaped;
+    otherwise `job.expired` first, then SIGTERM to its group and SIGKILL KILL_GRACE_SECONDS later unless the timer is cancelled
+    in the grace. It touches only `os.killpg` and `job.expired`: the reap, the record and the cleanup stay on the main thread."""
+    if job.process.poll() is not None or job.result is not None:
+        return
+    job.expired = True
+    try:
+        os.killpg(job.process.pid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        return
+    if job.watchdog_cancelled.wait(KILL_GRACE_SECONDS):  # A reap or a stop in the grace: no late SIGKILL (challenge note 1).
+        return
+    try:
+        os.killpg(job.process.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+def arm_watchdog(job: Job) -> None:
+    job.watchdog_cancelled = threading.Event()
+    job.watchdog = watchdog_timer(job.timeout, lambda: _expire_seat(job))
+    job.watchdog.daemon = True
+    job.watchdog.start()
+
+
+def cancel_watchdog(job: Job) -> None:
+    if job.watchdog is not None:
+        job.watchdog_cancelled.set()
+        job.watchdog.cancel()
+
+
+def cleanup_seat(job: Job) -> None:
+    """A cli seat's outputs copied to `<run>/panel/<id>/<name>-<n>.stdout.txt|.stderr.log`, then its throwaway worktree and
+    scratch dir removed. Idempotent; nothing for a claude or pi seat."""
+    if getattr(job, "scratch", None) is not None:
+        scratch, job.scratch = job.scratch, None
+        for source, suffix in ((job.stdout, ".stdout.txt"), (job.stderr, ".stderr.log")):
+            try:
+                shutil.copyfile(source, job.stem.with_name(job.stem.name + suffix))
+            except OSError:
+                pass
+        job.stdout, job.stderr = job.stem.with_name(job.stem.name + ".stdout.txt"), job.stem.with_name(job.stem.name + ".stderr.log")
+        shutil.rmtree(scratch, ignore_errors=True)
+    if getattr(job, "worktree", None) is not None:
+        worktree, job.worktree = job.worktree, None
+        remove_worktree(job.repository, worktree)
+
+
+def stop_seat(job: Job) -> None:
+    """SIGTERM the seat's process group, SIGKILL it KILL_GRACE_SECONDS later (PRD 5.1), then SIGKILL what is left of the group
+    even when the leader exited on the SIGTERM (PRD 7.6), then clean up. Its watchdog is cancelled. The last group SIGKILL and
+    the cleanup run even when the SIGTERM or the wait raises (a KeyboardInterrupt), and that error propagates."""
+    cancel_watchdog(job)
+    try:
+        if job.running():
+            try:
+                os.killpg(job.process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            try:
+                job.process.wait(timeout=KILL_GRACE_SECONDS)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(job.process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                job.process.wait()
+    finally:
+        _kill_group(job)
+        cleanup_seat(job)
+
+
+def _kill_group(job: Job) -> None:
+    """SIGKILL what an exited seat's leader left in its process group (a background process it spawned): nothing outlives it."""
+    try:
+        os.killpg(job.process.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+def _stop_seats(jobs: list[Job]) -> None:
+    """Stop every seat even after a KeyboardInterrupt (a second Ctrl-C in one seat's grace wait): the seats after it are SIGKILLed
+    and cleaned up without the grace (PRD 7.6), then the first interrupt propagates."""
+    interrupted = None
+    for job in jobs:
+        try:
+            if interrupted is None:
+                stop_seat(job)
+            else:
+                cancel_watchdog(job)
+                try:
+                    _kill_group(job)
+                finally:
+                    cleanup_seat(job)
+        except KeyboardInterrupt as error:
+            interrupted = interrupted or error
+        except Exception:  # noqa: BLE001
+            pass
+    if interrupted is not None:
+        raise interrupted
+
+
+def extract(extractor: dict, stdout: str) -> tuple[bool, str | None]:
+    """`(matched, value)` of an output extractor (PRD 5): `jsonl_event` takes the last stdout JSON object whose top-level keys
+    equal `match`; `json_field` reads stdout as one JSON object that `match` must hold. `field` is a dotted path to a string."""
+    candidate = None
+    if extractor["format"] == "jsonl_event":
+        for line in stdout.splitlines():
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(event, dict) and all(event.get(key) == value for key, value in extractor["match"].items()):
+                candidate = event
+    else:
+        try:
+            event = json.loads(stdout)
+        except ValueError:
+            event = None
+        if isinstance(event, dict) and all(event.get(key) == value for key, value in extractor["match"].items()):
+            candidate = event
+    if candidate is None:
+        return False, None
+    value = candidate
+    for part in extractor["field"].split("."):
+        value = value.get(part) if isinstance(value, dict) else None
+    return True, value if isinstance(value, str) else None
+
+
+def _failure_line(patterns: list[str], text: str) -> str | None:
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            start, end = text.rfind("\n", 0, match.start()) + 1, text.find("\n", match.end())
+            return text[start:end if end >= 0 else len(text)].strip()[:300] or match.group(0)
+    return None
+
+
+def parse_cli(seat: dict, stdout: str, stderr: str, returncode: int | None) -> dict:
+    """A finished cli seat (PRD 5.1, first match wins after the caller's timeout): an `auth` pattern → auth_required; a `quota`
+    one → usage_limit; a served model other than the entry's → model_mismatch; no answer, a failed match or exit ≠ 0 → error
+    (exit 0 alone never means success); an answer that is not the findings JSON (or holds an entry that is not an object)
+    → parse_failed; else ok.
+    `{status, findings, served_model, error}`."""
+    cli = seat["cli"]
+    matched, answer = extract(cli["output"], stdout)
+    served = extract(cli["served_model"], stdout)[1] if cli["served_model"] else None
+    text = stderr + "\n" + (answer or "")
+    result = {"status": "ok", "findings": None, "served_model": served, "error": None}
+    for kind, status in (("auth", "auth_required"), ("quota", "usage_limit")):
+        line = _failure_line(cli["failures"][kind], text)
+        if line is not None:
+            return {**result, "status": status, "error": clip(line, 4000)}
+    if served is not None and served != seat["model"]:
+        return {**result, "status": "model_mismatch", "error": f"served model {served!r}, not the entry's {seat['model']!r}: findings discarded"}
+    if returncode != 0 or not matched or answer is None:
+        reason = f"exit {returncode}" if returncode != 0 else (
+            f"no output matching {json.dumps(cli['output']['match'])}" if not matched else f"no {cli['output']['field']} in the matching output")
+        return {**result, "status": "error", "error": clip(f"the {seat['name']} seat did not succeed: {reason}", 4000)}
+    try:
+        findings = parse_reply(answer)
+    except ValueError:
+        findings = None
+    if findings is None or not all(isinstance(entry, dict) for entry in findings):
+        return {**result, "status": "parse_failed", "error": clip(f"parse_failed: {answer}", 4000)}
+    return {**result, "findings": findings}
+
+
+def seat_side_file(directory: Path, item: dict, seat: dict) -> Path:
+    """`<run>/panel/<id>/<name>.seat-findings.json`: a seat's normalized findings, kept for a resumed finalize."""
+    return Path(directory) / DIR / item["id"] / f"{seat['name']}.seat-findings.json"
+
+
+def _reap_seat(directory: Path, item: dict, job: Job, provider: dict, labels: list[str], size: int) -> list[dict]:
+    """An exited seat: what it left in its process group killed, its status from its transport's parser, its normalized
+    findings kept in its side file and returned. Its watchdog is cancelled."""
+    seat = job.entry
+    cancel_watchdog(job)
+    _kill_group(job)
+    if seat["transport"] == "cli":
+        worktree = str(job.worktree) if job.worktree else None
+        cleanup_seat(job)
+        try:
+            stdout = job.stdout.read_text(errors="replace")
+        except OSError:
+            stdout = ""
+        try:
+            stderr = job.stderr.read_text(errors="replace")
+        except OSError:
+            stderr = ""
+        result = parse_cli(seat, stdout, stderr, job.process.returncode)
+        job.result = result
+        provider.update(served_model=result["served_model"], cost_usd=None)
+        if result["status"] != "ok":
+            provider.update(status=result["status"], error=result["error"])
+            return []
+        raw = result["findings"]
+    else:
+        worktree = str(Path(directory) / "review-worktree")
+        result = TRANSPORT[seat["transport"]].parse(job.stdout, job.process.returncode, job.session_id)
+        job.result = result
+        provider["cost_usd"] = result["cost_usd"]
+        if result["findings"] is None:
+            if result["raw"] is not None:
+                provider.update(status="parse_failed", error=clip(f"parse_failed ({size} context bytes): {result['raw']}", 4000))
+            else:
+                provider.update(status="error", error=clip(f"{result['error']} ({size} context bytes)", 4000))
+            return []
+        raw = result["findings"]
+    provider.update(status="ok", error=None)
+    findings = normalize_findings(raw, labels, worktree)
+    save_json(seat_side_file(directory, item, seat), {"seat": seat["name"], "findings": findings})
+    return findings
+
+
+def _time_out(job: Job, provider: dict) -> None:
+    stop_seat(job)
+    job.result = {"timed_out": True}
+    cost = None
+    if job.entry["transport"] != "cli":
+        cost = TRANSPORT[job.entry["transport"]].parse(job.stdout, job.process.returncode, job.session_id)["cost_usd"]
+    minutes = job.timeout / 60
+    provider.update(status="timed_out", cost_usd=cost, error=f"timed out after {minutes:g} minutes")
+
+
+def _wait_seats(directory: Path, item: dict, record: dict, jobs: list[Job], clock, sleep) -> dict[int, list[dict]]:
+    """Every seat to its end or its own timeout (from its own launch). Before the reap only `job.expired` (its watchdog fired) makes
+    a seat timed_out: an exited seat without it keeps its result whatever the clock says, and the clock applies only to a seat
+    still running ([L13]). A KeyboardInterrupt stops
+    every seat (groups killed, worktrees removed), saves the record with the still-running seats non-terminal, and propagates."""
+    entry = record["panels"][0]
+    try:
+        labels = context_labels((Path(directory) / DIR / item["id"] / CONTEXT).read_text(errors="replace"))
+    except OSError:
+        labels = []
+    reaped: dict[int, list[dict]] = {}
+    try:
+        while True:
+            for job in jobs:
+                if job.result is None:
+                    provider = entry["providers"][job.provider_index]
+                    if job.expired:
+                        _time_out(job, provider)
+                    elif not job.running():
+                        reaped[job.provider_index] = _reap_seat(directory, item, job, provider, labels, entry["context_bytes"] or 0)
+                    elif clock() >= job.launched + job.timeout:
+                        if job.expired or job.running():
+                            _time_out(job, provider)
+                        else:  # Exited since the check above: its exit is re-checked before the timeout ([L13]).
+                            reaped[job.provider_index] = _reap_seat(directory, item, job, provider, labels, entry["context_bytes"] or 0)
+            if all(job.result is not None for job in jobs):
+                return reaped
+            sleep(POLL_SECONDS)
+    except KeyboardInterrupt:
+        _stop_seats(jobs)
+        try:
+            save_record(directory, record)
+        except Exception:  # noqa: BLE001
+            pass
+        raise
+
+
+def _finalize_seats(directory: Path, plan: dict, record: dict, reaped: dict[int, list[dict]], now: str, error: str | None = None) -> None:
+    """The judged panel's findings: each `ok` seat's findings (reaped now, else its side file) numbered `<prefix><n>` in emission
+    order, no overlap clustering, `accepted` false until the judge rules (record_judge). The panel status derives from the seats;
+    `ended_at` is now until the judge's end replaces it ([L4]). No attention record ([PRD 7.7])."""
+    item = plan["panels"][0]
+    entry = record["panels"][0]
+    findings = []
+    for index, seat in enumerate(item["seats"]):
+        provider = entry["providers"][index]
+        if index in reaped:
+            own = reaped[index]
+        else:
+            side = seat_side_file(directory, item, seat)
+            try:
+                own = read_json(side).get("findings", []) if side.exists() else []
+            except (OSError, ValueError, AttributeError):
+                own = []
+        if provider["status"] != "ok":
+            own = []
+        ids = []
+        for number, finding in enumerate(own, 1):
+            finding_id = f"{seat['prefix']}{number}"
+            findings.append({"id": finding_id, "severity": finding["severity"], "file": finding["file"], "line": finding["line"],
+                             "title": finding["title"], "detail": finding["detail"], "providers_raised": [seat["name"]], "accepted": False,
+                             "unanchored": finding["unanchored"]})
+            ids.append(finding_id)
+        provider["finding_ids"] = ids
+    entry["findings"] = findings
+    statuses = [provider["status"] for provider in entry["providers"]]
+    if error is not None:
+        entry.update(status="failed", error=clip(error, 4000))
+    elif any(status == "ok" for status in statuses):
+        entry.update(status="succeeded", error=None)
+    elif statuses and all(status == "timed_out" for status in statuses):
+        entry.update(status="timed_out", error="every seat timed out")
+    else:
+        entry.update(status="failed", error=clip("no seat returned findings: " + ", ".join(
+            f"{provider['name']} {provider['status']}" for provider in entry["providers"]), 4000))
+    entry["ended_at"] = now
+
+
+def _ensure_seats(runtime, clock) -> None:
+    """ensure_started for a judged plan: start every non-terminal seat (a resume reruns only those, each from its own new start);
+    `unavailable` seats never start. Raises nothing but a KeyboardInterrupt, after stopping the seats it already started (groups
+    killed, worktrees removed) and saving the record with them non-terminal; the handles live on `runtime.panel_jobs`."""
+    plan = runtime.plan
+    item = judged_item(plan)
+    directory = Path(runtime.directory)
+    jobs: dict[str, list[Job]] = {}
+    record = None
+    try:
+        record = load_record(directory) or pending_record(plan)
+        entry = record["panels"][0]
+        now = iso(clock())
+        if entry["status"] not in TERMINAL_PANEL:
+            owed = [index for index, provider in enumerate(entry["providers"]) if provider["status"] not in TERMINAL_SEAT]
+            if not owed:
+                _finalize_seats(directory, plan, record, {}, now)
+            else:
+                try:
+                    context, size, assembled = assemble_review_context(directory, plan, item)
+                except Exception as error:  # noqa: BLE001 - recorded, never raised into the review step.
+                    reason = clip(f"context assembly failed: {type(error).__name__}: {error}", 4000)
+                    for index in owed:
+                        entry["providers"][index].update(status="error", error=reason)
+                    _finalize_seats(directory, plan, record, {}, now, error=reason)
+                    entry["started_at"] = entry["started_at"] or now
+                else:
+                    entry.update(status="running", started_at=entry["started_at"] or now, context_bytes=size, ended_at=None, error=None,
+                                 **(assembled or {}))
+                    for index in owed:
+                        provider = entry["providers"][index]
+                        try:
+                            job = start_seat(runtime, index, item, item["seats"][index], context, clock)
+                        except Exception as error:  # noqa: BLE001
+                            provider.update(status="error", context_bytes=size, error=clip(f"launch failed: {type(error).__name__}: {error}", 4000))
+                            continue
+                        provider.update(status="running", context_bytes=size, error=None)
+                        jobs.setdefault(item["id"], []).append(job)
+                    if item["id"] not in jobs:
+                        _finalize_seats(directory, plan, record, {}, now)
+        save_record(directory, record)
+    except KeyboardInterrupt:
+        _stop_seats([job for items in jobs.values() for job in items])  # The started seats stay `running`: resume reruns them.
+        if record is not None:
+            try:
+                save_record(directory, record)
+            except Exception:  # noqa: BLE001
+                pass
+        runtime.panel_jobs = None
+        raise
+    except Exception as error:  # noqa: BLE001
+        _warn(f"could not start the seats: {type(error).__name__}: {error}")
+    runtime.panel_jobs = jobs
+
+
+def _fail_seats(directory: Path, plan: dict, record: dict | None, jobs: list[Job], failure: BaseException) -> None:
+    _stop_seats(jobs)
+    try:
+        record = record or load_record(directory) or pending_record(plan)
+        entry = record["panels"][0]
+        reason = clip(f"{type(failure).__name__}: {failure}", 4000)
+        for provider in entry["providers"]:
+            if provider["status"] not in TERMINAL_SEAT:
+                provider.update(status="error", error=reason)
+        if entry["status"] not in TERMINAL_PANEL:
+            _finalize_seats(directory, plan, record, {}, iso(time.time()), error=reason)
+        save_record(directory, record)
+    except Exception as second:  # noqa: BLE001
+        _warn(f"could not record the seats' failure: {type(second).__name__}: {second} (after {type(failure).__name__}: {failure})")
+
+
+def settled(record: dict) -> list[dict]:
+    """settle's return (design-challenge note 6): every pinned seat's provider record plus `findings`, the panel findings whose
+    ids are in its `finding_ids`, cut to {id, severity, file, line, title, detail}."""
+    entry = record["panels"][0]
+    by_id = {finding["id"]: finding for finding in entry["findings"]}
+    keys = ("id", "severity", "file", "line", "title", "detail")
+    return [{**json.loads(json.dumps(provider)),
+             "findings": [{key: by_id[finding_id][key] for key in keys} for finding_id in provider["finding_ids"] if finding_id in by_id]}
+            for provider in entry["providers"]]
+
+
+def settle(runtime, *, clock=time.time, sleep=time.sleep) -> list[dict]:
+    """Appendix A / PRD 7.2: block until every seat of the judged panel has ended or hit its own timeout, a seat relaunched on
+    resume included (a non-terminal record with nothing started in this process starts its non-terminal seats first), then write
+    the terminal seat part of panel.json and return the seats (settled). Afterwards `collect` is a no-op. A KeyboardInterrupt or
+    TransientInfraError stops the seats, leaves them non-terminal and propagates; any other failure records the panel failed."""
+    from .sessions import TransientInfraError
+    plan = runtime.plan
+    if judged_item(plan) is None:
+        return []
+    directory = Path(runtime.directory)
+    if getattr(runtime, "panel_jobs", None) is None:
+        record = load_record(directory)
+        if record is None or record["panels"][0]["status"] not in TERMINAL_PANEL:
+            ensure_started(runtime, clock=clock)
+    jobs = [job for items in (getattr(runtime, "panel_jobs", None) or {}).values() for job in items]
+    runtime.panel_jobs = None
+    record = None
+    try:
+        record = load_record(directory) or pending_record(plan)
+        if jobs:
+            reaped = _wait_seats(directory, plan["panels"][0], record, jobs, clock, sleep)
+            _finalize_seats(directory, plan, record, reaped, iso(clock()))
+            save_record(directory, record)
+    except (KeyboardInterrupt, TransientInfraError):
+        _stop_seats(jobs)
+        raise
+    except Exception as failure:  # noqa: BLE001
+        _fail_seats(directory, plan, record, jobs, failure)
+        record = load_record(directory) or record or pending_record(plan)
+    return settled(record)
+
+
+def _collect_seats(runtime, error, clock, sleep) -> None:
+    """collect for a judged plan whose seats `settle` did not end: an interrupt stops them and leaves them non-terminal; an exit
+    with no review.json terminates them and records the panel failed; a decided review waits for them as settle does."""
+    from .sessions import TransientInfraError
+    plan = runtime.plan
+    directory = Path(runtime.directory)
+    jobs = [job for items in runtime.panel_jobs.values() for job in items]
+    runtime.panel_jobs = None
+    record = None
+    try:
+        record = load_record(directory) or pending_record(plan)
+        item = plan["panels"][0]
+        entry = record["panels"][0]
+        if isinstance(error, (KeyboardInterrupt, TransientInfraError)) or not (directory / "review.json").exists():
+            labels = context_labels((directory / DIR / item["id"] / CONTEXT).read_text(errors="replace")) \
+                if (directory / DIR / item["id"] / CONTEXT).exists() else []
+            reaped = {}
+            for job in jobs:
+                if job.result is None and not job.running():
+                    if job.expired:  # Killed at its cap by its watchdog (challenge note 2).
+                        _time_out(job, entry["providers"][job.provider_index])
+                    else:
+                        reaped[job.provider_index] = _reap_seat(directory, item, job, entry["providers"][job.provider_index], labels,
+                                                                entry["context_bytes"] or 0)
+            if isinstance(error, (KeyboardInterrupt, TransientInfraError)):
+                _stop_seats(jobs)  # The still-running seats stay `running`: resume reruns them.
+                save_record(directory, record)
+                return
+            reason = f"review exited with no review.json ({type(error).__name__ if error else 'no error'})"
+            for job in jobs:
+                if job.result is None:
+                    job.result = {"terminated": True}
+                    entry["providers"][job.provider_index].update(status="error", error=clip(f"terminated: {reason}", 4000))
+            _stop_seats(jobs)
+            _finalize_seats(directory, plan, record, reaped, iso(clock()), error=reason)
+            save_record(directory, record)
+            return
+        reaped = _wait_seats(directory, item, record, jobs, clock, sleep)
+        _finalize_seats(directory, plan, record, reaped, iso(clock()))
+        save_record(directory, record)
+    except KeyboardInterrupt:
+        raise
+    except Exception as failure:  # noqa: BLE001
+        _fail_seats(directory, plan, record, jobs, failure)
+
+
+def record_judge(runtime, panel_id: str, judge: dict) -> None:
+    """Appendix A / PRD 7.3: the judge object (any status of `pending → running → judged | failed | timed_out | incomplete`)
+    stored in the judged panel `panel_id` of panel.json 1.1.0, validated against the schema before the write (the controller
+    holds `controller.lock`, panel.json's sole writer). [L4]: each seat finding's `accepted` is true exactly when its id is a
+    source of a `confirmed` ruling of a `judged` record (all false otherwise, and on fallback); the panel's `ended_at` becomes
+    the judge's. A record or object that breaks the schema is refused with ValueError, and nothing is written."""
+    from jsonschema.exceptions import ValidationError
+    directory = Path(runtime.directory)
+    record = load_record(directory)
+    if record is None:
+        if judged_item(runtime.plan) is None:
+            raise ValueError("record_judge: the plan has no judged panel")
+        record = pending_record(runtime.plan)
+    if record.get("version") != JUDGED_RECORD_VERSION:
+        raise ValueError(f"record_judge: panel.json is version {record.get('version')}, not the judged record {JUDGED_RECORD_VERSION}")
+    entry = next((item for item in record["panels"] if item.get("id") == panel_id and item.get("judged") is True), None)
+    if entry is None:
+        raise ValueError(f"record_judge: panel.json has no judged panel {panel_id!r}")
+    if not isinstance(judge, dict):
+        raise ValueError("record_judge: the judge must be an object")
+    judge = json.loads(json.dumps(judge))
+    confirmed = set()
+    if judge.get("status") == "judged" and judge.get("fallback") is False:
+        confirmed = {source for ruling in judge.get("rulings") or [] if isinstance(ruling, dict) and ruling.get("ruling") == "confirmed"
+                     for source in ruling.get("sources") or []}
+    entry["judge"] = judge
+    for finding in entry["findings"]:
+        finding["accepted"] = finding["id"] in confirmed
+    entry["ended_at"] = judge.get("ended_at")
+    try:
+        save_record(directory, record)
+    except ValidationError as error:
+        place = ".".join(str(part) for part in error.absolute_path)
+        raise ValueError(f"record_judge: the judge object breaks panel record {JUDGED_RECORD_VERSION} at {place}: {error.message}") from None
+
+
+def judged_line(directory: Path, plan: dict) -> str:
+    """PRD 7.7: `Panel (judged): <n> seats ok, <n> not ok; judge: <c> confirmed (<b> P0/P1), <d> deferred, <r> refuted` once the
+    judge ruled, `Panel (judged): judge <status>; today's rule decided` on its fallback, and the step's progress before."""
+    record = load_record(directory)
+    entry = record["panels"][0] if record and record.get("panels") else None
+    if entry is None or entry["status"] == "pending":
+        return "Panel (judged): runs at the review step."
+    if entry["status"] == "running":
+        return "Panel (judged): seats running."
+    ok = sum(1 for provider in entry["providers"] if provider["status"] == "ok")
+    seats = f"{ok} seats ok, {len(entry['providers']) - ok} not ok"
+    judge = entry.get("judge") or {}
+    status = judge.get("status", "pending")
+    if status == "judged":
+        rulings = judge.get("rulings") or []
+        confirmed = [ruling for ruling in rulings if ruling["ruling"] == "confirmed"]
+        blocking = sum(1 for ruling in confirmed if ruling["severity"] in ("P0", "P1"))
+        deferred = sum(1 for ruling in rulings if ruling["ruling"] == "deferred")
+        refuted = sum(1 for ruling in rulings if ruling["ruling"] == "refuted")
+        return f"Panel (judged): {seats}; judge: {len(confirmed)} confirmed ({blocking} P0/P1), {deferred} deferred, {refuted} refuted"
+    if status in ("pending", "running"):
+        return f"Panel (judged): {seats}; judge {status}"
+    return f"Panel (judged): judge {status}; today's rule decided"
+
+
 # ---- Status and outcome ---------------------------------------------------------------------------------------------
 
 def status_lines(directory: Path, plan: dict) -> list[str]:
-    """`panel <id>: <a> accepted of <n>` per panel, or its status while it has no findings yet."""
+    """`panel <id>: <a> accepted of <n>` per panel, or its status while it has no findings yet; a judged panel's PRD 7.7 line."""
     if not has_panels(plan):
         return []
+    if judged_item(plan) is not None:
+        return [judged_line(directory, plan)]
     record = load_record(directory)
     lines = []
     for index, item in enumerate(plan["panels"]):
@@ -1269,9 +2214,12 @@ def status_lines(directory: Path, plan: dict) -> list[str]:
 
 
 def outcome_lines(directory: Path, plan: dict) -> list[str]:
-    """One report-only line per panel after the review lines (Appendix A); none for a plan without `panels`. Never the verdict."""
+    """One report-only line per panel after the review lines (Appendix A); none for a plan without `panels`. Never the verdict.
+    A judged panel has its one PRD 7.7 line instead."""
     if not has_panels(plan):
         return []
+    if judged_item(plan) is not None:
+        return [judged_line(directory, plan)]
     record = load_record(directory)
     lines = []
     for index, item in enumerate(plan["panels"]):

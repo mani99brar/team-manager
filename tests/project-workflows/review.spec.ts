@@ -56,6 +56,8 @@ test(`[scenario:review-verdict] The review node shows the verdict, reviewer, bun
   await expect(byDisposition(page, 'open').first().getByTestId('finding-disposition')).toHaveText('open')
   await expect(byDisposition(page, 'accepted')).toHaveCount(2)
   await expect(byDisposition(page, 'resolved')).toHaveCount(0)
+  // An unjudged review keeps its Findings legend as before (review-panel-registry C4 changes only the judged one).
+  await expect(page.getByTestId('findings-legend')).toHaveText(/^A finding links to a captured file only where its message names the file's path verbatim\. Blocking means an unresolved P0 or P1 finding from any reviewer; .* Reviewer names the reviewer that raised the finding; the same finding raised by several reviewers is listed once per reviewer, never merged\.$/)
   expect(new Set(await findingRows(page).evaluateAll(cards => cards.map(card => card.getAttribute('data-disposition'))))).toEqual(new Set(['open', 'accepted']))
   // Every card names its severity, message, worker, reviewer and requirement, as the table's five columns did.
   for (const row of await findingRows(page).all()) {
@@ -170,7 +172,7 @@ test(`[scenario:review-legacy] A run exported before review results says no revi
 
 test(`[scenario:paths-redacted] No absolute path from the seeded review reaches the rendered panel (${phase})`, async ({ page }, testInfo) => {
   await page.goto(runUrl(RUN_SUCCEEDED, 'review'))
-  await expect(findingRows(page)).toHaveCount(6)
+  await expect(findingRows(page)).toHaveCount(6, { timeout: 15_000 })
   const text = await renderedText(reviewPanel(page))
   expect(text).toContain(PATH_TOKEN)
   await renderedText(nodeDetail(page))

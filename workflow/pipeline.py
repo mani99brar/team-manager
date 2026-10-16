@@ -137,8 +137,19 @@ def blocking_findings(findings: list) -> list:
     return [finding for finding in findings if finding.get("severity") in {"P0", "P1"} and finding.get("disposition") != "resolved"]
 
 
-def check_reviewers(entries, worker_ids: set, declared: list[str] | None, verdict: str, require_approved: bool) -> list[str]:
-    """The combined record's `reviewers` list: declared order, distinct independent identities, unanimous approval when approved."""
+# The judge of a judged review panel (feature.json 2.11.0, PRD 7.4) and the critique reviewer: on a judged record only these
+# entries gate the verdict; the built-in reviewers' entries are kept for the record.
+JUDGE_REVIEWER = "judge"
+JUDGED_GATES = frozenset({JUDGE_REVIEWER, "critique"})
+
+
+def check_reviewers(entries, worker_ids: set, declared: list[str] | None, verdict: str, require_approved: bool, *,
+                    judged: bool = False) -> list[str]:
+    """The combined record's `reviewers` list: declared order, distinct independent identities, unanimous approval when approved.
+
+    `judged` is the judged-plan context (the run's plan has a judged panel, judge.judged): a record that lists `judge` then
+    needs only the judge's approval (and critique's, when listed); the built-in entries do not gate. Without that context a
+    record listing the reserved `judge` is refused, and every other record is checked as before."""
     if not isinstance(entries, list) or not entries:
         raise ValueError("Review reviewers must be a non-empty list")
     ids, sessions = [], []
@@ -156,20 +167,27 @@ def check_reviewers(entries, worker_ids: set, declared: list[str] | None, verdic
         raise ValueError("Review reviewers must be distinct")
     if declared is not None and ids != list(declared):
         raise ValueError(f"Review reviewers ({', '.join(ids)}) are not this run's declared reviewers ({', '.join(declared)})")
-    if verdict == "approved" and any(entry["verdict"] != "approved" for entry in entries):
-        raise ValueError("An approved review requires every reviewer's approval")
-    if require_approved and any(entry["verdict"] != "approved" for entry in entries):
-        raise ValueError("Review is not approved by every reviewer")
+    if JUDGE_REVIEWER in ids and not judged:
+        raise ValueError(f"Review lists the reserved reviewer {JUDGE_REVIEWER}, which only a run with a judged review panel records")
+    gates = [entry for entry in entries if entry["reviewer_id"] in JUDGED_GATES] if JUDGE_REVIEWER in ids else entries
+    if verdict == "approved" and any(entry["verdict"] != "approved" for entry in gates):
+        raise ValueError("An approved review requires the judge's approval" if gates is not entries else "An approved review requires every reviewer's approval")
+    if require_approved and any(entry["verdict"] != "approved" for entry in gates):
+        raise ValueError("Review is not approved by the judge" if gates is not entries else "Review is not approved by every reviewer")
+    if gates is not entries and verdict == "blocked" and all(entry["verdict"] == "approved" for entry in gates):
+        raise ValueError("A blocked judged review needs a blocking judge or critique")
     return ids
 
 
 def check_review(review: dict, bundle: dict, digest: str, *, require_approved: bool = True, allow_legacy: bool = False,
-                 reviewers: list[str] | None = None) -> None:
+                 reviewers: list[str] | None = None, judged: bool = False) -> None:
     """Shape and identity of a persisted review against its exact bundle; approval is checked only when required.
 
     `allow_legacy` accepts the two-lane `both` attribution of reviews recorded before configured lanes (export only).
     `reviewers` is the run's declared reviewer list: the record must then list exactly those reviewers and tag every
     finding with one of them. Without it (export), a record without `reviewers` is the single-reviewer shape.
+    `judged` is the judged-plan context (PRD 7.4): a record listing `judge` is then decided by the judge (and critique), and
+    its findings are the judge's and critique's only (check_reviewers); without it such a record is refused.
     """
     if (not isinstance(review, dict) or not REVIEW_KEYS <= set(review) <= REVIEW_KEYS | {"reviewers"} or review["run_id"] != bundle["run_id"]
             or review["bundle_sha256"] != digest or review["candidate_commit"] != bundle["candidate_commit"]):
@@ -184,7 +202,7 @@ def check_review(review: dict, bundle: dict, digest: str, *, require_approved: b
         raise ValueError("Review is not approved")
     ids = None
     if "reviewers" in review:
-        ids = check_reviewers(review["reviewers"], worker_ids, reviewers, review["verdict"], require_approved)
+        ids = check_reviewers(review["reviewers"], worker_ids, reviewers, review["verdict"], require_approved, judged=judged)
     elif reviewers is not None and list(reviewers) != [DEFAULT_REVIEWER]:
         raise ValueError(f"Review lacks the reviewers list this run requires ({', '.join(reviewers)})")
     # The bundle's snapshots are exactly the run's selected lanes.
@@ -202,6 +220,8 @@ def check_review(review: dict, bundle: dict, digest: str, *, require_approved: b
         if ids is not None:
             if finding.get("reviewer") not in ids:
                 raise ValueError(f"Review finding names reviewer {finding.get('reviewer')!r}; expected one of {', '.join(ids)}")
+            if JUDGE_REVIEWER in ids and finding["reviewer"] not in JUDGED_GATES:
+                raise ValueError(f"A judged review's findings are the judge's and critique's only, not {finding['reviewer']}'s")
         elif "reviewer" in finding and (not isinstance(finding["reviewer"], str) or not finding["reviewer"].strip()):
             raise ValueError("Malformed review finding reviewer")
         if review["verdict"] == "approved" and blocking_findings([finding]):
@@ -832,11 +852,17 @@ class Pipeline:
 
     def validate_review(self, review: dict, require_approved: bool = True) -> None:
         """The combined record must name exactly this run's declared reviewers (plus `critique` when the plan pins the
-        critique reviewer, feature.json 2.9.0); approval needs every one of them."""
+        critique reviewer, feature.json 2.9.0); approval needs every one of them. On a plan with a judged panel (2.11.0, PRD
+        7.4, [L3]) a record the judge decided lists `judge` after them and approval needs the judge's (and critique's); a
+        record its judge fell back on is today's."""
         from .critique import has_critique, CRITIQUE
+        from .judge import judged as judged_panel
         bundle, digest = self.validate_bundle()
-        declared = reviewer_ids(self.plan) + ([CRITIQUE] if has_critique(self.plan) else [])
-        check_review(review, bundle, digest, require_approved=require_approved, reviewers=declared)
+        judged = judged_panel(self.plan) is not None
+        listed = [entry.get("reviewer_id") for entry in review.get("reviewers") or [] if isinstance(entry, dict)] if isinstance(review, dict) else []
+        declared = (reviewer_ids(self.plan) + ([JUDGE_REVIEWER] if judged and JUDGE_REVIEWER in listed else [])
+                    + ([CRITIQUE] if has_critique(self.plan) else []))
+        check_review(review, bundle, digest, require_approved=require_approved, reviewers=declared, judged=judged)
 
     def integrate(self, approved: str) -> str:
         self.check_shared_git("integrate")
@@ -901,8 +927,9 @@ class ExportRuntime:
                 raise ValueError("review.json exists without review-bundle.json; contradictory run directory")
             # Packet hashes are not rechecked here; the adapter re-verifies packets itself. Reviews recorded
             # before configured lanes may attribute a finding to `both`; the viewer renders it as several lanes.
+            from .judge import judged as judged_panel
             check_review(read_json(review_path), read_json(bundle_path), digest_file(bundle_path), require_approved=False,
-                         allow_legacy="workers" not in self.plan)
+                         allow_legacy="workers" not in self.plan, judged=judged_panel(self.plan) is not None)
 
 
 def lanes_of(plan: dict, policy: dict | None) -> tuple[list[str], list[str]]:

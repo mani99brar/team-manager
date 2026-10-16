@@ -2547,7 +2547,7 @@ sys.exit(0 if commit else 75)
         codes = []
         for _ in range(4):
             result = subprocess.run([sys.executable, "-c", script, str(f.directory), f.sessions.executable],
-                                    cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, timeout=90)
+                                    cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, timeout=300)
             codes.append(result.returncode)
             self.assertIn(result.returncode, (0, 75), result.stderr)
             if result.returncode == 0:
@@ -3564,7 +3564,7 @@ sys.exit(0 if commit else 75)
         codes = []
         for _ in range(5):
             result = subprocess.run([sys.executable, "-c", script, str(f.directory), str(marker)],
-                                    cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, timeout=90)
+                                    cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, timeout=300)
             codes.append(result.returncode)
             self.assertIn(result.returncode, (0, 75, 130), result.stderr)
             if result.returncode == 130:

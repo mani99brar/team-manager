@@ -1,0 +1,59 @@
+{
+  "attempt": 1,
+  "transport": "native",
+  "reviewer_session_id": "<UUID1>, <UUID2>",
+  "independent": true,
+  "bundle_sha256": "<SHA256>",
+  "candidate_commit": "<COMMIT>",
+  "verdict": "approved",
+  "findings": [
+    {
+      "severity": "P2",
+      "message": "No test asserts the empty state.",
+      "disposition": "open",
+      "worker": "ui",
+      "requirement": null,
+      "reviewer": "general"
+    }
+  ],
+  "reviewers": [
+    {
+      "reviewer_id": "general",
+      "transport": "native",
+      "session_id": "<UUID1>",
+      "verdict": "approved",
+      "findings": [
+        {
+          "severity": "P2",
+          "message": "No test asserts the empty state.",
+          "disposition": "open",
+          "worker": "ui",
+          "requirement": null,
+          "reviewer": "general"
+        }
+      ],
+      "launched_at": "<TIME>",
+      "accepted_at": "<TIME>",
+      "status": "accepted"
+    },
+    {
+      "reviewer_id": "coverage",
+      "transport": "native",
+      "session_id": "<UUID2>",
+      "verdict": "approved",
+      "findings": [],
+      "launched_at": "<TIME>",
+      "accepted_at": "<TIME>",
+      "status": "accepted"
+    }
+  ],
+  "reviewed_at": "<TIME>",
+  "diff": {
+    "path": "review.diff",
+    "sha256": "<SHA256>",
+    "bytes": 303
+  },
+  "round": 1,
+  "delta_from": null,
+  "delta_diff": null
+}

@@ -18,6 +18,7 @@ import {
   schemas,
   validateAttackResult,
   validatePanelResults,
+  servedReviewContext,
   validateReviewResult,
   validateRunDetail,
   validateRunInputs,
@@ -331,7 +332,7 @@ export function scopedReviewPath(scope: RunScope, resultUri: string): string | n
 
 export function fetchReviewResult(scope: RunScope, reviewPath: string, signal?: AbortSignal): Promise<ReviewResult> {
   return requestJson(reviewPath, input => {
-    const review = validateReviewResult(input)
+    const review = validateReviewResult(input, servedReviewContext(input))
     if (review.run_id !== scope.runId) throw new Error(`the review belongs to run ${review.run_id}.`)
     return review
   }, signal)

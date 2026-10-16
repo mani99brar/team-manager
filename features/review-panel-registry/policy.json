@@ -1,0 +1,238 @@
+{
+  "version": "1.4.0",
+  "feature": "Review panel registry: shared reviewer list, cli transport, judged run-review panel (2.11.0) with one judge over every finding, and its viewer",
+  "independent_review": true,
+  "integration_approval": true,
+  "max_verification_attempts": 3,
+  "setup": [
+    {
+      "argv": [
+        "npm",
+        "ci"
+      ],
+      "timeout_seconds": 600
+    }
+  ],
+  "workers": [
+    {
+      "node_id": "seats",
+      "role": "backend",
+      "required_check_kinds": [
+        "unit",
+        "contract"
+      ],
+      "owned_paths": [
+        "workflow/reviewers.py",
+        "workflow/test_reviewers.py",
+        "workflow/panel.py",
+        "workflow/test_panel.py",
+        "workflow/launch.py",
+        "workflow/test_pipeline.py",
+        "workflow/test_feature_launch.py",
+        "workflow/lane_review.py",
+        "workflow/test_lane_review.py",
+        "workflow/guardrails.py",
+        "workflow/test_guardrails.py",
+        "workflow/sidecar.py",
+        "workflow/test_sidecar.py",
+        "workflow/attack.py",
+        "workflow/test_attack.py",
+        "workflow/critique.py",
+        "workflow/test_critique.py",
+        "workflow/testdata/panel",
+        "workflow/prompts/panels",
+        "workflow/skills/workflow-grill",
+        "workflow/README.md",
+        "contracts/workflow",
+        "docs/handoff/review-panel-seats.md"
+      ],
+      "checks": [
+        {
+          "id": "seats-workflow-unit",
+          "kind": "unit",
+          "argv": [
+            "/home/agentops/dev/md-manager/.venv/bin/python",
+            "-m",
+            "workflow.run_tests",
+            "--jobs",
+            "4"
+          ],
+          "timeout_seconds": 3600,
+          "scenarios": []
+        },
+        {
+          "id": "seats-shared-contract",
+          "kind": "contract",
+          "argv": [
+            "npm",
+            "run",
+            "test:contracts"
+          ],
+          "timeout_seconds": 180,
+          "scenarios": []
+        }
+      ]
+    },
+    {
+      "node_id": "judge",
+      "role": "backend",
+      "required_check_kinds": [
+        "unit",
+        "contract"
+      ],
+      "owned_paths": [
+        "workflow/judge.py",
+        "workflow/test_judge.py",
+        "workflow/automatic.py",
+        "workflow/test_automatic.py",
+        "workflow/pipeline.py",
+        "workflow/sessions.py",
+        "workflow/test_sessions.py",
+        "workflow/test_export.py",
+        "workflow/test_accept.py",
+        "workflow/testdata/judge",
+        "workflow/prompts/judge.md",
+        "workflow/RUNBOOK.md",
+        "docs/handoff/review-panel-judge.md"
+      ],
+      "checks": [
+        {
+          "id": "judge-workflow-unit",
+          "kind": "unit",
+          "argv": [
+            "/home/agentops/dev/md-manager/.venv/bin/python",
+            "-m",
+            "workflow.run_tests",
+            "--jobs",
+            "4"
+          ],
+          "timeout_seconds": 3600,
+          "scenarios": []
+        },
+        {
+          "id": "judge-shared-contract",
+          "kind": "contract",
+          "argv": [
+            "npm",
+            "run",
+            "test:contracts"
+          ],
+          "timeout_seconds": 180,
+          "scenarios": []
+        }
+      ]
+    },
+    {
+      "node_id": "viewer",
+      "role": "frontend",
+      "required_check_kinds": [
+        "build",
+        "unit",
+        "contract",
+        "browser"
+      ],
+      "owned_paths": [
+        "server",
+        "contracts/projects",
+        "src/projects",
+        "tests/unit",
+        "tests/project-workflows",
+        "docs/handoff/review-panel-viewer.md"
+      ],
+      "checks": [
+        {
+          "id": "frontend-build",
+          "kind": "build",
+          "argv": [
+            "npm",
+            "run",
+            "build"
+          ],
+          "timeout_seconds": 300,
+          "scenarios": []
+        },
+        {
+          "id": "frontend-lint",
+          "kind": "build",
+          "argv": [
+            "npm",
+            "run",
+            "lint"
+          ],
+          "timeout_seconds": 180,
+          "scenarios": []
+        },
+        {
+          "id": "viewer-shared-contract",
+          "kind": "contract",
+          "argv": [
+            "npm",
+            "run",
+            "test:contracts"
+          ],
+          "timeout_seconds": 180,
+          "scenarios": []
+        },
+        {
+          "id": "frontend-unit",
+          "kind": "unit",
+          "argv": [
+            "npm",
+            "run",
+            "test:unit"
+          ],
+          "timeout_seconds": 300,
+          "scenarios": []
+        },
+        {
+          "id": "project-workflows-browser",
+          "kind": "browser",
+          "argv": [
+            "npx",
+            "--no-install",
+            "playwright",
+            "test",
+            "--config=tests/project-workflows/playwright.config.ts"
+          ],
+          "timeout_seconds": 1500,
+          "scenarios": [
+            {
+              "id": "panel-judged",
+              "description": "On the seeded judged run (from examples/panel-judged.example.json), the run page's Panel section lists the seats claude (C, claude), gpt (G, pi, openai-codex/gpt-6.1-sol) and muse (M, cli, muse-wonder-1.0, 'Muse Code 1.4.7 (1.4.7-R6101.1)') each with status 'ok', duration and cost ('not reported' for muse), and the judge block shows status 'judged', model claude-opus-5-5, its cost and duration"
+            },
+            {
+              "id": "panel-rulings",
+              "description": "The judge block lists Confirmed first (J1 P1 'settle does not wait for a seat relaunched on resume', workflow/panel.py:212, lane engine; J2 P2, lane viewer), then Deferred (J4 P0, with its base-scope reason) and Refuted (J3, with its evidence workflow/judge.py:88); each ruling shows its source chips (J1: general-1, C1, M1) and each chip links to that reviewer or seat"
+            },
+            {
+              "id": "panel-fallback",
+              "description": "On the seeded fallback run (from examples/panel-fallback.example.json) the Panel section shows the banner 'Judge timed out: the built-in reviewers decided (today's rule); panel findings are unjudged', the gpt seat 'timed out', the muse seat 'not logged in', the argon seat 'unavailable: disabled in the reviewer list', and C1 listed as an unjudged finding"
+            },
+            {
+              "id": "panel-review-section",
+              "description": "On the judged run the review section shows 'judge' as the deciding reviewer with verdict blocked and the J1/J2 findings with their lanes, and the general and coverage entries labelled 'advisory (the judge decided)'; the Sessions list has a row per seat (the muse row without a resume command) and a judge row with 'claude --resume <id>' and no worktree cd; no absolute path is rendered"
+            },
+            {
+              "id": "panel-legacy",
+              "description": "A seeded run with a 1.0.0 report-only panel renders its Panel section exactly as before (providers, findings, overlap/accepted marks, 'report-only' wording) with no judge block"
+            },
+            {
+              "id": "panel-phone",
+              "description": "At 390 px wide the Panel section (seats, judge block, rulings with chips, fallback banner) reads in one column with no horizontal page scroll, and every new link and chip is at least 44 px tall"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "critique_app": {
+    "argv": [
+      "npx",
+      "--no-install",
+      "tsx",
+      "tests/project-workflows/sessions-app.ts"
+    ],
+    "ready_path": "/api/projects",
+    "timeout_seconds": 180
+  }
+}

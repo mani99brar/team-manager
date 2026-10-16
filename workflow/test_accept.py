@@ -316,5 +316,96 @@ class AcceptTests(unittest.TestCase):
             self.assertNotIn(f"workflow {refused} ", status["next_step"])
 
 
+# The judged review of feature.json 2.11.0 (features/review-panel-registry/prd.md 7.4, decisions [L3]): integrate validates
+# review.json through Pipeline.validate_review with the judged-plan context of the run's own plan.
+JUDGED_PANEL = {"id": "review", "stage": "review", "report_only": False, "seats": [], "judge": {"model": "claude-opus-5-5", "effort": "high",
+                "timeout_minutes": 30, "budget_usd": 15, "input_cap_bytes": 600000}}
+REPORT_ONLY_PANEL = {"id": "review-panel", "stage": "review", "report_only": True, "providers": [{"transport": "pi", "model": "openai-codex/gpt-6-sol", "effort": None}]}
+SESSIONS = {"general": "0a1b2c3d-1111-4222-8333-444455556666", "coverage": "0a1b2c3d-2222-4333-8444-555566667777",
+            "judge": "5f0c2a8e-7d4b-4f1e-9a63-2b8d1c0e4f71", "critique": "c0c0c0c0-1111-4222-8333-444455556666"}
+
+
+class JudgedIntegrateTests(unittest.TestCase):
+    """A judged run whose built-in entries read blocked and whose judge approved integrates; the same record on a plan without a
+    judged panel is refused, and critique still blocks on its own."""
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        env = patch.dict(os.environ, {"CLAUDECODE": "", "MD_MANAGER_PROJECTS_CONFIG": str(self.root / "config" / "projects.json")})
+        env.start()
+        self.addCleanup(env.stop)
+
+    def run_with(self, panels, *, critique: str | None = None):
+        """A prepared one-lane run with reviewers general and coverage, `plan.panels` = `panels` (absent for None), a candidate
+        one commit ahead of main, and a review.json whose built-in entries block while the judge approves."""
+        from types import SimpleNamespace
+        from .pipeline import Pipeline, digest_file
+        directory, repo, base, _ = build_run(self.root)
+        git_run(repo, "checkout", "-q", "--detach")
+        (repo / "ui.txt").write_text("candidate\n")
+        git_run(repo, "commit", "-qam", "Candidate")
+        candidate = git(repo, "rev-parse", "HEAD")
+        git_run(repo, "checkout", "-q", "main")
+        plan = read_json(directory / "plan.json")
+        plan["reviewers"] = [{"reviewer_id": "general", "prompt": "General."}, {"reviewer_id": "coverage", "prompt": "Coverage."}]
+        if panels is not None:
+            plan["panels"] = panels
+        if critique is not None:
+            plan["critique"] = {"lanes": ["ui"]}
+        save_json(directory / "plan.json", plan)
+        bundle = {"run_id": plan["run_id"], "candidate_commit": candidate, "snapshots": {"ui": {"session_id": plan["nodes"]["ui"]["session_id"]}}}
+        save_json(directory / "review-bundle.json", bundle)
+        digest = digest_file(directory / "review-bundle.json")
+        entries = [{"reviewer_id": rid, "session_id": SESSIONS[rid], "verdict": verdict, "accepted_at": "2026-10-15T10:31:40Z"}
+                   for rid, verdict in (("general", "blocked"), ("coverage", "blocked"), ("judge", "approved"))]
+        findings = [{"severity": "P2", "message": "[J2 from coverage-1] No unit test for the banner (tests/unit/a.test.ts): no unit test pins it.",
+                     "disposition": "open", "worker": "ui", "reviewer": "judge"}]
+        verdict = "approved"
+        if critique is not None:
+            entries.append({"reviewer_id": "critique", "session_id": SESSIONS["critique"], "verdict": critique, "accepted_at": "2026-10-15T10:40:00Z"})
+            verdict = critique
+        review = {"run_id": plan["run_id"], "bundle_sha256": digest, "candidate_commit": candidate,
+                  "reviewer": ", ".join(entry["session_id"] for entry in entries), "independent": True, "verdict": verdict,
+                  "findings": findings, "reviewers": entries}
+        save_json(directory / "review.json", review)
+        runtime = SimpleNamespace(directory=directory, plan=plan, check_shared_git=lambda action: None, validate_bundle=lambda: (bundle, digest),
+                                  event=lambda *args: None, record_finished=lambda commit: None)
+        runtime.validate_review = lambda review, require_approved=True: Pipeline.validate_review(runtime, review, require_approved)
+        return runtime, digest, candidate, repo
+
+    def test_a_judge_approved_record_with_blocked_built_in_entries_integrates(self):
+        from .pipeline import Pipeline
+        runtime, digest, candidate, repo = self.run_with([JUDGED_PANEL])
+        self.assertEqual(Pipeline.integrate(runtime, digest), candidate)
+        self.assertEqual(git(repo, "rev-parse", "main"), candidate)
+
+    def test_the_same_record_without_a_judged_panel_in_the_plan_is_refused(self):
+        from .pipeline import Pipeline
+        for name, panels in (("legacy", None), ("report-only", [REPORT_ONLY_PANEL]), ("missing", [])):
+            with self.subTest(name):
+                self.root = Path(tempfile.mkdtemp(dir=self.root))
+                runtime, digest, candidate, repo = self.run_with(panels)
+                before = git(repo, "rev-parse", "main")
+                with self.assertRaisesRegex(ValueError, "not this run's declared reviewers"):
+                    Pipeline.integrate(runtime, digest)
+                self.assertEqual(git(repo, "rev-parse", "main"), before)
+                with self.assertRaisesRegex(ValueError, "reserved reviewer judge"):  # Even with judge declared, the context is missing.
+                    from .pipeline import check_review
+                    check_review(read_json(runtime.directory / "review.json"), *runtime.validate_bundle(), reviewers=["general", "coverage", "judge"])
+
+    def test_critique_still_blocks_a_judge_approved_record(self):
+        from .pipeline import Pipeline
+        runtime, digest, candidate, repo = self.run_with([JUDGED_PANEL], critique="blocked")
+        with self.assertRaisesRegex(ValueError, "not approved"):
+            Pipeline.integrate(runtime, digest)
+        self.assertNotEqual(git(repo, "rev-parse", "main"), candidate)
+        runtime.validate_review(read_json(runtime.directory / "review.json"), require_approved=False)  # A valid blocked record all the same.
+        self.root = Path(tempfile.mkdtemp(dir=self.root))
+        runtime, digest, candidate, repo = self.run_with([JUDGED_PANEL], critique="approved")
+        self.assertEqual(Pipeline.integrate(runtime, digest), candidate)
+
+
 if __name__ == "__main__":
     unittest.main()

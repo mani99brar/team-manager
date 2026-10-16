@@ -1,270 +1,826 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "type": "object",
-  "properties": {
-    "version": {
-      "type": "string",
-      "const": "1.0.0"
-    },
-    "panels": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "properties": {
-          "id": {
-            "type": "string",
-            "minLength": 1
-          },
-          "stage": {
-            "type": "string",
-            "enum": [
-              "challenge",
-              "review"
-            ]
-          },
-          "status": {
-            "type": "string",
-            "enum": [
-              "pending",
-              "running",
-              "succeeded",
-              "failed",
-              "timed_out"
-            ]
-          },
-          "overlap_threshold": {
-            "anyOf": [
-              {
-                "type": "integer",
-                "minimum": 1,
-                "maximum": 9007199254740991
-              },
-              {
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "version": {
+          "type": "string",
+          "const": "1.0.0"
+        },
+        "panels": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
                 "type": "string",
-                "const": "all"
-              }
-            ]
-          },
-          "context_bytes": {
-            "anyOf": [
-              {
-                "type": "integer",
-                "minimum": 0,
-                "maximum": 9007199254740991
+                "minLength": 1
               },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "providers": {
-            "type": "array",
-            "items": {
-              "type": "object",
-              "properties": {
-                "transport": {
-                  "type": "string",
-                  "enum": [
-                    "claude",
-                    "pi"
-                  ]
-                },
-                "model": {
-                  "type": [
-                    "string",
-                    "null"
-                  ]
-                },
-                "effort": {
-                  "type": [
-                    "string",
-                    "null"
-                  ]
-                },
-                "status": {
-                  "type": "string",
-                  "enum": [
-                    "pending",
-                    "running",
-                    "ok",
-                    "timed_out",
-                    "error",
-                    "parse_failed"
-                  ]
-                },
-                "cost_usd": {
-                  "anyOf": [
-                    {
-                      "type": "number",
-                      "minimum": 0
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "context_bytes": {
-                  "anyOf": [
-                    {
-                      "type": "integer",
-                      "minimum": 0,
-                      "maximum": 9007199254740991
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "finding_ids": {
-                  "type": "array",
-                  "items": {
+              "stage": {
+                "type": "string",
+                "enum": [
+                  "challenge",
+                  "review"
+                ]
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "pending",
+                  "running",
+                  "succeeded",
+                  "failed",
+                  "timed_out"
+                ]
+              },
+              "overlap_threshold": {
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 9007199254740991
+                  },
+                  {
                     "type": "string",
-                    "minLength": 1
+                    "const": "all"
                   }
-                },
-                "error": {
-                  "type": [
-                    "string",
-                    "null"
-                  ]
+                ]
+              },
+              "context_bytes": {
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "providers": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "transport": {
+                      "type": "string",
+                      "enum": [
+                        "claude",
+                        "pi"
+                      ]
+                    },
+                    "model": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "effort": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "pending",
+                        "running",
+                        "ok",
+                        "timed_out",
+                        "error",
+                        "parse_failed"
+                      ]
+                    },
+                    "cost_usd": {
+                      "anyOf": [
+                        {
+                          "type": "number",
+                          "minimum": 0
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "context_bytes": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "finding_ids": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    },
+                    "error": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "transport",
+                    "model",
+                    "effort",
+                    "status",
+                    "cost_usd",
+                    "context_bytes",
+                    "finding_ids",
+                    "error"
+                  ],
+                  "additionalProperties": false
                 }
               },
-              "required": [
-                "transport",
-                "model",
-                "effort",
-                "status",
-                "cost_usd",
-                "context_bytes",
-                "finding_ids",
-                "error"
-              ],
-              "additionalProperties": false
-            }
-          },
-          "findings": {
-            "type": "array",
-            "items": {
-              "type": "object",
-              "properties": {
-                "id": {
-                  "type": "string",
-                  "minLength": 1
-                },
-                "severity": {
-                  "type": "string",
-                  "enum": [
-                    "P0",
-                    "P1",
-                    "P2"
-                  ]
-                },
-                "file": {
-                  "type": "string",
-                  "minLength": 1
-                },
-                "line": {
-                  "anyOf": [
-                    {
-                      "type": "integer",
-                      "minimum": 0,
-                      "maximum": 9007199254740991
+              "findings": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "minLength": 1
                     },
-                    {
-                      "type": "null"
+                    "severity": {
+                      "type": "string",
+                      "enum": [
+                        "P0",
+                        "P1",
+                        "P2"
+                      ]
+                    },
+                    "file": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "line": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "detail": {
+                      "type": "string"
+                    },
+                    "providers_raised": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    },
+                    "accepted": {
+                      "type": "boolean"
+                    },
+                    "unanchored": {
+                      "type": "boolean"
                     }
-                  ]
-                },
-                "title": {
-                  "type": "string"
-                },
-                "detail": {
-                  "type": "string"
-                },
-                "providers_raised": {
-                  "type": "array",
-                  "items": {
-                    "type": "string",
-                    "minLength": 1
-                  }
-                },
-                "accepted": {
-                  "type": "boolean"
-                },
-                "unanchored": {
-                  "type": "boolean"
+                  },
+                  "required": [
+                    "id",
+                    "severity",
+                    "file",
+                    "line",
+                    "title",
+                    "detail",
+                    "providers_raised",
+                    "accepted",
+                    "unanchored"
+                  ],
+                  "additionalProperties": false
                 }
               },
-              "required": [
-                "id",
-                "severity",
-                "file",
-                "line",
-                "title",
-                "detail",
-                "providers_raised",
-                "accepted",
-                "unanchored"
-              ],
-              "additionalProperties": false
-            }
-          },
-          "started_at": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "ended_at": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "budget_usd": {
-            "type": "number",
-            "minimum": 0
-          },
-          "error": {
-            "type": [
-              "string",
-              "null"
-            ]
+              "started_at": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "ended_at": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "budget_usd": {
+                "type": "number",
+                "minimum": 0
+              },
+              "error": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "stage",
+              "status",
+              "overlap_threshold",
+              "context_bytes",
+              "providers",
+              "findings",
+              "started_at",
+              "ended_at",
+              "budget_usd",
+              "error"
+            ],
+            "additionalProperties": false
           }
         },
-        "required": [
-          "id",
-          "stage",
-          "status",
-          "overlap_threshold",
-          "context_bytes",
-          "providers",
-          "findings",
-          "started_at",
-          "ended_at",
-          "budget_usd",
-          "error"
-        ],
-        "additionalProperties": false
-      }
+        "contract_version": {
+          "type": "string",
+          "const": "1.9.0"
+        },
+        "source": {
+          "type": "string",
+          "enum": [
+            "live",
+            "export"
+          ]
+        }
+      },
+      "required": [
+        "version",
+        "panels",
+        "contract_version",
+        "source"
+      ],
+      "additionalProperties": false
     },
-    "contract_version": {
-      "type": "string",
-      "const": "1.9.0"
-    },
-    "source": {
-      "type": "string",
-      "enum": [
-        "live",
-        "export"
-      ]
+    {
+      "type": "object",
+      "properties": {
+        "version": {
+          "type": "string",
+          "const": "1.1.0"
+        },
+        "panels": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "stage": {
+                "type": "string",
+                "enum": [
+                  "challenge",
+                  "review"
+                ]
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "pending",
+                  "running",
+                  "succeeded",
+                  "failed",
+                  "timed_out"
+                ]
+              },
+              "judged": {
+                "type": "boolean",
+                "const": true
+              },
+              "overlap_threshold": {
+                "type": "null"
+              },
+              "context_bytes": {
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "providers": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "name": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "prefix": {
+                      "type": "string",
+                      "pattern": "^[A-Z]$"
+                    },
+                    "transport": {
+                      "type": "string",
+                      "enum": [
+                        "claude",
+                        "pi",
+                        "cli"
+                      ]
+                    },
+                    "model": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "served_model": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "cli_version": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "effort": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "pending",
+                        "running",
+                        "ok",
+                        "timed_out",
+                        "error",
+                        "parse_failed",
+                        "unavailable",
+                        "auth_required",
+                        "usage_limit",
+                        "model_mismatch"
+                      ]
+                    },
+                    "cost_usd": {
+                      "anyOf": [
+                        {
+                          "type": "number",
+                          "minimum": 0
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "context_bytes": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "finding_ids": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    },
+                    "error": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "name",
+                    "prefix",
+                    "transport",
+                    "model",
+                    "served_model",
+                    "cli_version",
+                    "effort",
+                    "status",
+                    "cost_usd",
+                    "context_bytes",
+                    "finding_ids",
+                    "error"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "findings": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "severity": {
+                      "type": "string",
+                      "enum": [
+                        "P0",
+                        "P1",
+                        "P2"
+                      ]
+                    },
+                    "file": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "line": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "title": {
+                      "type": "string"
+                    },
+                    "detail": {
+                      "type": "string"
+                    },
+                    "providers_raised": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    },
+                    "accepted": {
+                      "type": "boolean"
+                    },
+                    "unanchored": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "severity",
+                    "file",
+                    "line",
+                    "title",
+                    "detail",
+                    "providers_raised",
+                    "accepted",
+                    "unanchored"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "started_at": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "ended_at": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "budget_usd": {
+                "anyOf": [
+                  {
+                    "type": "number",
+                    "minimum": 0
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "error": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "judge": {
+                "type": "object",
+                "properties": {
+                  "status": {
+                    "type": "string",
+                    "enum": [
+                      "pending",
+                      "running",
+                      "judged",
+                      "failed",
+                      "timed_out",
+                      "incomplete"
+                    ]
+                  },
+                  "fallback": {
+                    "type": "boolean"
+                  },
+                  "model": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "effort": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "session_id": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "started_at": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "ended_at": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "cost_usd": {
+                    "anyOf": [
+                      {
+                        "type": "number",
+                        "minimum": 0
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "error": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "inputs": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "source": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "kind": {
+                          "type": "string",
+                          "enum": [
+                            "reviewer",
+                            "seat"
+                          ]
+                        },
+                        "status": {
+                          "type": "string"
+                        },
+                        "finding_ids": {
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "minLength": 1
+                          }
+                        }
+                      },
+                      "required": [
+                        "source",
+                        "kind",
+                        "status",
+                        "finding_ids"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "reviewer_findings": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "reviewer": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "severity": {
+                          "type": "string",
+                          "enum": [
+                            "P0",
+                            "P1",
+                            "P2"
+                          ]
+                        },
+                        "worker": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "message": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "reviewer",
+                        "severity",
+                        "worker",
+                        "message"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "rulings": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "ruling": {
+                          "type": "string",
+                          "enum": [
+                            "confirmed",
+                            "refuted",
+                            "deferred"
+                          ]
+                        },
+                        "severity": {
+                          "type": "string",
+                          "enum": [
+                            "P0",
+                            "P1",
+                            "P2"
+                          ]
+                        },
+                        "sources": {
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "minLength": 1
+                          }
+                        },
+                        "file": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "line": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": 0,
+                              "maximum": 9007199254740991
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "title": {
+                          "type": "string"
+                        },
+                        "detail": {
+                          "type": "string"
+                        },
+                        "requirement": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "worker": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "reason": {
+                          "type": "string"
+                        },
+                        "evidence": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "ruling",
+                        "severity",
+                        "sources",
+                        "file",
+                        "line",
+                        "title",
+                        "detail",
+                        "requirement",
+                        "worker",
+                        "reason",
+                        "evidence"
+                      ],
+                      "additionalProperties": false
+                    }
+                  }
+                },
+                "required": [
+                  "status",
+                  "fallback",
+                  "model",
+                  "effort",
+                  "session_id",
+                  "started_at",
+                  "ended_at",
+                  "cost_usd",
+                  "error",
+                  "inputs",
+                  "reviewer_findings",
+                  "rulings"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "id",
+              "stage",
+              "status",
+              "judged",
+              "overlap_threshold",
+              "context_bytes",
+              "providers",
+              "findings",
+              "started_at",
+              "ended_at",
+              "error"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "contract_version": {
+          "type": "string",
+          "const": "1.9.0"
+        },
+        "source": {
+          "type": "string",
+          "enum": [
+            "live",
+            "export"
+          ]
+        }
+      },
+      "required": [
+        "version",
+        "panels",
+        "contract_version",
+        "source"
+      ],
+      "additionalProperties": false
     }
-  },
-  "required": [
-    "version",
-    "panels",
-    "contract_version",
-    "source"
-  ],
-  "additionalProperties": false
+  ]
 }

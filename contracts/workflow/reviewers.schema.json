@@ -1,0 +1,105 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Shared reviewer list v1.0.0",
+  "description": "The shared reviewer list (features/review-panel-registry/prd.md section 4): one file synced through agent-memory, default `~/.local/share/agent-memory/repo/learnings/skills/review-panel/reviewers.json`, override env `WORKFLOW_REVIEWERS_FILE` (absolute path). Read only at launch, and only for a feature.json 2.11.0 feature with a judged panel (`report_only: false`); prepare pins the resolved entries and the file's sha256 into `plan.panels[0]`, so the run never re-reads it. Hand-written; `workflow.reviewers.load` validates it with this schema and adds the rules a schema cannot state: unique `name` and `prefix`, no property name anywhere (nor a `cli.env.pass` name) matching /key|token|secret|password/i (the agent-memory sync holds such JSON back), `cli` exactly on a `cli` entry, a null `model` only on `claude`, a `provider/id` model on `pi`, a non-null `effort` only on `claude`, `cap.budget_usd` only on `claude`, `cli.argv` placeholders limited to `{model}`, `{prompt_file}`, `{worktree}` and `{timeout_minutes}` (none in `version_argv`), and `failures` patterns that compile. `credential` is `cli-login` (the CLI's own login) or `{file, env}`: the controller only stats `file`, never opens it, and passes its expanded path to the seat in env `env`; the list never holds a key. A `cli` seat's environment is built from nothing: PATH, HOME, LANG, TMPDIR, the `env.pass` names copied when set, the `env.set` literals and the credential env.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "reviewers"],
+  "properties": {
+    "version": {"const": "1.0.0"},
+    "reviewers": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 16,
+      "items": {"$ref": "#/$defs/entry"}
+    }
+  },
+  "$defs": {
+    "envName": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]{0,63}$"},
+    "argument": {"type": "string", "minLength": 1, "maxLength": 1000},
+    "extractor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["format", "match", "field"],
+      "properties": {
+        "format": {"enum": ["jsonl_event", "json_field"]},
+        "match": {
+          "type": "object",
+          "additionalProperties": {"type": "string"},
+          "propertyNames": {"type": "string", "minLength": 1}
+        },
+        "field": {"type": "string", "pattern": "^[A-Za-z0-9_-]+(\\.[A-Za-z0-9_-]+)*$"}
+      }
+    },
+    "cli": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["argv", "prompt_via", "output", "served_model", "env", "version_argv", "failures"],
+      "properties": {
+        "argv": {"type": "array", "minItems": 1, "maxItems": 64, "items": {"$ref": "#/$defs/argument"}},
+        "prompt_via": {"enum": ["file", "stdin"]},
+        "output": {"$ref": "#/$defs/extractor"},
+        "served_model": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/extractor"}]},
+        "env": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["set", "pass"],
+          "properties": {
+            "set": {
+              "type": "object",
+              "propertyNames": {"$ref": "#/$defs/envName"},
+              "additionalProperties": {"type": "string", "maxLength": 1000}
+            },
+            "pass": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/envName"}}
+          }
+        },
+        "version_argv": {"type": "array", "minItems": 1, "maxItems": 16, "items": {"$ref": "#/$defs/argument"}},
+        "failures": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["auth", "quota"],
+          "properties": {
+            "auth": {"type": "array", "items": {"type": "string", "minLength": 1}},
+            "quota": {"type": "array", "items": {"type": "string", "minLength": 1}}
+          }
+        }
+      }
+    },
+    "entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "transport", "model", "effort", "credential", "prefix", "cap", "enabled"],
+      "properties": {
+        "name": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,31}$"},
+        "transport": {"enum": ["claude", "pi", "cli"]},
+        "model": {"oneOf": [{"type": "null"}, {"type": "string", "minLength": 1, "maxLength": 128}]},
+        "effort": {"oneOf": [{"type": "null"}, {"enum": ["low", "medium", "high", "xhigh", "max"]}]},
+        "credential": {
+          "oneOf": [
+            {"const": "cli-login"},
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["file", "env"],
+              "properties": {
+                "file": {"type": "string", "minLength": 1, "maxLength": 1000},
+                "env": {"$ref": "#/$defs/envName"}
+              }
+            }
+          ]
+        },
+        "prefix": {"type": "string", "pattern": "^[A-Z]$"},
+        "cap": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "timeout_minutes": {"type": "integer", "minimum": 1, "maximum": 60},
+            "budget_usd": {"type": "number", "minimum": 0.5, "maximum": 50}
+          }
+        },
+        "enabled": {"type": "boolean"},
+        "cli": {"$ref": "#/$defs/cli"}
+      }
+    }
+  }
+}

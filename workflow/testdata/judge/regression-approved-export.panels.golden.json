@@ -1,0 +1,60 @@
+{
+  "version": "1.0.0",
+  "panels": [
+    {
+      "id": "review-panel",
+      "stage": "review",
+      "status": "succeeded",
+      "overlap_threshold": 2,
+      "context_bytes": 453,
+      "providers": [
+        {
+          "transport": "claude",
+          "model": null,
+          "effort": "high",
+          "status": "ok",
+          "cost_usd": 0.021,
+          "context_bytes": 453,
+          "finding_ids": [
+            "f1"
+          ],
+          "error": null
+        },
+        {
+          "transport": "pi",
+          "model": "openai-codex/gpt-6-sol",
+          "effort": null,
+          "status": "ok",
+          "cost_usd": 0.0047,
+          "context_bytes": 453,
+          "finding_ids": [
+            "f1"
+          ],
+          "error": null
+        }
+      ],
+      "findings": [
+        {
+          "id": "f1",
+          "severity": "P1",
+          "file": "ui.txt",
+          "line": 1,
+          "title": "Content changed without a test",
+          "detail": "ui.txt changed",
+          "providers_raised": [
+            "claude",
+            "openai-codex/gpt-6-sol"
+          ],
+          "accepted": true,
+          "unanchored": false
+        }
+      ],
+      "started_at": "<TIME>",
+      "ended_at": "<TIME>",
+      "budget_usd": 5,
+      "error": null,
+      "delta_from": null,
+      "context_truncated": null
+    }
+  ]
+}

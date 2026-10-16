@@ -1,0 +1,36 @@
+{
+  "version": "2.11.0",
+  "name": "Judged review panel example",
+  "branch_prefix": "feature/judged-panel",
+  "prd": "docs/PRD_EXAMPLE.md",
+  "policy": "policy.json",
+  "workers": [
+    {
+      "node_id": "engine",
+      "task": "engine-task.md",
+      "lane_review": {
+        "reviewers": [
+          {"transport": "pi", "model": "openai-codex/gpt-6.1-sol"}
+        ]
+      }
+    },
+    {
+      "node_id": "viewer",
+      "task": "viewer-task.md"
+    }
+  ],
+  "reviewers": [
+    {"reviewer_id": "general", "prompt": "builtin:general"},
+    {"reviewer_id": "coverage", "prompt": "builtin:coverage"}
+  ],
+  "panels": [
+    {
+      "id": "review",
+      "stage": "review",
+      "report_only": false,
+      "seats": ["claude", "gpt", "muse", "argon"],
+      "requirements": ["features/example/decisions.md"],
+      "judge": {"timeout_minutes": 30, "budget_usd": 15}
+    }
+  ]
+}
