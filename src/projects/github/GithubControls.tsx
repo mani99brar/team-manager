@@ -1,22 +1,25 @@
 /**
  * The GitHub actions' dialog and the Controls menu's GitHub group (docs/PRD_RUN_TEAMS.md 4.4 "Controls menu" and 4.5
  * "Dialogs"). The dialog reuses the `ControlDialog` shell's behaviour: a native modal `<dialog>` (focus trapped, Escape and
- * Cancel close it without sending, the opener gets focus back; while the action is being sent nothing closes it), one
- * `request_id` per dialog open (kept across a retry, so the server's dedup answers a repeat with the first record) and the actions'
- * `state_token` from when it opened, so a moved branch answers 409 and the dialog says so. Its parts, in order: title,
+ * Cancel close it without sending, the opener gets focus back; while the action is being sent nothing closes it, and a native
+ * close the page could not stop closes the store's dialog too), the `request_id` rule of `nextAttempt` (the same id only for a
+ * retry after a lost answer with unchanged fields, so the server's dedup answers it with the first record; a new one after an
+ * edit or any answered failure) and the actions' `state_token` from when it opened, so a moved branch answers 409 and the
+ * dialog says so. Its parts, in order: title,
  * visibility block, what it does (the server's `effect` and one facts line), what it does not do, what becomes visible (with
- * the commit preview for a push, every author in full), the fields, the exact command, the typed `owner/name` when asked
- * for, and the confirm button. The title and visibility block stay pinned at the top and the typed name, the outcome and the
- * buttons at the bottom, with one scrolling body between them, so the confirm is never below the fold. The exact command shows
- * the typed values filled in. The branch facts come from a fresh run GitHub read taken when the dialog opens.
+ * the commit preview for a push: every unpublished commit with its author, never folded), the fields, the exact command, the
+ * typed `owner/name` when asked for, and the confirm button. The title and visibility block stay at the top and the typed
+ * name, the outcome and the buttons at the bottom, with one scrolling body between them; on a viewport too short for that, the
+ * whole dialog scrolls instead, so the footer is never trapped below the fold. The exact command shows the typed values
+ * filled in (the body through a heredoc). The branch facts come from a fresh run GitHub read taken when the dialog opens.
  */
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import { fetchRunGithub, postGithubAction, type GithubActionId, type RunGithub, type RunScope } from '../api.ts'
 import { ControlError, readToken } from '../controls/client.ts'
-import { describeFailure, newRequestId } from '../controls/model.ts'
+import { attemptFingerprint, describeFailure, heldAfterFailure, nextAttempt, type RequestAttempt } from '../controls/model.ts'
 import { setMenu, unpairBrowser } from '../controls/store.ts'
 import {
-  actionNote, BODY_FILE_NOTE, bodyCounter, buildGithubParams, COMMAND_NOTE, confirmLabel, dialogTitle, factsLine, fieldsProblem, filledCommand, FILL_FIELDS_FIRST, hasReviewer,
+  actionNote, BODY_FILE_NOTE, bodyCounter, buildGithubParams, COMMAND_NOTE, confirmLabel, dialogTitle, factsLine, fieldsProblem, filledCommand, hasReviewer,
   initialDialogValues, outcomeSentence, recordShown, unknownLine, PR_BODY_CAPTION, previewHeading, STALE_SENTENCE, toggleReviewer, typedConfirmation, typedMatches, visibilityBlock, type DialogValues,
 } from './actions.ts'
 import { parseReviewers, short, unpublishedCount } from './model.ts'
@@ -92,9 +95,15 @@ function DialogShell({ scope, id }: { scope: RunScope; id: GithubActionId }) {
       event.preventDefault()
       if (!isSending(dialog)) closeGithubDialog(scopeRef.current)
     }
+    // A close the cancel event could not stop (a non-cancelable cancel under the close-watcher rules, a second Escape or a back
+    // gesture) still closes the native dialog: the store's dialog closes with it, so the action can be opened again. The close
+    // event is queued, so one left over from a remount's own close() (React's strict effects) finds the dialog open again.
+    const onNativeClose = () => { if (!dialog.open) closeGithubDialog(scopeRef.current) }
     dialog.addEventListener('cancel', onCancel)
+    dialog.addEventListener('close', onNativeClose)
     return () => {
       dialog.removeEventListener('cancel', onCancel)
+      dialog.removeEventListener('close', onNativeClose)
       if (dialog.open) dialog.close()
       const target = opener?.isConnected ? opener : document.querySelector<HTMLElement>(FALLBACK_FOCUS)
       target?.focus()
@@ -116,8 +125,6 @@ function DialogShell({ scope, id }: { scope: RunScope; id: GithubActionId }) {
 }
 
 const EMPTY_VALUES: DialogValues = { title: '', body: '', reviewers: '', typed: '' }
-/** The commit preview lists five commits, then "Show all {n}". */
-const PREVIEW_FOLD = 5
 
 function DialogBody({ scope, id, onClose }: { scope: RunScope; id: GithubActionId; onClose: () => void }) {
   const state = useGithubActionsState(scope)
@@ -125,15 +132,14 @@ function DialogBody({ scope, id, onClose }: { scope: RunScope; id: GithubActionI
   const [opened] = useState(() => state.data)
   const action = opened?.actions.find(item => item.id === id)
   const [values, setValues] = useState<DialogValues>(() => (action ? initialDialogValues(action) : EMPTY_VALUES))
-  // One request_id for the life of this dialog (it is remounted per open): a retry after a network failure carries the same
-  // id, so a POST that did reach the controller answers with its first record instead of running the action twice.
-  const [requestId] = useState(newRequestId)
+  // The last attempt, held only while its answer was lost: a retry with unchanged fields carries the same request_id, so a
+  // POST that did reach the controller answers with its first record; an edit or an answered failure starts a new one.
+  const held = useRef<RequestAttempt | null>(null)
   const [read, setRead] = useState<RunGithub | 'loading' | 'failed'>('loading')
   const [sending, setSending] = useState(false)
   const [alert, setAlert] = useState<string | null>(null)
   const [stale, setStale] = useState(false)
   const [recordId, setRecordId] = useState<string | null>(null)
-  const [allCommits, setAllCommits] = useState(false)
   const inFlight = useRef(false)
   const fieldId = useId()
   const { projectId, workflowId, runId } = scope
@@ -169,7 +175,6 @@ function DialogBody({ scope, id, onClose }: { scope: RunScope; id: GithubActionI
   const reviewersSpec = action.params.find(item => item.name === 'reviewers')
   const command = filledCommand(action, values)
   const unpublished = facts?.branch.unpublished ?? []
-  const shownCommits = allCommits ? unpublished : unpublished.slice(0, PREVIEW_FOLD)
 
   const confirm = async () => {
     if (inFlight.current || !canConfirm) return
@@ -178,11 +183,16 @@ function DialogBody({ scope, id, onClose }: { scope: RunScope; id: GithubActionI
     inFlight.current = true
     setSending(true)
     setAlert(null)
+    const params = buildGithubParams(action, values)
+    const attempt = nextAttempt(held.current, attemptFingerprint(opened.state_token, params))
+    held.current = attempt
     try {
-      const answer = await postGithubAction(scope, id, { request_id: requestId, state_token: opened.state_token, params: buildGithubParams(action, values) }, token)
+      const answer = await postGithubAction(scope, id, { request_id: attempt.id, state_token: opened.state_token, params }, token)
+      held.current = null
       adoptGithubRecord(scope, answer)
       setRecordId(answer.record_id)
     } catch (error) {
+      held.current = heldAfterFailure(attempt, error)
       if (error instanceof ControlError && error.code === 'STATE_CHANGED') {
         setStale(true)
         setAlert(STALE_SENTENCE)
@@ -226,8 +236,9 @@ function DialogBody({ scope, id, onClose }: { scope: RunScope; id: GithubActionI
           {id === 'push_branch' && facts !== null && commits !== null && (
             <div className="gh-preview" data-testid="gh-commit-preview">
               <h4 className="gh-dialog-h">{previewHeading(visibility, commits)}</h4>
-              <ol className="gh-commits" id={`${fieldId}-commits`}>
-                {shownCommits.map(commit => (
+              {/* Every unpublished commit with its author: a long list scrolls inside its own box (reachable by keyboard). */}
+              <ol className="gh-commits" data-testid="gh-commit-list" tabIndex={0} aria-label="Unpublished commits and their authors">
+                {unpublished.map(commit => (
                   <li key={commit.sha} className="gh-commit" data-testid="gh-commit-row">
                     <code className="gh-sha">{short(commit.sha)}</code>
                     <span className="gh-commit-subject">{commit.subject}</span>
@@ -236,12 +247,7 @@ function DialogBody({ scope, id, onClose }: { scope: RunScope; id: GithubActionI
                   </li>
                 ))}
               </ol>
-              {unpublished.length > PREVIEW_FOLD && (
-                <button type="button" className="button button-small gh-preview-toggle" data-testid="gh-commit-fold" aria-expanded={allCommits} aria-controls={`${fieldId}-commits`} onClick={() => setAllCommits(value => !value)}>
-                  {allCommits ? 'Show fewer' : `Show all ${unpublished.length}`}
-                </button>
-              )}
-              {facts.branch.unpublished_more > 0 && <p className="ctl-note">and {facts.branch.unpublished_more} more not listed</p>}
+              {facts.branch.unpublished_more > 0 && <p className="ctl-note" data-testid="gh-commit-more">and {facts.branch.unpublished_more} more not listed</p>}
             </div>
           )}
         </div>
@@ -280,7 +286,7 @@ function DialogBody({ scope, id, onClose }: { scope: RunScope; id: GithubActionI
         <div className="ctl-cmd">
           <span className="ctl-cmd-h">The exact command</span>
           <code data-testid="gh-dialog-command">{command.text}</code>
-          <CopyButton text={command.copyable ? command.text : null} waiting={FILL_FIELDS_FIRST} accessibleName="Copy the exact command" testId="gh-dialog-command-copy" />
+          <CopyButton text={command.copyable ? command.text : null} waiting={command.waiting ?? undefined} accessibleName="Copy the exact command" testId="gh-dialog-command-copy" />
           {command.hasBody && <span className="ctl-hint" data-testid="gh-dialog-body-note">{BODY_FILE_NOTE}</span>}
           <span className="ctl-hint">{COMMAND_NOTE}</span>
         </div>

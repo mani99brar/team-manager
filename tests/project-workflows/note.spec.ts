@@ -209,3 +209,35 @@ test(`[scenario:note-control-undeliverable] A note recorded undeliverable says i
   await page.setViewportSize(PHONE)
   await expect.poll(() => page.evaluate('document.documentElement.scrollWidth') as Promise<number>).toBeLessThanOrEqual(PHONE.width)
 })
+
+test(`[regression:note-request-id-rule] The note dialog keeps its request_id only for a retry after a network failure with an unchanged note; an edited note is a new request (${phase})`, async ({ page }) => {
+  const mock = await installNoteMocks(page)
+  const isNotePost = (url: URL) => /\/api\/run-controls\/.*\/note$/.test(url.pathname)
+  const sent: string[] = []
+  page.on('request', request => { if (request.method() === 'POST' && isNotePost(new URL(request.url()))) sent.push((request.postDataJSON() as { request_id: string }).request_id) })
+  // The first two POSTs never reach the server (a lost answer); later ones do.
+  let dropped = 0
+  await page.route(isNotePost, async route => {
+    if (dropped < 2) { dropped += 1; await route.abort('connectionrefused'); return }
+    await route.fallback()
+  })
+  await open(page, teamPage)
+  await laneNote(page, 'ui').click()
+  await expectNoteDialog(page, 'ui')
+  const text = dialog(page).getByTestId('param-text')
+  await text.fill(NOTE_TEXT)
+  await dialog(page).getByTestId('dialog-confirm').click()
+  await expect(dialog(page).getByTestId('dialog-alert')).toBeVisible()
+  await expect(dialog(page).getByTestId('dialog-confirm')).toBeEnabled()
+  await dialog(page).getByTestId('dialog-confirm').click()
+  await expect.poll(() => sent.length).toBe(2)
+  await expect(dialog(page).getByTestId('dialog-confirm')).toBeEnabled()
+  expect(sent[1]).toBe(sent[0])
+  await text.fill(`${NOTE_TEXT} Also keep the 44 px targets.`)
+  await dialog(page).getByTestId('dialog-confirm').click()
+  await expect(dialog(page).getByTestId('dialog-outcome')).toHaveAttribute('data-state', 'succeeded')
+  expect(sent).toHaveLength(3)
+  expect(sent[2]).not.toBe(sent[0])
+  expect(mock.posts).toHaveLength(1)
+  expect(mock.posts[0]!.request_id).toBe(sent[2])
+})

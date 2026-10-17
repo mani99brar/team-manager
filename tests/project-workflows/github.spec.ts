@@ -488,7 +488,7 @@ test(`[scenario:github-push-private-dialog] Pushing to a private repository: no 
   await page.mouse.up()
   await expect(box).toBeVisible()
   await attach(page, testInfo, 'github-push-private-dialog')
-  // G8: a retryable failure (BUSY) keeps the dialog's request_id, so the server's dedup can answer the retry with the first record.
+  // F5.2/F5.3: an answered failure (BUSY: nothing ran) makes the next Confirm a new request with a new request_id.
   mock.failNext('github:push_branch', 409, 'BUSY', 'Another control of this run is running.')
   await confirm(page).click()
   await expect(box.getByTestId('gh-dialog-alert')).toContainText('Another control of this run is running')
@@ -498,7 +498,8 @@ test(`[scenario:github-push-private-dialog] Pushing to a private repository: no 
   expect(mock.githubPosts).toHaveLength(2)
   expect(mock.githubPosts[0]!.body.params).toEqual({})
   expect(mock.githubPosts[0]!.body.request_id).toMatch(UUID)
-  expect(mock.githubPosts[1]!.body.request_id).toBe(mock.githubPosts[0]!.body.request_id)
+  expect(mock.githubPosts[1]!.body.request_id).toMatch(UUID)
+  expect(mock.githubPosts[1]!.body.request_id).not.toBe(mock.githubPosts[0]!.body.request_id)
   await phone(page)
 })
 
@@ -518,17 +519,27 @@ test(`[scenario:github-open-pr-dialog] Opening a draft pull request: the title a
   await expect(box).toContainText('Local paths are already removed. It includes the run\'s recorded Claude spend when there is one; delete that line if you prefer.')
   // G1: the title opens on screen (focus on a field never scrolls it away), with the confirm pinned at the bottom.
   await expectDialogFits(page)
-  // G3: the exact command shows the typed title as one shell word and keeps only <body>, which the controller reads from a file.
+  // G3/F6.1: the exact command shows the typed title as one shell word and the body written by a quoted heredoc to the file
+  // --body-file names, so no <body> placeholder is left in what Copy writes.
   const command = box.getByTestId('gh-dialog-command')
   await expect(command).toContainText(`'--title=${action.defaults.title}'`)
   await expect(command).not.toContainText('<title>')
-  await expect(command).toContainText('--body-file <body>')
-  await expect(box.getByTestId('gh-dialog-body-note')).toHaveText('The controller reads the body from a temporary file, shown here as <body>.')
+  await expect(command).not.toContainText('<body>')
+  await expect(command).toContainText(`body_file=$(mktemp) && cat > "$body_file" <<'MD_MANAGER_SUMMARY'`)
+  await expect(command).toContainText('--body-file "$body_file" --by operator')
+  await expect(box.getByTestId('gh-dialog-body-note')).toHaveText('The command writes the body to a temporary file first (the heredoc), since the controller reads it from a file.')
   await expect(box.getByTestId('gh-dialog-command-copy')).toBeEnabled()
   await box.getByTestId('gh-param-title').fill('')
   await expect(command).toContainText('--title=<title>')
   await expect(box.getByTestId('gh-dialog-command-copy')).toBeDisabled()
-  await expect(box.getByTestId('gh-dialog-command-copy-status')).toHaveText('Fill the fields first')
+  await expect(box.getByTestId('gh-dialog-command-copy-status')).toHaveText('Fill the fields first. Write a title.')
+  await box.getByTestId('gh-param-title').fill(action.defaults.title!)
+  await box.getByTestId('gh-param-body').fill('')
+  await expect(command).toContainText('--body-file <body>')
+  await expect(box.getByTestId('gh-dialog-command-copy')).toBeDisabled()
+  await expect(box.getByTestId('gh-dialog-command-copy-status')).toHaveText('Fill the fields first. Write the body.')
+  await box.getByTestId('gh-param-body').fill(action.defaults.body!)
+  await box.getByTestId('gh-param-title').fill('')
   // G2: parent renders (an actions poll re-renders the run page and builds a new scope) never close, reopen or refetch the
   // dialog: the focus and the typed title stay, and no second GitHub read is made.
   await box.evaluate(element => { (globalThis as unknown as { ghCloses: number }).ghCloses = 0; element.addEventListener('close', () => { (globalThis as unknown as { ghCloses: number }).ghCloses += 1 }) })
@@ -738,6 +749,103 @@ test(`[scenario:github-action-unknown] A push whose outcome is unknown (exit 3, 
   // A plain backdrop click (pressed and released on it) closes the dialog once nothing is being sent.
   await page.mouse.click(2, 2)
   await expect(box).toHaveCount(0)
+})
+
+// ---- Final review fixes (F5.1-F5.4, F7.1) ------------------------------------------------------------------------------
+
+const GITHUB_POST = (action: string) => (url: URL) => new RegExp(`/api/run-controls/.*/github/${action}$`).test(url.pathname)
+
+test(`[regression:github-request-id-rule] The dialog keeps its request_id only for a retry after a network failure with unchanged fields; an edit or a refused spawn starts a new one (${phase})`, async ({ page }) => {
+  serve(GITHUB_SITUATIONS['in-review'], GITHUB_ACTIONS.requestReviewers)
+  const mock = await paired(page)
+  // The first two POSTs never reach the mock (a lost answer), every later one does.
+  let dropped = 0
+  await page.route(GITHUB_POST('request_reviewers'), async route => {
+    if (dropped < 2) { dropped += 1; await route.abort('connectionrefused'); return }
+    await route.fallback()
+  })
+  const sent: string[] = []
+  page.on('request', request => { if (GITHUB_POST('request_reviewers')(new URL(request.url())) && request.method() === 'POST') sent.push((request.postDataJSON() as { request_id: string }).request_id) })
+  await openDialogFromPanel(page, 'request_reviewers')
+  const box = dialog(page)
+  const reviewers = box.getByTestId('gh-param-reviewers')
+  await reviewers.fill('jaybuidl')
+  await confirm(page).click()
+  await expect(box.getByTestId('gh-dialog-alert')).toContainText('could not reach its server')
+  // Unchanged fields: the retry carries the same request_id.
+  await confirm(page).click()
+  await expect.poll(() => sent.length).toBe(2)
+  await expect(confirm(page)).toBeEnabled()
+  expect(sent[1]).toBe(sent[0])
+  // An edit after the lost answer: a new request_id, so the server cannot answer it with the first request's record.
+  mock.failNext('github:request_reviewers', 500, 'SPAWN_FAILED', 'The controller could not be started.')
+  await reviewers.fill('jaybuidl\nkleros/vea-maintainers')
+  await confirm(page).click()
+  await expect(box.getByTestId('gh-dialog-alert')).toContainText('The controller could not be started.')
+  expect(sent[2]).toMatch(UUID)
+  expect(sent[2]).not.toBe(sent[0])
+  // A refused spawn was answered (and recorded under its id): the retry, fields unchanged, is a new request again.
+  await confirm(page).click()
+  await expect(box.getByTestId('gh-dialog-outcome')).toHaveAttribute('data-state', 'succeeded')
+  expect(sent).toHaveLength(4)
+  expect(sent[3]).toMatch(UUID)
+  expect(sent[3]).not.toBe(sent[2])
+  expect(mock.githubPosts.at(-1)!.body.params).toEqual({ reviewers: ['jaybuidl', 'kleros/vea-maintainers'] })
+})
+
+test(`[regression:github-push-every-commit] The push dialog lists every unpublished commit with its author, never folded, then the count not listed (${phase})`, async ({ page }) => {
+  const base = GITHUB_SITUATIONS['not-pushed']
+  const many = Array.from({ length: 12 }, (_, index) => ({
+    sha: index.toString(16).padStart(2, '0').repeat(20), subject: `commit ${index + 1}`, author: `Author ${index + 1} <a${index + 1}@example.org>`, committed_at: '2026-10-16T09:00:00Z',
+  }))
+  serve({ ...base, branch: { ...base.branch, unpublished: many, unpublished_more: 4 } }, GITHUB_ACTIONS.pushPublic)
+  await paired(page)
+  await openDialogFromPanel(page, 'push_branch')
+  const preview = dialog(page).getByTestId('gh-commit-preview')
+  await expect(preview.getByTestId('gh-commit-row')).toHaveCount(12)
+  await expect(preview.getByTestId('gh-commit-author')).toHaveText(many.map(commit => commit.author))
+  await expect(preview.getByRole('button')).toHaveCount(0)
+  await expect(preview.getByTestId('gh-commit-more')).toHaveText('and 4 more not listed')
+  // The last author is reachable inside the list's own box.
+  await preview.getByTestId('gh-commit-author').last().scrollIntoViewIfNeeded()
+  await expect(preview.getByTestId('gh-commit-author').last()).toBeInViewport()
+})
+
+test(`[regression:github-dialog-short-viewport] On a short viewport the whole dialog scrolls: Cancel and the confirm are reachable by the wheel and the keyboard (${phase})`, async ({ page }) => {
+  serve(GITHUB_SITUATIONS['not-pushed'], GITHUB_ACTIONS.pushPublic)
+  await paired(page)
+  await page.setViewportSize({ width: 568, height: 320 })
+  await openDialogFromPanel(page, 'push_branch')
+  const box = dialog(page)
+  const cancel = box.getByTestId('gh-dialog-cancel')
+  // The wheel over the header (not the body) scrolls the dialog down to its footer.
+  const title = (await box.getByTestId('gh-dialog-title').boundingBox())!
+  await page.mouse.move(title.x + 10, title.y + 5)
+  for (let step = 0; step < 10; step += 1) await page.mouse.wheel(0, 200)
+  await expect(cancel).toBeInViewport({ ratio: 1 })
+  await expect(confirm(page)).toBeInViewport({ ratio: 1 })
+  // The keyboard reaches the typed field, Cancel and the confirm, each shown when focused; back up to the title too.
+  await box.getByTestId('gh-typed-input').focus()
+  await page.keyboard.type('kleros/vea')
+  await page.keyboard.press('Tab')
+  await expect(cancel).toBeFocused()
+  await page.keyboard.press('Tab')
+  await expect(confirm(page)).toBeFocused()
+  await expect(confirm(page)).toBeEnabled()
+  await expect(confirm(page)).toBeInViewport({ ratio: 1 })
+  for (let step = 0; step < 10; step += 1) await page.mouse.wheel(0, -200)
+  await expect(box.getByTestId('gh-dialog-title')).toBeInViewport({ ratio: 1 })
+  expect(await noSideways(page)).toBe(true)
+})
+
+test(`[regression:github-dialog-native-close] A native close the cancel event could not stop closes the store's dialog too, so the same action opens again (${phase})`, async ({ page }) => {
+  serve(GITHUB_SITUATIONS['not-pushed'], GITHUB_ACTIONS.pushPublic)
+  await paired(page)
+  await openDialogFromPanel(page, 'push_branch')
+  await dialog(page).evaluate(element => (element as unknown as { close: () => void }).close())
+  await expect(dialog(page)).toHaveCount(0)
+  await openDialogFromPanel(page, 'push_branch')
+  await expect(dialog(page)).toBeVisible()
 })
 
 // ---- Candidate phase: the real server's git and GitHub reads of the publish project ------------------------------------

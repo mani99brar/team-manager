@@ -4,6 +4,7 @@
  * words, the commands card's shell quoting and its rule that no placeholder reaches a copyable command, the run summary input
  * holding no absolute path, and the actions' panel states, dialog copy, typed confirmation and request params.
  */
+import { spawnSync } from 'node:child_process'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import type { RunGithub } from '../../contracts/projects/github.ts'
@@ -314,19 +315,21 @@ test('outcome: a timed-out publish (exit 3, an `Unknown:` line) says its outcome
 
 // ---- Fixes after the run-teams review (G3-G22) ------------------------------------------------------------------------
 
-test('G3 exact command: the typed title and reviewers filled in as one shell word each, <body> kept, Copy off until complete', () => {
+test('G3 exact command: the typed title and reviewers filled in as one shell word each, the body through a heredoc, Copy off until complete', () => {
   const open = GITHUB_ACTIONS.openPr.actions.find(action => action.id === 'open_pr')!
   const values = initialDialogValues(open)
   const filled = filledCommand(open, { ...values, title: "relayer: Bob's fix" })
   assert.match(filled.text, / '--title=relayer: Bob'\\''s fix' --body-file /)
   assert.doesNotMatch(filled.text, /<title>/)
-  assert.match(filled.text, /--body-file <body>/)
+  assert.match(filled.text, /--body-file "\$body_file" --by operator$/)
   assert.equal(filled.hasBody, true)
   assert.equal(filled.copyable, true)
+  assert.equal(filled.waiting, null)
   // An empty title keeps the placeholder and Copy off.
   const blank = filledCommand(open, { ...values, title: '' })
   assert.match(blank.text, /--title=<title>/)
   assert.equal(blank.copyable, false)
+  assert.equal(blank.waiting, 'Fill the fields first. Write a title.')
   const reviewers = GITHUB_ACTIONS.requestReviewers.actions.find(action => action.id === 'request_reviewers')!
   const none = filledCommand(reviewers, initialDialogValues(reviewers))
   assert.match(none.text, /--add <reviewers>/)
@@ -337,7 +340,7 @@ test('G3 exact command: the typed title and reviewers filled in as one shell wor
   assert.equal(named.hasBody, false)
   // A command with no placeholder (the push) is copyable as it is.
   const push = GITHUB_ACTIONS.pushPublic.actions[0]!
-  assert.deepEqual(filledCommand(push, initialDialogValues(push)), { text: push.command, copyable: true, hasBody: false })
+  assert.deepEqual(filledCommand(push, initialDialogValues(push)), { text: push.command, copyable: true, hasBody: false, waiting: null })
 })
 
 test('G4 a failed background refresh: the banner line and the actions panel line say what is shown is from an earlier read', () => {
@@ -487,4 +490,53 @@ test('G27 the unknown-outcome fixture record reads unknown in the warn tone', ()
   assert.deepEqual(recordShown(listed), { tone: 'warn', word: 'unknown' })
   assert.deepEqual(recordShown(UNKNOWN_PUSH_RECORD), { tone: 'warn', word: 'unknown' })
   assert.equal(outcomeSentence(UNKNOWN_PUSH_RECORD), UNKNOWN_SENTENCE)
+})
+
+// ---- Final review fixes (F6.1, F6.2) -----------------------------------------------------------------------------------
+
+/** Runs a copied command's heredoc prefix in bash, with the controller swapped for a printer of its argv and the body file. */
+function runCopied(text: string): { argv: string[]; body: string } {
+  const script = `printargs() { for a in "$@"; do printf '%s\\0' "$a"; done; printf 'BODY\\0'; cat "$body_file"; }\nPY=printargs\n${text.replace('$PY -m workflow', '$PY')}`
+  const result = spawnSync('bash', ['-c', script], { encoding: 'utf8' })
+  assert.equal(result.status, 0, result.stderr)
+  const at = result.stdout.indexOf('BODY\0')
+  return { argv: result.stdout.slice(0, at).split('\0').filter(word => word !== ''), body: result.stdout.slice(at + 5) }
+}
+
+test('F6.2 filledCommand inserts every value literally: $&, $\' and $$ in the title or the body are not replacement patterns', () => {
+  const open = GITHUB_ACTIONS.openPr.actions.find(action => action.id === 'open_pr')!
+  const title = 'Cost $$5 and $& and $\' and $`'
+  const body = 'Line with $& and $\'\nand <title> kept as text'
+  const filled = filledCommand(open, { ...initialDialogValues(open), title, body })
+  assert.equal(filled.copyable, true, filled.waiting ?? '')
+  assert.ok(filled.text.includes(shellQuote(`--title=${title}`)), filled.text)
+  const ran = runCopied(filled.text)
+  assert.ok(ran.argv.includes(`--title=${title}`), ran.argv.join(' | '))
+  assert.equal(ran.body, `${body}\n`)
+  // A reviewer value goes in literally too (logins hold no $, but the replacer is the same).
+  const reviewers = GITHUB_ACTIONS.requestReviewers.actions.find(action => action.id === 'request_reviewers')!
+  assert.match(filledCommand(reviewers, { ...initialDialogValues(reviewers), reviewers: 'a-b\nkleros/x' }).text, /--add a-b,kleros\/x --by operator$/)
+})
+
+test('F6.1 the open_pr command is never copyable with <body>: the body goes in through a quoted heredoc and the pasted command runs with it', () => {
+  const open = GITHUB_ACTIONS.openPr.actions.find(action => action.id === 'open_pr')!
+  const values = { ...initialDialogValues(open), title: 'Widgets: done', body: 'First line\n$(whoami) `id` stays text\nMD_MANAGER_SUMMARY\n' }
+  const filled = filledCommand(open, values)
+  assert.doesNotMatch(filled.text, /<body>/)
+  assert.equal(filled.copyable, true)
+  assert.match(filled.text, /^body_file=\$\(mktemp\) && cat > "\$body_file" <<'MD_MANAGER_SUMMARY_2'\n/)
+  const ran = runCopied(filled.text)
+  assert.equal(ran.body, values.body)
+  assert.deepEqual(ran.argv.slice(ran.argv.indexOf('--title=Widgets: done')), ['--title=Widgets: done', '--body-file', ran.argv[ran.argv.indexOf('--body-file') + 1]!, '--by', 'operator'])
+  // An empty body keeps <body>: the command is not copyable and says why.
+  const empty = filledCommand(open, { ...values, body: '' })
+  assert.match(empty.text, /--body-file <body>/)
+  assert.equal(empty.copyable, false)
+  assert.equal(empty.waiting, 'Fill the fields first. Write the body.')
+  // Any placeholder left in the server's command (here <base>, a default branch not read) keeps Copy off and is named.
+  const unread = filledCommand({ ...open, command: open.command.replace('--base dev', '--base <base>') }, values)
+  assert.equal(unread.copyable, false)
+  assert.equal(unread.waiting, 'The command still holds <base>, so it cannot be copied yet.')
+  // A title that merely looks like a placeholder is the operator's text, not a placeholder.
+  assert.equal(filledCommand(open, { ...values, title: 'Fix <div> rendering' }).copyable, true)
 })

@@ -10,7 +10,7 @@
  */
 import type { GithubAction, GithubActionId, GithubActionRecord, GithubParams, RunGithub, RunGithubActions } from '../../../contracts/projects/github.ts'
 import type { Tone } from '../tone.ts'
-import { parseReviewers, plural, shellQuote, short, unpublishedCount } from './model.ts'
+import { heredocDelimiter, parseReviewers, plural, shellQuote, short, unpublishedCount } from './model.ts'
 
 // ---- Panel (4.4) -------------------------------------------------------------------------------------------------------
 
@@ -202,27 +202,46 @@ export function bodyCounter(body: string, max: number): string {
   return `${body.length} of ${max} characters${bytes !== body.length ? ` · ${bytes} bytes` : ''}`
 }
 
-export const BODY_FILE_NOTE = 'The controller reads the body from a temporary file, shown here as <body>.'
+export const BODY_FILE_NOTE = 'The command writes the body to a temporary file first (the heredoc), since the controller reads it from a file.'
 export const FILL_FIELDS_FIRST = 'Fill the fields first'
+
+/** Why Copy is off while the command still holds a placeholder: each one named, as pasted into bash it is a redirection. */
+export const placeholderReason = (placeholders: string[]): string => `The command still holds ${placeholders.join(', ')}, so it cannot be copied yet.`
 
 /**
  * "The exact command" with the typed values filled in, as the server words the record's command (`githubDisplay`): the title as
- * one shell word `--title=…` and the reviewers as one comma-joined word. `<body>` stays, since the controller reads the body
- * from a temporary file. `copyable` is false while a field is incomplete or any other `<…>` placeholder remains, so no
- * placeholder reaches the clipboard (pasted into bash, `<title>` is a redirection).
+ * one shell word `--title=…` and the reviewers as one comma-joined word. The body (open_pr) is written to a temporary file by a
+ * quoted heredoc first, and `--body-file` names that file, so the pasted command opens the pull request with the real body.
+ * Every value goes in through a replacer function, so a `$&`, `$'` or `$$` in it is inserted literally. `copyable` is false
+ * while a field is incomplete or any `<…>` placeholder remains (pasted into bash, `<title>` is a redirection); `waiting` says
+ * why, and is null when it is copyable.
  */
-export function filledCommand(action: GithubAction, values: DialogValues): { text: string; copyable: boolean; hasBody: boolean } {
+export function filledCommand(action: GithubAction, values: DialogValues): { text: string; copyable: boolean; hasBody: boolean; waiting: string | null } {
   let text = action.command
+  // The placeholders the server's command holds; each one filled below is crossed off. The typed values are never scanned, so
+  // a title like "Fix <div> rendering" does not read as a placeholder.
+  const left = new Set(action.command.match(/<[^<>\s]+>/g) ?? [])
+  const fill = (placeholder: string, from: string, word: string) => {
+    if (!text.includes(from)) return
+    text = text.replace(from, () => word)
+    left.delete(placeholder)
+  }
   const problem = fieldsProblem(action, values)
-  const title = spec(action, 'title')
-  if (title && values.title.trim() !== '') text = text.replace('--title=<title>', shellQuote(`--title=${values.title}`))
+  if (spec(action, 'title') && values.title.trim() !== '') fill('<title>', '--title=<title>', shellQuote(`--title=${values.title}`))
   const reviewers = spec(action, 'reviewers')
   if (reviewers && reviewers.kind === 'list') {
     const parsed = parseReviewers(values.reviewers, reviewers.max_items)
-    if (parsed.problem === null && parsed.items.length > 0) text = text.replace('<reviewers>', shellQuote(parsed.items.join(',')))
+    if (parsed.problem === null && parsed.items.length > 0) fill('<reviewers>', '<reviewers>', shellQuote(parsed.items.join(',')))
   }
-  const placeholders = (text.match(/<[^<>\s]+>/g) ?? []).filter(word => word !== '<body>')
-  return { text, copyable: problem === null && placeholders.length === 0, hasBody: text.includes('<body>') }
+  const hasBody = action.command.includes('--body-file <body>')
+  if (spec(action, 'body') && hasBody && values.body.trim() !== '') {
+    fill('<body>', '--body-file <body>', '--body-file "$body_file"')
+    const delimiter = heredocDelimiter(values.body)
+    const content = values.body.endsWith('\n') ? values.body : `${values.body}\n`
+    text = `body_file=$(mktemp) && cat > "$body_file" <<'${delimiter}'\n${content}${delimiter}\n${text}`
+  }
+  const copyable = problem === null && left.size === 0
+  return { text, copyable, hasBody, waiting: copyable ? null : problem !== null ? `${FILL_FIELDS_FIRST}. ${problem}` : placeholderReason([...left]) }
 }
 
 /** The request's `params`: only what the action's specs name. */

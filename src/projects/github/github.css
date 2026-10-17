@@ -111,17 +111,21 @@
 .gh-dialog-part { display: grid; gap: 2px; margin: 6px 0; }
 .gh-dialog .gh-dialog-h { margin: 0; font-size: var(--type-floor); font-weight: 700; color: var(--muted); }
 .gh-preview { display: grid; gap: 4px; margin-top: 6px; }
-.gh-preview-toggle { justify-self: start; }
+/* The push preview lists every unpublished commit; a long list scrolls inside its own box (focusable, so the keyboard reaches it). */
+.gh-preview .gh-commits { max-height: min(16rem, 40dvh); overflow-y: auto; }
+.gh-preview .gh-commits:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; border-radius: 4px; }
 
 /* The dialog fits the viewport as three rows: the title and visibility block pinned on top, one body that scrolls, and a footer
-   pinned at the bottom with the typed name, the outcome or alert, and Cancel and the confirm. Nothing the operator confirms is
-   ever below the fold or in a nested scroll. */
-.ctl-dialog.gh-dialog { padding: 0; overflow: hidden; }
+   pinned at the bottom with the typed name, the outcome or alert, and Cancel and the confirm. When the viewport is too short
+   for the three rows, the whole dialog scrolls instead: nothing the operator confirms is ever out of reach. */
+.ctl-dialog.gh-dialog { padding: 0; overflow-y: auto; overscroll-behavior: contain; }
 .ctl-dialog.gh-dialog[open] { display: flex; flex-direction: column; }
 .gh-dialog-head { flex: none; padding: 18px 18px 0; }
 .gh-dialog-head .gh-visibility { margin-bottom: 4px; }
-.gh-dialog-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 0 18px; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
-.gh-dialog-foot { flex: none; display: grid; gap: 8px; max-height: 50dvh; overflow-y: auto; padding: 10px 18px 14px; }
+/* The body shrinks to at most its floor (a few lines); below that the column overflows the dialog, which then scrolls as a
+   whole, so on a short or zoomed viewport the header, the body and the footer (Cancel and the confirm) all stay reachable. */
+.gh-dialog-body { flex: 1 1 auto; min-height: min(9rem, 30dvh); overflow-y: auto; padding: 0 18px; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+.gh-dialog-foot { flex: none; display: grid; gap: 8px; padding: 10px 18px 14px; }
 .gh-dialog-foot .ctl-actions { margin-top: 0; }
 .gh-dialog-foot .gh-outcome { margin: 0; }
 .gh-dialog-foot .gh-output { max-height: 120px; }
@@ -150,7 +154,6 @@
   .gh-dialog-head { padding: 14px 14px 0; }
   .gh-dialog-body { padding: 0 14px; }
   .gh-dialog-foot { padding: 10px 14px 14px; }
-  .gh-preview-toggle { min-height: 44px; }
 }
 
 @media (prefers-reduced-motion: no-preference) {

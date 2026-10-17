@@ -8,7 +8,7 @@ import { afterEach, describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { ControlError, controlPaths, postCleanPreview, postControl } from '../../src/projects/controls/client.ts'
 import {
-  answerCheck, askCheck, buildParams, canOpen, controlRows, currentCheck, describeFailure, dialogValid, headlineOf, initialValues, matchStep, newRequestId, NOTE_CONFIRM, NOTE_FIELD_HELPER,
+  answerCheck, answerLost, askCheck, attemptFingerprint, buildParams, heldAfterFailure, nextAttempt, canOpen, controlRows, currentCheck, describeFailure, dialogValid, headlineOf, initialValues, matchStep, newRequestId, NOTE_CONFIRM, NOTE_FIELD_HELPER,
   NOTE_FIELD_LABEL, NOTE_UNDELIVERABLE, noteOutcome, noteTitle, paramProblem, pinToken, reasonOf, recordLine, relaunchConfirmable, shownRecord, stepControl,
 } from '../../src/projects/controls/model.ts'
 import { waitingQuestions } from '../../src/projects/controls/questions.ts'
@@ -313,5 +313,35 @@ describe('the note control (docs/PRD_RUN_TEAMS.md 7)', () => {
     assert.equal(noteOutcome(note({ status: 'failed', exit_code: 1, output_tail: ['Blocked: A note to ui is refused (frozen); nothing was recorded or typed'] })), null)
     assert.equal(noteOutcome(note({ status: 'running', exit_code: null, ended_at: null })), null)
     assert.equal(noteOutcome(record({ control: 'answer', status: 'succeeded' })), null)
+  })
+})
+
+describe('the request_id rule of both dialogs (final review F5.2, F5.3)', () => {
+  const lost = new ControlError(0, 'NETWORK', 'The viewer could not reach its server.')
+  test('a retry after a lost answer with unchanged values keeps the request_id', () => {
+    const sent = attemptFingerprint('rs-1', { text: 'hello' })
+    const first = nextAttempt(null, sent)
+    const held = heldAfterFailure(first, lost)
+    assert.equal(nextAttempt(held, attemptFingerprint('rs-1', { text: 'hello' })).id, first.id)
+    // A 2xx answer that could not be read, or a dropped body (not a ControlError), may have run too: the id is kept.
+    assert.equal(answerLost(new ControlError(200, 'UNKNOWN', 'does not match')), true)
+    assert.equal(answerLost(new TypeError('body stream dropped')), true)
+  })
+  test('an edit after a lost answer starts a new request_id, so the server cannot answer the edited request with the first record', () => {
+    const first = nextAttempt(null, attemptFingerprint('gh-1', { title: 'Old' }))
+    const held = heldAfterFailure(first, lost)
+    const edited = nextAttempt(held, attemptFingerprint('gh-1', { title: 'New' }))
+    assert.notEqual(edited.id, first.id)
+    assert.match(edited.id, /^[0-9a-f-]{36}$/)
+  })
+  test('every answered failure (refused spawn, STATE_CHANGED, BUSY, NOT_AVAILABLE) starts a new request_id even with unchanged values', () => {
+    for (const [status, code] of [[500, 'SPAWN_FAILED'], [409, 'STATE_CHANGED'], [409, 'BUSY'], [409, 'NOT_AVAILABLE'], [500, 'UNKNOWN']] as const) {
+      const sent = attemptFingerprint('rs-1', {})
+      const first = nextAttempt(null, sent)
+      const error = new ControlError(status, code as ControlError['code'], 'no')
+      assert.equal(answerLost(error), false, code)
+      assert.equal(heldAfterFailure(first, error), null, code)
+      assert.notEqual(nextAttempt(heldAfterFailure(first, error), sent).id, first.id, code)
+    }
   })
 })
