@@ -10,16 +10,17 @@ import type { RunGithub } from '../../contracts/projects/github.ts'
 import { runSummaryMarkdown, runSummaryTitle } from '../../contracts/projects/summary.ts'
 import { runGithub as exampleRunGithub, runGithubActions as exampleActions, teams as exampleTeams } from '../../contracts/projects/teamExamples.ts'
 import {
-  buildGithubParams, confirmLabel, dialogTitle, factsLine, fieldsProblem, initialDialogValues, outcomeSentence, panelState, PANEL_COPY, previewHeading,
+  bodyCounter, buildGithubParams, confirmLabel, filledCommand, staleActionsLine, dialogTitle, factsLine, fieldsProblem, initialDialogValues, outcomeSentence, panelState, PANEL_COPY, previewHeading,
   recentRecords, recordShown, recordTone, toggleReviewer, typedConfirmation, typedMatches, UNKNOWN_SENTENCE, unknownLine, visibilityBlock,
 } from '../../src/projects/github/actions.ts'
 import {
-  githubSituation, githubSuffix, handCommands, heredocDelimiter, parseReviewers, pushPill, redactPaths, shellPath, shellQuote, SITUATION_IDS, spokenSuffix,
-  summaryInput, type SituationId,
+  approvedChecksWord, githubSituation, githubSuffix, handCommands, headlineWithoutStatus, heredocDelimiter, mergeWord, noBranchLine, noPrCard, parseReviewers, pushPill,
+  redactCredentials, redactPaths, redactSummaryText, refreshFailedLine, reviewRow, shasLine, shellPath, shellQuote, SITUATION_IDS, spokenSuffix, summaryInput, unlistedChecks,
+  NO_PR_TEXT, type SituationId,
 } from '../../src/projects/github/model.ts'
 import { runDetails, runInputs } from '../project-workflows/fixtures.ts'
 import '../project-workflows/fixtures/index.ts'
-import { GITHUB_ACTIONS, GITHUB_BRANCH, GITHUB_PRIVATE_NOT_PUSHED, GITHUB_RUN, GITHUB_SITUATIONS } from '../project-workflows/fixtures/ux-run-github.ts'
+import { GITHUB_ACTIONS, GITHUB_BRANCH, GITHUB_PRIVATE_NOT_PUSHED, GITHUB_RUN, GITHUB_SITUATIONS, GITHUB_UNLISTED_CHECKS, UNKNOWN_PUSH_RECORD } from '../project-workflows/fixtures/ux-run-github.ts'
 
 const NOW = Date.parse('2026-10-16T10:00:00Z')
 
@@ -148,9 +149,9 @@ test('commands: the draft PR heredoc carries the run summary, quoted title and a
   assert.equal(create!.id, 'pr-create')
   assert.equal(create!.text, `gh pr create --repo kleros/vea --head ${GITHUB_BRANCH} --base dev --draft --title 'Relayer revert shapes: it'\\''s "done"' --body-file - <<'MD_MANAGER_SUMMARY'\n${SUMMARY.markdown}MD_MANAGER_SUMMARY`)
   assert.equal(heredocDelimiter('a\nMD_MANAGER_SUMMARY\nb'), 'MD_MANAGER_SUMMARY_2')
-  // Without a summary yet there is no create command rather than one with a placeholder body.
+  // Without a summary yet the create command waits (no text, Copy off) rather than carrying a placeholder body (G12).
   const read = GITHUB_SITUATIONS['pushed-no-pr']
-  assert.deepEqual(handCommands(read, githubSituation(read, NOW), { checkout: CHECKOUT, summary: null, reviewers: [] }), [])
+  assert.deepEqual(handCommands(read, githubSituation(read, NOW), { checkout: CHECKOUT, summary: null, reviewers: [] }), [{ id: 'pr-create', text: null, waiting: 'Reading the run…' }])
 })
 
 test('commands: the reviewers command waits on its field; no placeholder ever reaches a copyable command', () => {
@@ -202,21 +203,21 @@ test('summary input: maps what the run page holds, and no absolute path reaches 
   const text = JSON.stringify(input)
   assert.doesNotMatch(text, /\/home\/|\/tmp\/|\/Users\//)
   assert.equal(input.runId, GITHUB_RUN)
-  assert.equal(input.feature, 'Feature in ~/dev/md-manager')
+  assert.equal(input.feature, 'Feature in <path>')
   assert.deepEqual(input.review, { verdict: 'approved', reviewers: ['general'], open: { p0: 0, p1: 1, p2: 1 } })
   assert.equal(input.costUsd, 7.5)
   assert.deepEqual(input.pr, { number: 531, url: 'https://github.com/kleros/vea/pull/531', state: 'OPEN', draft: true })
-  assert.equal(input.lanes[0]!.summary, 'Edited ~/dev/md-manager/src/a.ts.\n\nMore.')
+  assert.equal(input.lanes[0]!.summary, 'Edited <path>\n\nMore.')
   assert.ok(input.lanes[0]!.team !== null)
   assert.doesNotMatch(runSummaryMarkdown(input), /\/home\/|\/tmp\//)
-  assert.equal(runSummaryTitle(input), `Feature in ~/dev/md-manager: ${GITHUB_RUN}`)
+  assert.equal(runSummaryTitle(input), `Feature in <path>: ${GITHUB_RUN}`)
   // Nothing recorded: no cost, no review, no PR, no lane report.
   const bare = summaryInput({ detail, inputs: null, review: null, headline: null, teams: null, sessions: null, runGithub: null, reports: new Map() })
   assert.equal(bare.costUsd, null)
   assert.equal(bare.review, null)
   assert.equal(bare.pr, null)
   assert.deepEqual(bare.lanes, [])
-  assert.equal(redactPaths('/root/x and /var/folders/ab/c'), '~/x and (temporary path)')
+  assert.equal(redactPaths('/root/x and /var/folders/ab/c'), '<path> and <path>')
 })
 
 // ---- Actions (4.4, 4.5) ------------------------------------------------------------------------------------------------
@@ -309,4 +310,181 @@ test('outcome: a timed-out publish (exit 3, an `Unknown:` line) says its outcome
   assert.equal(outcomeSentence(succeeded), 'Done. GitHub is read again within two minutes.')
   // A line that merely mentions the word is not the controller's verdict.
   assert.equal(unknownLine({ ...failed, output_tail: ['Failed: gh said Unknown: flag'] }), null)
+})
+
+// ---- Fixes after the run-teams review (G3-G22) ------------------------------------------------------------------------
+
+test('G3 exact command: the typed title and reviewers filled in as one shell word each, <body> kept, Copy off until complete', () => {
+  const open = GITHUB_ACTIONS.openPr.actions.find(action => action.id === 'open_pr')!
+  const values = initialDialogValues(open)
+  const filled = filledCommand(open, { ...values, title: "relayer: Bob's fix" })
+  assert.match(filled.text, / '--title=relayer: Bob'\\''s fix' --body-file /)
+  assert.doesNotMatch(filled.text, /<title>/)
+  assert.match(filled.text, /--body-file <body>/)
+  assert.equal(filled.hasBody, true)
+  assert.equal(filled.copyable, true)
+  // An empty title keeps the placeholder and Copy off.
+  const blank = filledCommand(open, { ...values, title: '' })
+  assert.match(blank.text, /--title=<title>/)
+  assert.equal(blank.copyable, false)
+  const reviewers = GITHUB_ACTIONS.requestReviewers.actions.find(action => action.id === 'request_reviewers')!
+  const none = filledCommand(reviewers, initialDialogValues(reviewers))
+  assert.match(none.text, /--add <reviewers>/)
+  assert.equal(none.copyable, false)
+  const named = filledCommand(reviewers, { ...initialDialogValues(reviewers), reviewers: 'jaybuidl\nkleros/vea-maintainers' })
+  assert.match(named.text, /--add jaybuidl,kleros\/vea-maintainers --by operator$/)
+  assert.equal(named.copyable, true)
+  assert.equal(named.hasBody, false)
+  // A command with no placeholder (the push) is copyable as it is.
+  const push = GITHUB_ACTIONS.pushPublic.actions[0]!
+  assert.deepEqual(filledCommand(push, initialDialogValues(push)), { text: push.command, copyable: true, hasBody: false })
+})
+
+test('G4 a failed background refresh: the banner line and the actions panel line say what is shown is from an earlier read', () => {
+  const now = Date.parse('2026-10-16T10:05:00Z')
+  assert.equal(refreshFailedLine({ message: 'The server did not answer.', failedAt: Date.parse('2026-10-16T10:04:00Z'), settledAt: Date.parse('2026-10-16T10:00:00Z') }, now),
+    'Last read failed 1 min ago: The server did not answer; showing the read from 5 min ago.')
+  assert.match(refreshFailedLine({ message: 'boom', failedAt: null, settledAt: null }, now), /^Last read failed: boom; showing the read from an earlier time\.$/)
+  assert.equal(staleActionsLine(GITHUB_ACTIONS.markReady, 'Network error.'), 'Could not refresh the actions: Network error; showing the ones read earlier.')
+  assert.equal(staleActionsLine(GITHUB_ACTIONS.markReady, null), null)
+  assert.equal(staleActionsLine(null, 'Network error.'), null)
+})
+
+test('G5 the card in the pull request\'s place says "No pull request" only when GitHub was read', () => {
+  const card = (id: SituationId) => noPrCard(GITHUB_SITUATIONS[id], id)
+  assert.deepEqual(card('not-pushed'), { title: 'No pull request', text: NO_PR_TEXT, read: true })
+  assert.deepEqual(card('reads-off'), { title: 'Pull request', text: 'Not read: GitHub reads are off on this server.', read: false })
+  assert.deepEqual(card('pending'), { title: 'Pull request', text: 'Reading GitHub…', read: false })
+  assert.deepEqual(card('gh-missing'), { title: 'Pull request', text: 'Not read: gh is not installed on this machine.', read: false })
+  assert.deepEqual(card('gh-logged-out'), { title: 'Pull request', text: 'Not read: gh is not signed in on this machine.', read: false })
+  assert.deepEqual(card('gh-unread'), { title: 'Pull request', text: 'Not read: gh timed out after 20 s.', read: false })
+  assert.equal(card('no-branch'), null)
+  assert.equal(card('no-remote'), null)
+  assert.equal(card('not-github'), null)
+})
+
+test('G6 the run summary drops credential-shaped strings and any absolute path, in the Markdown and the hand pr-create command', () => {
+  const detail = runDetails[GITHUB_RUN]!
+  const inputs = runInputs[GITHUB_RUN]!
+  const lane = inputs.workers[0]!.node_id
+  const token = `ghp_${'a1B2'.repeat(9)}`
+  const input = summaryInput({
+    detail, inputs, review: null, headline: 'Bearer abcdefghijklmnopqrstuvwxyz0123 in /srv/app', teams: null, sessions: null, runGithub: GITHUB_SITUATIONS['pushed-no-pr'],
+    reports: new Map([[lane, `Used ${token} and TELEGRAM_BOT_TOKEN=123456:ABCdef from /opt/secrets/env.`]]),
+  })
+  const markdown = runSummaryMarkdown(input, redactSummaryText)
+  assert.ok(!markdown.includes(token))
+  assert.ok(!markdown.includes('123456:ABCdef'))
+  assert.ok(!markdown.includes('abcdefghijklmnopqrstuvwxyz0123'))
+  assert.doesNotMatch(markdown, /\/srv\/|\/opt\//)
+  assert.match(markdown, /Used <redacted> and TELEGRAM_BOT_TOKEN=<redacted> from <path>/)
+  const create = handCommands(GITHUB_SITUATIONS['pushed-no-pr'], githubSituation(GITHUB_SITUATIONS['pushed-no-pr'], NOW), {
+    checkout: '~/dev/vea', summary: { title: runSummaryTitle(input, redactSummaryText), markdown }, reviewers: [],
+  }).find(command => command.id === 'pr-create')!
+  assert.ok(!create.text!.includes(token))
+  assert.match(create.text!, /TELEGRAM_BOT_TOKEN=<redacted>/)
+  assert.equal(redactCredentials('sk-short and MONKEY and TOKEN_COUNT=5'), 'sk-short and MONKEY and TOKEN_COUNT=5')
+  // URLs and relative paths stay.
+  assert.equal(redactPaths('see https://github.com/kleros/vea/pull/531 and src/a.ts'), 'see https://github.com/kleros/vea/pull/531 and src/a.ts')
+})
+
+test('G7 unread or null facts are not stated as facts: GitHub not read, no fallback sha, no fabricated 0', () => {
+  const loggedOut = GITHUB_SITUATIONS['gh-logged-out']
+  assert.equal(shasLine(loggedOut.branch, loggedOut.github.status), 'local 6b6d894 · remote-tracking none · GitHub not read')
+  const notPushed = GITHUB_SITUATIONS['not-pushed']
+  assert.equal(shasLine(notPushed.branch, 'read'), 'local 6b6d894 · remote-tracking none · GitHub none')
+  // Up to date with its tracking ref, but GitHub's sha is null: never "on GitHub at" a local sha.
+  const noGithubSha = { ...GITHUB_SITUATIONS['pushed-no-pr'], branch: { ...GITHUB_SITUATIONS['pushed-no-pr'].branch, github_sha: null } }
+  assert.equal(githubSituation(noGithubSha, NOW).id, 'unknown')
+  // Null counts read "not recorded", never 0.
+  const remoteAhead = { ...GITHUB_SITUATIONS['remote-ahead'], branch: { ...GITHUB_SITUATIONS['remote-ahead'].branch, behind_remote: null } }
+  assert.equal(githubSituation(remoteAhead, NOW).sentence, 'GitHub\'s copy of the branch has commits the run branch lacks (how many is not recorded); this page will not push over them.')
+  const localAhead = { ...GITHUB_SITUATIONS['local-ahead'], branch: { ...GITHUB_SITUATIONS['local-ahead'].branch, ahead_of_remote: null } }
+  assert.equal(githubSituation(localAhead, NOW).sentence, 'GitHub has an older copy of the branch; commits are not pushed yet (how many is not recorded), and there is no pull request.')
+  assert.doesNotMatch(githubSituation(localAhead, NOW).suffix, /\b0\b/)
+  const behindLocal = { ...GITHUB_SITUATIONS['pr-behind-local'], branch: { ...GITHUB_SITUATIONS['pr-behind-local'].branch, ahead_of_remote: null } }
+  assert.equal(githubSituation(behindLocal, NOW).sentence, '#531 is open, but commits on the run branch are not on GitHub yet (how many is not recorded).')
+  assert.equal(githubSituation(behindLocal, NOW).suffix, '#531 · commits to push')
+})
+
+test('G10 the push dialog never says 0 commits while the branch facts are not read', () => {
+  const block = visibilityBlock('push_branch', 'kleros/vea', 'PUBLIC', null)
+  assert.match(block.body, /^After this push anyone on the internet can read these commits: /)
+  assert.doesNotMatch(block.body, /\b0 commits\b/)
+  assert.equal(confirmLabel('push_branch', 'kleros/vea', null, initialDialogValues(GITHUB_ACTIONS.pushPublic.actions[0]!)), 'Push the branch to kleros/vea')
+})
+
+test('G12 the hand pr-create command waits while the run summary is not ready, never dropping it', () => {
+  const read = GITHUB_SITUATIONS['pushed-no-pr']
+  const waiting = handCommands(read, githubSituation(read, NOW), { checkout: null, summary: null, reviewers: [] }).find(command => command.id === 'pr-create')
+  assert.deepEqual(waiting, { id: 'pr-create', text: null, waiting: 'Reading the run…' })
+})
+
+test('G15 the body limit counts UTF-8 bytes as the server does', () => {
+  const open = GITHUB_ACTIONS.openPr.actions.find(action => action.id === 'open_pr')!
+  const spec = open.params.find(item => item.name === 'body')!
+  assert.ok(spec.kind === 'multiline')
+  const max = spec.max_length
+  const values = { ...initialDialogValues(open), body: 'é'.repeat(Math.floor(max / 2) + 1) }
+  assert.ok(values.body.length <= max)
+  assert.equal(fieldsProblem(open, values), `The body is at most ${max} bytes of UTF-8.`)
+  assert.equal(bodyCounter('abc', 100), '3 of 100 characters')
+  assert.equal(bodyCounter('héllo', 100), '5 of 100 characters · 6 bytes')
+})
+
+test('G16 the approved row says "checks passing" only when a check passed and none is pending', () => {
+  const checks = GITHUB_SITUATIONS.approved.pr!.checks!
+  assert.equal(approvedChecksWord(checks), 'passing')
+  assert.equal(approvedChecksWord({ ...checks, passing: 0, pending: 0, skipped: 3 }), 'none passed (all skipped)')
+  assert.equal(approvedChecksWord({ ...checks, pending: 2 }), 'pending')
+  assert.equal(approvedChecksWord(null), 'not recorded')
+  const skippedOnly = { ...GITHUB_SITUATIONS.approved, pr: { ...GITHUB_SITUATIONS.approved.pr!, checks: { ...checks, passing: 0, pending: 0, skipped: 3 } } }
+  assert.equal(githubSituation(skippedOnly, NOW).sentence, '#531 is approved by jaybuidl; checks none passed (all skipped).')
+})
+
+test('G18 a merged or closed pull request has no "can merge" and no "review required"', () => {
+  const merged = GITHUB_SITUATIONS.merged.pr!
+  assert.deepEqual(mergeWord(merged, NOW), { tone: 'ok', word: 'merged 3 h ago' })
+  assert.deepEqual(reviewRow(merged), { shown: true, word: { tone: 'ok', word: 'approved' } })
+  const closed = GITHUB_SITUATIONS.closed.pr!
+  assert.deepEqual(mergeWord(closed, NOW), { tone: 'idle', word: 'closed' })
+  assert.equal(closed.review_decision, 'REVIEW_REQUIRED')
+  assert.deepEqual(reviewRow(closed), { shown: false, word: null })
+  // An open pull request keeps both rows as before.
+  assert.deepEqual(mergeWord(GITHUB_SITUATIONS['in-review'].pr!, NOW), { tone: null, word: 'can merge' })
+  assert.equal(reviewRow(GITHUB_SITUATIONS['in-review'].pr!).shown, true)
+})
+
+test('G19 a run with no branch says only its integrated commit', () => {
+  const branch = GITHUB_SITUATIONS['no-branch'].branch
+  assert.equal(branch.contains_integrated, null)
+  assert.equal(noBranchLine(branch), 'The run\'s integrated commit is 6b6d894.')
+  assert.equal(noBranchLine({ ...branch, integrated_commit: null }), 'The run has no integrated commit.')
+})
+
+test('G20 counts beyond the listed check rows are said; the fixtures list every row they count', () => {
+  assert.equal(unlistedChecks(GITHUB_UNLISTED_CHECKS.pr!.checks!), 'and 117 more checks not listed')
+  assert.equal(unlistedChecks({ ...GITHUB_UNLISTED_CHECKS.pr!.checks!, passing: 4, total: 4 }), 'and 1 more check not listed')
+  for (const id of SITUATION_IDS) {
+    const checks = GITHUB_SITUATIONS[id].pr?.checks
+    if (checks) assert.equal(unlistedChecks(checks), null, id)
+  }
+})
+
+test('G22 the summary\'s status line says the status once', () => {
+  assert.equal(headlineWithoutStatus('Succeeded · no push performed · took 41m00s', 'succeeded'), 'no push performed · took 41m00s')
+  assert.equal(headlineWithoutStatus('Needs attention · answer the worker', 'needs_attention'), 'answer the worker')
+  assert.equal(headlineWithoutStatus('Integrate candidate · fast-forwarded', 'succeeded'), 'Integrate candidate · fast-forwarded')
+  assert.equal(headlineWithoutStatus('Succeeded', 'succeeded'), '')
+  const detail = runDetails[GITHUB_RUN]!
+  const input = summaryInput({ detail, inputs: null, review: null, headline: `${detail.summary.status.replace(/^./, c => c.toUpperCase())} · no push performed`, teams: null, sessions: null, runGithub: null, reports: new Map() })
+  assert.equal(input.headline, 'no push performed')
+  assert.match(runSummaryMarkdown(input), new RegExp(`- \\*\\*Status:\\*\\* ${detail.summary.status} · no push performed\\n`))
+})
+
+test('G27 the unknown-outcome fixture record reads unknown in the warn tone', () => {
+  const listed = GITHUB_ACTIONS.unknown.records[0]!
+  assert.deepEqual(recordShown(listed), { tone: 'warn', word: 'unknown' })
+  assert.deepEqual(recordShown(UNKNOWN_PUSH_RECORD), { tone: 'warn', word: 'unknown' })
+  assert.equal(outcomeSentence(UNKNOWN_PUSH_RECORD), UNKNOWN_SENTENCE)
 })

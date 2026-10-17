@@ -8,7 +8,7 @@
  *   project page shows it (`~/dev/...`), never a placeholder; the reviewers command waits on its field, and the draft PR
  *   command inlines the run summary through a quoted heredoc.
  * - `summaryInput` maps what `RunView` holds into `RunSummaryInput` (4.3 "Input mapping"), with every free text passed
- *   through `redactPaths`, so no absolute path reaches the clipboard.
+ *   through `redactSummaryText` (paths and credentials, as the server's `redactText`), so neither reaches the clipboard.
  * GitHub's state never changes the run's own status or verdict; nothing here guesses a fact the read does not hold.
  */
 import type { GithubActionId, RunBranch, RunGithub, RunPr } from '../../../contracts/projects/github.ts'
@@ -86,6 +86,16 @@ function failingPhrase(pr: RunPr, checks: NonNullable<RunPr['checks']>): string 
   return `${pr.draft ? `Draft #${pr.number}` : `#${pr.number}`} has ${plural(checks.failing, 'failing check')}${list}.`
 }
 
+/**
+ * The approved row's checks word: "passing" only when a check passed and none is pending, "pending" while one is, "none passed
+ * (all skipped)" when every check was skipped or neutral, "not recorded" without checks (failing ones won an earlier row).
+ */
+export function approvedChecksWord(checks: RunPr['checks']): string {
+  if (checks === null) return 'not recorded'
+  if (checks.pending > 0) return 'pending'
+  return checks.passing > 0 ? 'passing' : 'none passed (all skipped)'
+}
+
 function fallbackOf(id: SituationId, pr: RunPr | null): NextFallback | null {
   if (pr !== null && id === 'checks-failing') {
     const failing = pr.checks?.items.find(item => item.bucket === 'fail' && item.url !== null)
@@ -121,8 +131,9 @@ export function githubSituation(read: RunGithub, now: number = Date.parse(read.r
   }
   if (branch.push_state === 'diverged') return make('diverged', 'fail', 'The run branch and GitHub\'s copy have diverged; this page will not push over GitHub\'s commits.', 'diverged')
   if (branch.push_state === 'remote_ahead') {
-    const behind = branch.behind_remote ?? 0
-    return make('remote-ahead', 'warn', `GitHub's copy of the branch has ${plural(behind, 'commit')} the run branch lacks; this page will not push over them.`, 'behind GitHub')
+    const behind = branch.behind_remote
+    const lacks = behind === null ? 'commits the run branch lacks (how many is not recorded)' : `${plural(behind, 'commit')} the run branch lacks`
+    return make('remote-ahead', 'warn', `GitHub's copy of the branch has ${lacks}; this page will not push over them.`, 'behind GitHub')
   }
   if (pr !== null) {
     if (pr.mergeable === 'CONFLICTING') return make('conflicts', 'fail', `#${pr.number} has conflicts with ${pr.base_ref}; GitHub cannot merge it as it is.`, `#${pr.number} conflicts`)
@@ -134,12 +145,13 @@ export function githubSituation(read: RunGithub, now: number = Date.parse(read.r
       return make('changes-requested', 'fail', `${review?.author ?? 'A reviewer'} asked for changes on #${pr.number}${age ? ` ${age}` : ''}${threads}.`, `#${pr.number} changes requested`)
     }
     if (branch.push_state === 'local_ahead') {
-      const ahead = branch.ahead_of_remote ?? 0
+      const ahead = branch.ahead_of_remote
+      if (ahead === null) return make('pr-behind-local', 'idle', `#${pr.number} is open, but commits on the run branch are not on GitHub yet (how many is not recorded).`, `#${pr.number} · commits to push`)
       return make('pr-behind-local', 'idle', `#${pr.number} is open, but ${plural(ahead, 'commit')} on the run branch ${ahead === 1 ? 'is' : 'are'} not on GitHub yet.`, `#${pr.number} · ${ahead} to push`)
     }
     if (pr.review_decision === 'APPROVED') {
       const review = latestReview(pr, 'APPROVED')
-      const checks = pr.checks === null ? 'not recorded' : pr.checks.pending > 0 ? 'pending' : 'passing'
+      const checks = approvedChecksWord(pr.checks)
       return make('approved', 'ok', `#${pr.number} is approved${review ? ` by ${review.author}` : ''}; checks ${checks}.`, `#${pr.number} approved`)
     }
     if (pr.draft) return make('draft', 'idle', `Draft #${pr.number} is open; ${checksPhrase(pr)}. A draft notifies no reviewer until you mark it ready.`, `#${pr.number} draft`)
@@ -157,10 +169,12 @@ export function githubSituation(read: RunGithub, now: number = Date.parse(read.r
     return make('not-pushed', 'idle', sentence, 'not pushed')
   }
   if (branch.push_state === 'local_ahead') {
-    const ahead = branch.ahead_of_remote ?? 0
+    const ahead = branch.ahead_of_remote
+    if (ahead === null) return make('local-ahead', 'idle', 'GitHub has an older copy of the branch; commits are not pushed yet (how many is not recorded), and there is no pull request.', 'commits to push')
     return make('local-ahead', 'idle', `GitHub has an older copy of the branch; ${plural(ahead, 'commit')} ${ahead === 1 ? 'is' : 'are'} not pushed yet, and there is no pull request.`, `${ahead} to push`)
   }
-  if (branch.push_state === 'up_to_date') return make('pushed-no-pr', 'ok', `The branch is on GitHub at ${short(branch.github_sha ?? branch.tracking_sha ?? branch.local_sha)}; there is no pull request yet.`, 'pushed')
+  // Only GitHub's own sha says the branch is on GitHub: a remote-tracking ref or the local head is not that fact.
+  if (branch.push_state === 'up_to_date' && branch.github_sha !== null) return make('pushed-no-pr', 'ok', `The branch is on GitHub at ${short(branch.github_sha)}; there is no pull request yet.`, 'pushed')
   return make('unknown', 'idle', 'Where the branch stands against GitHub is unknown: git could not compare it with the remote.', 'unknown')
 }
 
@@ -196,12 +210,37 @@ export function reviewDecisionWord(decision: RunPr['review_decision']): ToneWord
   return prTone({ state: 'OPEN', draft: false, review_decision: decision })
 }
 
-/** The merge line: "can merge", "conflicts with dev" (fail), "GitHub is still checking" (idle), or null ("not recorded"). */
-export function mergeWord(pr: Pick<RunPr, 'mergeable' | 'base_ref'>): { tone: Tone | null; word: string } | null {
+/**
+ * The merge line: "can merge", "conflicts with dev" (fail), "GitHub is still checking" (idle), or null ("not recorded"). A merged
+ * pull request reads "merged {age}" and a closed one "closed": GitHub's mergeable flag says nothing about either.
+ */
+export function mergeWord(pr: Pick<RunPr, 'mergeable' | 'base_ref'> & Partial<Pick<RunPr, 'state' | 'merged_at'>>, now?: number): { tone: Tone | null; word: string } | null {
+  if (pr.state === 'MERGED') {
+    const age = now === undefined ? '' : ageOf(pr.merged_at, now)
+    return { tone: 'ok', word: age ? `merged ${age}` : 'merged' }
+  }
+  if (pr.state === 'CLOSED') return { tone: 'idle', word: 'closed' }
   if (pr.mergeable === 'MERGEABLE') return { tone: null, word: 'can merge' }
   if (pr.mergeable === 'CONFLICTING') return { tone: 'fail', word: `conflicts with ${pr.base_ref}` }
   if (pr.mergeable === 'UNKNOWN') return { tone: 'idle', word: 'GitHub is still checking' }
   return null
+}
+
+/**
+ * The Review row of the pull request card: the decision while the pull request is open; once it is merged or closed only a
+ * decision a reviewer actually gave (approved, changes requested), never "review required". Null leaves the row out.
+ */
+export function reviewRow(pr: Pick<RunPr, 'state' | 'review_decision'>): { shown: boolean; word: ToneWord | null } {
+  const word = reviewDecisionWord(pr.review_decision)
+  if (pr.state === 'OPEN') return { shown: true, word }
+  return pr.review_decision === 'APPROVED' || pr.review_decision === 'CHANGES_REQUESTED' ? { shown: true, word } : { shown: false, word: null }
+}
+
+/** "and {n} more checks not listed" when the counts hold more checks than the read listed (the contract caps the list). */
+export function unlistedChecks(checks: NonNullable<RunPr['checks']>): string | null {
+  const counted = checks.failing + checks.pending + checks.passing + checks.skipped
+  const more = counted - checks.items.length
+  return more > 0 ? `and ${plural(more, 'more check', 'more checks')} not listed` : null
 }
 
 export function checksLine(checks: NonNullable<RunPr['checks']>): string {
@@ -248,8 +287,15 @@ export function pushPill(branch: RunBranch): ToneWord {
   }
 }
 
-export function shasLine(branch: RunBranch): string {
-  return `local ${short(branch.local_sha)} · remote-tracking ${short(branch.tracking_sha)} · GitHub ${short(branch.github_sha)}`
+/** The three shas; GitHub's reads "not read" unless GitHub was read, and "none" only when a read found no branch there. */
+export function shasLine(branch: RunBranch, githubStatus: RunGithub['github']['status']): string {
+  const github = githubStatus === 'read' ? short(branch.github_sha) : 'not read'
+  return `local ${short(branch.local_sha)} · remote-tracking ${short(branch.tracking_sha)} · GitHub ${github}`
+}
+
+/** A run that records no branch: only its integrated commit is said (no push pill, no shas, no commits heading). */
+export function noBranchLine(branch: RunBranch): string {
+  return branch.integrated_commit === null ? 'The run has no integrated commit.' : `The run's integrated commit is ${short(branch.integrated_commit)}.`
 }
 
 /** "3 ahead of dev, 0 behind"; null when git did not count. */
@@ -268,6 +314,24 @@ export function integratedLine(branch: RunBranch): { tone: Tone | null; text: st
 export const BRANCH_FRESHNESS = 'Remote-tracking facts are as fresh as your last fetch or push; this page never fetches.'
 export const CONNECTION_NOTE = 'md-manager reads GitHub through the gh CLI signed in on this machine. It keeps no GitHub token.'
 export const NO_PR_TEXT = 'There is no pull request whose head is this branch.'
+
+/**
+ * The card in the pull request's place when the read holds none (4.3): "No pull request" only when GitHub was read; otherwise a
+ * "Pull request" card that says it was not read and why, since a missing read is no evidence of a missing pull request. None at
+ * all for a run with no branch, no remote or a remote that is not on GitHub (the banner already says there is nothing to read).
+ */
+export function noPrCard(read: RunGithub, situation: SituationId): { title: string; text: string; read: boolean } | null {
+  if (situation === 'no-branch' || situation === 'no-remote' || situation === 'not-github') return null
+  if (situation === 'repo-unread') return { title: 'Pull request', text: 'Not read: the repository could not be read.', read: false }
+  const { github } = read
+  if (github.status === 'read') return { title: 'No pull request', text: NO_PR_TEXT, read: true }
+  if (github.status === 'off') return { title: 'Pull request', text: 'Not read: GitHub reads are off on this server.', read: false }
+  if (github.status === 'pending') return { title: 'Pull request', text: 'Reading GitHub…', read: false }
+  if (github.status === 'unavailable' && github.reason === GH_NOT_INSTALLED) return { title: 'Pull request', text: 'Not read: gh is not installed on this machine.', read: false }
+  if (github.status === 'unavailable' && github.reason === GH_NOT_LOGGED_IN) return { title: 'Pull request', text: 'Not read: gh is not signed in on this machine.', read: false }
+  if (github.status === 'unavailable') return { title: 'Pull request', text: `Not read: ${(github.reason ?? 'no reason was recorded').replace(/\.$/, '')}.`, read: false }
+  return null
+}
 export const SHARE_TEXT = 'One Markdown text for a chat, an issue or the pull request. Facts this run did not record are left out; the draft pull request starts from the same text.'
 
 /** "signed in to gh as … · permission maintain · remote origin · default branch dev", leaving out what was not read. */
@@ -297,6 +361,16 @@ export function freshness(read: RunGithub, now: number): { banner: string; githu
     local: `local git, read ${localAge}`,
     failed: read.github.status === 'read' && read.github.reason !== null ? `Last read failed: ${read.github.reason}; showing the read from ${githubAge ?? 'an earlier time'}.` : null,
   }
+}
+
+/**
+ * Said under the banner's freshness line while the read's background polls fail (the page keeps the last read it got): when the
+ * latest one failed, why, and how old the read shown is, so old facts never pass for fresh ones.
+ */
+export function refreshFailedLine(failure: { message: string; failedAt: number | null; settledAt: number | null }, now: number): string {
+  const when = failure.failedAt === null ? '' : ` ${formatAgo(new Date(failure.failedAt).toISOString(), now)}`
+  const from = failure.settledAt === null ? 'an earlier time' : formatAgo(new Date(failure.settledAt).toISOString(), now)
+  return `Last read failed${when}: ${failure.message.replace(/\.$/, '')}; showing the read from ${from}.`
 }
 
 // ---- Commands to run by hand (4.6) -----------------------------------------------------------------------------------
@@ -380,7 +454,9 @@ export function handCommands(read: RunGithub, situation: Situation, options: { c
   }
   const owner = repo.owner_name
   if (owner === null || read.github.status !== 'read') return commands
-  if (branch.push_state === 'up_to_date' && (pr === null || pr.state === 'CLOSED') && summary !== null) {
+  if (branch.push_state === 'up_to_date' && (pr === null || pr.state === 'CLOSED') && summary === null) {
+    commands.push({ id: 'pr-create', text: null, waiting: 'Reading the run…' })
+  } else if (branch.push_state === 'up_to_date' && (pr === null || pr.state === 'CLOSED') && summary !== null) {
     const delimiter = heredocDelimiter(summary.markdown)
     const base = repo.default_branch ? ` --base ${shellQuote(repo.default_branch)}` : ''
     const body = summary.markdown.endsWith('\n') ? summary.markdown : `${summary.markdown}\n`
@@ -397,12 +473,49 @@ export function handCommands(read: RunGithub, situation: Situation, options: { c
 
 // ---- Run summary input (4.3 "Input mapping") -------------------------------------------------------------------------
 
-/** Folds a home directory into `~` and hides temporary paths, so no absolute path reaches the summary. */
+/**
+ * Every absolute or home path becomes `<path>`, as the server's `redactPaths` does (server/projects.ts): a path under `/srv` or
+ * `/opt` is as private as one under `/home`. A URL's `//` and a relative `a/b` stay (the slash follows a letter or a slash).
+ */
 export function redactPaths(text: string): string {
-  return text
-    .replace(/(^|[^\w~.-])\/(?:home|Users)\/[^/\s'"`)]+/g, '$1~')
-    .replace(/(^|[^\w~.-])\/root(?=\/|\s|$)/g, '$1~')
-    .replace(/(^|[^\w~.-])\/(?:tmp|private\/tmp|var\/folders)\/[^\s'"`)]*/g, '$1(temporary path)')
+  return text.replace(/(?:file:\/\/(?=\/)|(?<![\p{Script=Latin}\p{Script=Greek}\p{Script=Cyrillic}\p{Nd}._@~+/-]))(?:~(?:\/[\p{L}\p{M}\p{N}._@~+-]*)+|\/[\p{L}\p{M}\p{N}._@~+-]+(?:\/[\p{L}\p{M}\p{N}._@~+-]*)*)/gu, '<path>')
+}
+
+/**
+ * Credential-shaped strings become `<redacted>`, the same patterns as the server's `redactCredentials` (server/projects.ts): GitHub
+ * tokens, `sk-` keys, Slack tokens, a `Bearer` header, `token=`/`password=` assignments, a PEM block, and an upper-case secret
+ * assignment keeps its name (`TELEGRAM_BOT_TOKEN=<redacted>`). Kept in step with the server until both import one module.
+ */
+const CREDENTIAL_PATTERNS: readonly RegExp[] = [
+  /-----BEGIN ([A-Z0-9 ]{1,64})-----[\s\S]*?(?:-----END \1-----|$)/g,
+  /\bgh[pousr]_[A-Za-z0-9]{20,}/g,
+  /\bgithub_pat_[A-Za-z0-9_]{20,}/g,
+  /\bsk-[A-Za-z0-9_-]{20,}/g,
+  /\bxox[abprs]-[A-Za-z0-9-]{10,}/g,
+  /\bBearer\s+[A-Za-z0-9._~+/-]{20,}=*/g,
+  /\btoken=[A-Za-z0-9._~+/-]{12,}/g,
+  /\bpassword=\S{6,}/g,
+]
+const SECRET_ASSIGNMENT = /\b((?:[A-Z][A-Z0-9_]*)?(?:SECRET[A-Z0-9_]*|TOKEN|KEY|PASSWORD|PASSWD))=(?:"[^"\n]*"|'[^'\n]*'|[^\s"']+)/g
+export function redactCredentials(text: string): string {
+  return CREDENTIAL_PATTERNS.reduce((acc, pattern) => acc.replace(pattern, '<redacted>'), text).replace(SECRET_ASSIGNMENT, '$1=<redacted>')
+}
+
+/** The run summary's redaction (the server's `redactText`): paths first, then credentials. */
+export const redactSummaryText = (text: string): string => redactCredentials(redactPaths(text))
+
+/**
+ * The Now headline without a leading status word: "Succeeded · no push performed" under the status "succeeded" becomes "no push
+ * performed", so the summary's status line does not say it twice ("needs_attention" matches "Needs attention").
+ */
+export function headlineWithoutStatus(headline: string, status: string): string {
+  const words = status.replace(/[_-]+/g, ' ').trim().toLowerCase()
+  const lead = headline.trimStart()
+  if (words === '' || !lead.toLowerCase().startsWith(words)) return headline
+  const rest = lead.slice(words.length)
+  if (rest.trim() === '') return ''
+  const match = /^\s*·\s*/.exec(rest)
+  return match ? rest.slice(match[0].length) : headline
 }
 
 /** One lane's agent team from the teams read: the worker session's workflows, agents and failed agents; null without one. */
@@ -429,7 +542,13 @@ export type SummarySources = {
   reports: ReadonlyMap<string, string>
 }
 
-/** What `runSummaryMarkdown` reads, from what the run page already holds; free texts go through `redactPaths`. */
+function shownHeadline(headline: string | null, status: string): string | null {
+  if (headline === null) return null
+  const rest = headlineWithoutStatus(headline, status)
+  return rest === '' ? null : redactSummaryText(rest)
+}
+
+/** What `runSummaryMarkdown` reads, from what the run page already holds; free texts go through `redactSummaryText`. */
 export function summaryInput(sources: SummarySources): RunSummaryInput {
   const { detail, inputs, review, headline, teams, sessions, runGithub, reports } = sources
   const open = { p0: 0, p1: 0, p2: 0 }
@@ -444,16 +563,16 @@ export function summaryInput(sources: SummarySources): RunSummaryInput {
   return {
     runId: detail.summary.run_id,
     workflowId: detail.summary.workflow_id,
-    feature: inputs ? redactPaths(inputs.feature) : null,
+    feature: inputs ? redactSummaryText(inputs.feature) : null,
     status: detail.summary.status,
-    headline: headline === null ? null : redactPaths(headline),
+    headline: shownHeadline(headline, detail.summary.status),
     branch: inputs?.source_branch ?? runGithub?.branch.name ?? null,
     baseCommit: inputs?.base_commit ?? null,
     integratedCommit: runGithub?.branch.integrated_commit ?? null,
     review: review === null ? null : { verdict: review.verdict, reviewers: review.reviewers.map(entry => entry.reviewer_id), open },
     lanes: (inputs?.workers ?? []).map(worker => {
       const report = reports.get(worker.node_id)
-      return { lane: worker.node_id, summary: report === undefined ? null : redactPaths(report), team: laneTeam(teams, worker.node_id) }
+      return { lane: worker.node_id, summary: report === undefined ? null : redactSummaryText(report), team: laneTeam(teams, worker.node_id) }
     }),
     costUsd: metered > 0 ? metered : null,
     pr: pr === null ? null : { number: pr.number, url: pr.url, state: pr.state, draft: pr.draft },

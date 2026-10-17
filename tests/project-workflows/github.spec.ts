@@ -13,14 +13,15 @@ import { test, expect, type Page } from '@playwright/test'
 import type { RunGithub, RunGithubActions } from '../../contracts/projects/github.ts'
 import { runSummaryMarkdown } from '../../contracts/projects/summary.ts'
 import { githubPathname } from '../../src/projects/routes.ts'
-import { summaryInput, type SituationId } from '../../src/projects/github/model.ts'
+import { noPrCard, redactSummaryText, summaryInput, type SituationId } from '../../src/projects/github/model.ts'
 import { TOKEN_KEY } from '../../src/projects/controls/types.ts'
+import { UNKNOWN_SENTENCE } from '../../src/projects/github/actions.ts'
 import { CONTROLS_TOKEN } from './fixtures/controls.ts'
 import { runDetails, runInputs, PROJECT } from './fixtures.ts'
 import { runGithubActionsByRun, runGithubByRun } from './fixtures/index.ts'
 import {
-  GITHUB_ACTIONS, GITHUB_BRANCH, GITHUB_PRIVATE_NOT_PUSHED, GITHUB_READ_AT, GITHUB_RUN, GITHUB_SITUATIONS, GITHUB_WORKFLOW_ID, PUBLISH_AUTHOR, PUBLISH_BRANCHES,
-  PUBLISH_PR, PUBLISH_PR_TITLE, PUBLISH_PROJECT, PUBLISH_REPO, PUBLISH_RUNS, PUBLISH_WORKFLOW_ID, PUSH_FIRST, UNPUBLISHED, uxRunGithub,
+  GITHUB_ACTIONS, GITHUB_BRANCH, GITHUB_PRIVATE_NOT_PUSHED, GITHUB_READ_AT, GITHUB_RUN, GITHUB_SITUATIONS, GITHUB_UNLISTED_CHECKS, GITHUB_WORKFLOW_ID, PUBLISH_AUTHOR,
+  PUBLISH_BRANCHES, PUBLISH_PR, PUBLISH_PR_TITLE, PUBLISH_PROJECT, PUBLISH_REPO, PUBLISH_RUNS, PUBLISH_WORKFLOW_ID, PUSH_FIRST, UNKNOWN_PUSH_RECORD, UNPUBLISHED, uxRunGithub,
 } from './fixtures/ux-run-github.ts'
 import { installControlMocks, type ControlMock } from './mock.ts'
 import { attach, expectNoExecutionControls, fetchFromPage, installHooks, phase, runViewLink } from './support.ts'
@@ -78,6 +79,17 @@ const dialog = (page: Page) => page.getByTestId('gh-dialog')
 const confirm = (page: Page) => dialog(page).getByTestId('gh-dialog-confirm')
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
 
+/** G1: the dialog's title and its confirm (or Close) are on screen without scrolling, at whatever viewport the page has. */
+async function expectDialogFits(page: Page) {
+  await expect(dialog(page).getByTestId('gh-dialog-title')).toBeInViewport({ ratio: 1 })
+  const button = dialog(page).getByTestId('gh-dialog-confirm')
+  await expect((await button.count()) > 0 ? button : dialog(page).getByTestId('gh-dialog-cancel')).toBeInViewport({ ratio: 1 })
+  await expect(dialog(page).getByTestId('gh-dialog-cancel')).toBeInViewport({ ratio: 1 })
+}
+
+/** The dispatch GitHub read's path for the GitHub run (the view's poll and the dialog's fresh read both use it). */
+const READ_PATH = /\/api\/dispatch\/projects\/[^/]+\/workflows\/[^/]+\/runs\/[^/]+\/github$/
+
 async function openDialogFromPanel(page: Page, action: string) {
   await page.getByTestId('gh-actions').locator(`[data-testid="gh-action"][data-action="${action}"]`).getByTestId('gh-action-button').click()
   await expect(dialog(page)).toBeVisible()
@@ -133,8 +145,15 @@ for (const { id, scenario, sentence, suffix } of SITUATIONS) {
       const branch = (await page.getByTestId('gh-branch-card').boundingBox())!
       expect(pr.y).toBeLessThan(branch.y)
     } else {
+      // G5: "No pull request" only when GitHub was read; otherwise the card says it was not read, or is left out.
       await expect(page.getByTestId('gh-pr-card')).toHaveCount(0)
-      await expect(page.getByTestId('gh-no-pr-card')).toContainText('There is no pull request whose head is this branch.')
+      const card = noPrCard(read, id)
+      if (card === null) await expect(page.getByTestId('gh-no-pr-card')).toHaveCount(0)
+      else {
+        await expect(page.getByTestId('gh-no-pr-card').locator('h3')).toHaveText(card.title)
+        await expect(page.getByTestId('gh-no-pr-text')).toHaveText(card.text)
+      }
+      if (card === null || !card.read) await expect(page.getByTestId('gh-view')).not.toContainText('There is no pull request whose head is this branch.')
     }
     await expect(page.getByTestId('gh-branch-card')).toContainText('Remote-tracking facts are as fresh as your last fetch or push; this page never fetches.')
     await expect(page.getByTestId('gh-connection-card')).toContainText('md-manager reads GitHub through the gh CLI signed in on this machine. It keeps no GitHub token.')
@@ -157,7 +176,37 @@ for (const { id, scenario, sentence, suffix } of SITUATIONS) {
     }
     if (id === 'merged') await expect(page.getByTestId('gh-pr-state')).toHaveText('merged')
     if (id === 'remote-ahead') await expect(page.getByTestId('gh-push-state')).toHaveText('2 behind GitHub')
-    if (id === 'gh-logged-out') await expect(page.getByTestId('gh-commands').getByTestId('gh-command')).toHaveCount(3)
+    if (id === 'gh-logged-out') {
+      await expect(page.getByTestId('gh-commands').getByTestId('gh-command')).toHaveCount(3)
+      await expect(page.getByTestId('gh-no-pr-card').locator('h3')).toHaveText('Pull request')
+      await expect(page.getByTestId('gh-no-pr-text')).toHaveText('Not read: gh is not signed in on this machine.')
+      // G7: GitHub's sha is "not read", never "none", when GitHub was not read.
+      await expect(page.getByTestId('gh-branch-shas')).toHaveText('local 6b6d894 · remote-tracking none · GitHub not read')
+    }
+    if (id === 'reads-off') await expect(page.getByTestId('gh-no-pr-text')).toHaveText('Not read: GitHub reads are off on this server.')
+    if (id === 'not-pushed') await expect(page.getByTestId('gh-branch-shas')).toHaveText('local 6b6d894 · remote-tracking none · GitHub none')
+    // G18: a merged or closed pull request has no "can merge" and no "review required".
+    if (id === 'merged') {
+      await expect(page.getByTestId('gh-pr-merge')).toHaveText('merged 3 h ago')
+      await expect(page.getByTestId('gh-pr-review')).toHaveText('approved')
+    }
+    if (id === 'closed') {
+      await expect(page.getByTestId('gh-pr-merge')).toHaveText('closed')
+      await expect(page.getByTestId('gh-pr-review')).toHaveCount(0)
+      await expect(page.getByTestId('gh-pr-card')).not.toContainText('review required')
+    }
+    // G19: no branch, no push pill, shas or commits heading; only the integrated commit.
+    if (id === 'no-branch') {
+      const card = page.getByTestId('gh-branch-card')
+      await expect(card.getByTestId('gh-branch-none')).toHaveText('This run records no branch.')
+      await expect(card.getByTestId('gh-branch-integrated')).toHaveText('The run\'s integrated commit is 6b6d894.')
+      await expect(card.getByTestId('gh-push-state')).toHaveCount(0)
+      await expect(card.getByTestId('gh-branch-shas')).toHaveCount(0)
+      await expect(card).not.toContainText('Commits a push would publish')
+      await expect(card).not.toContainText('Contains the run')
+    }
+    // G20: the fixtures list as many check rows as they count, so nothing is said to be unlisted.
+    if (read.pr?.checks) await expect(page.getByTestId('gh-checks-unlisted')).toHaveCount(0)
     await attach(page, testInfo, scenario)
     await phone(page)
     // Phone order: banner, Publish on GitHub, then the pull request or the branch.
@@ -207,6 +256,15 @@ test(`[scenario:github-commands-card] The commands to run by hand: real, shell-q
   expect(text).not.toMatch(/<(?:title|body|reviewers?|branch|sha)>|\/home\/|\/tmp\//)
   // Every copyable command on these pages is free of placeholders.
   for (const command of await page.getByTestId('gh-command-text').allInnerTexts()) expect(command).not.toMatch(/<(?:title|body|reviewers?|branch|sha)>/)
+  // G26: on a phone the long heredoc wraps inside its box instead of scrolling sideways; Copy still writes it unwrapped.
+  await page.setViewportSize({ width: 390, height: 844 })
+  const boxes = page.getByTestId('gh-commands').locator('.gh-command-line')
+  expect(await boxes.count()).toBeGreaterThan(0)
+  for (const box of await boxes.all()) {
+    const { scroll, client } = await box.evaluate(element => ({ scroll: element.scrollWidth, client: element.clientWidth }))
+    expect(scroll, 'the command box does not scroll sideways at 390 px').toBeLessThanOrEqual(client + 1)
+  }
+  expect(await noSideways(page)).toBe(true)
 })
 
 // ---- P0 item 8: Copy run summary --------------------------------------------------------------------------------------
@@ -219,13 +277,18 @@ test(`[scenario:github-copy-summary] Copy run summary puts exactly the run summa
   await expect(share).toContainText('One Markdown text for a chat, an issue or the pull request. Facts this run did not record are left out; the draft pull request starts from the same text.')
   await share.getByTestId('gh-summary-copy').click()
   await expect(share.getByTestId('gh-summary-copy')).toHaveText('Copied')
+  // G21: the button says "Copied"; its live span repeats it for a screen reader only, so the card never reads "Copied Copied".
+  await expect(share.getByTestId('gh-summary-copy-status')).toHaveText('Copied')
+  await expect(share.getByTestId('gh-summary-copy-status')).toHaveClass(/visually-hidden/)
   const copied = await page.evaluate('navigator.clipboard.readText()') as string
   // The expected text from the same fixtures the page read: the headline is the page's Now headline, taken from the status line.
   const headline = /^- \*\*Status:\*\* succeeded(?: · (.*))?$/m.exec(copied)?.[1] ?? null
   const expected = runSummaryMarkdown(summaryInput({
     detail: runDetails[GITHUB_RUN]!, inputs: runInputs[GITHUB_RUN]!, review: null, headline, teams: null, sessions: null, runGithub: GITHUB_SITUATIONS['checks-failing'], reports: new Map(),
-  }))
+  }), redactSummaryText)
   expect(copied).toBe(expected)
+  // G22: the status is said once, not "succeeded · Succeeded".
+  expect(copied).not.toMatch(/\*\*Status:\*\* (\w+) · \1\b/i)
   expect(copied).toContain(`### Run controls on the run page: ${GITHUB_RUN}`)
   expect(copied).toContain('- **Pull request:** [#531](https://github.com/kleros/vea/pull/531) (draft)')
   expect(copied).not.toMatch(/\/home\/|\/tmp\/|\/Users\//)
@@ -336,6 +399,9 @@ test(`[scenario:github-action-record] Recent GitHub actions list up to five reco
   await expect(records.nth(1).locator('details')).toHaveCount(1)
   await expect(records.nth(2).locator('details')).toHaveCount(0)
   await expect(records.nth(2).locator('a')).toHaveText('kleros/vea/pull/531 ↗')
+  // G11: what the operator typed in the view survives the re-read after an action ends (the view never blanks to loading).
+  const reviewersField = page.getByTestId('gh-reviewers-field')
+  await reviewersField.fill('jaybuidl')
   // Run Mark ready: the record joins the list and the GitHub read runs again right after it ends.
   const before = reads.length
   await openDialogFromPanel(page, 'mark_ready')
@@ -347,6 +413,8 @@ test(`[scenario:github-action-record] Recent GitHub actions list up to five reco
   await expect(records.first()).toHaveAttribute('data-state', 'succeeded')
   await expect(records.first()).toContainText('Mark ready for review')
   await expect.poll(() => reads.length).toBeGreaterThan(before)
+  await expect(page.getByTestId('gh-layout')).toBeVisible()
+  await expect(reviewersField).toHaveValue('jaybuidl')
   await attach(page, testInfo, 'github-action-record')
   await phone(page)
 })
@@ -381,9 +449,17 @@ test(`[scenario:github-push-public-dialog] Pushing to a public repository: the w
   await expect(confirm(page)).toBeDisabled()
   await typed.fill('kleros/vea')
   await expect(confirm(page)).toBeEnabled()
+  // G1: the title, the visibility block and the confirm are on screen together, with no nested scroll for the commits.
+  await expectDialogFits(page)
+  await expect(box.getByTestId('gh-visibility-block')).toBeInViewport()
+  expect(await preview.evaluate(element => element.scrollHeight <= element.clientHeight + 1), 'the commit preview has no scroll of its own').toBe(true)
+  await page.setViewportSize({ width: 390, height: 844 })
+  await expectDialogFits(page)
+  await page.setViewportSize({ width: 1440, height: 900 })
   await attach(page, testInfo, 'github-push-public-dialog')
   await confirm(page).click()
   await expect(box.getByTestId('gh-dialog-outcome')).toHaveAttribute('data-state', 'succeeded')
+  await expectDialogFits(page)
   expect(mock.githubPosts).toHaveLength(1)
   expect(mock.githubPosts[0]!.action).toBe('push_branch')
   expect(mock.githubPosts[0]!.body.request_id).toMatch(UUID)
@@ -404,11 +480,25 @@ test(`[scenario:github-push-private-dialog] Pushing to a private repository: no 
   await expect(box.getByTestId('gh-commit-preview').locator('h4')).toHaveText('Commits that become visible (3)')
   await expect(box.getByTestId('gh-typed-confirm')).toHaveCount(0)
   await expect(confirm(page)).toBeEnabled()
+  // G9: a drag that starts inside the dialog and ends on the backdrop does not close it.
+  const facts = (await box.getByTestId('gh-dialog-facts').boundingBox())!
+  await page.mouse.move(facts.x + 10, facts.y + 5)
+  await page.mouse.down()
+  await page.mouse.move(4, 4)
+  await page.mouse.up()
+  await expect(box).toBeVisible()
   await attach(page, testInfo, 'github-push-private-dialog')
+  // G8: a retryable failure (BUSY) keeps the dialog's request_id, so the server's dedup can answer the retry with the first record.
+  mock.failNext('github:push_branch', 409, 'BUSY', 'Another control of this run is running.')
+  await confirm(page).click()
+  await expect(box.getByTestId('gh-dialog-alert')).toContainText('Another control of this run is running')
+  await expectDialogFits(page)
   await confirm(page).click()
   await expect(box.getByTestId('gh-dialog-outcome')).toHaveAttribute('data-state', 'succeeded')
+  expect(mock.githubPosts).toHaveLength(2)
   expect(mock.githubPosts[0]!.body.params).toEqual({})
   expect(mock.githubPosts[0]!.body.request_id).toMatch(UUID)
+  expect(mock.githubPosts[1]!.body.request_id).toBe(mock.githubPosts[0]!.body.request_id)
   await phone(page)
 })
 
@@ -426,12 +516,50 @@ test(`[scenario:github-open-pr-dialog] Opening a draft pull request: the title a
   await expect(box.getByTestId('gh-param-body')).toHaveValue(action.defaults.body!)
   await expect(box.getByTestId('gh-body-counter')).toHaveText(`${action.defaults.body!.length} of 60000 characters`)
   await expect(box).toContainText('Local paths are already removed. It includes the run\'s recorded Claude spend when there is one; delete that line if you prefer.')
+  // G1: the title opens on screen (focus on a field never scrolls it away), with the confirm pinned at the bottom.
+  await expectDialogFits(page)
+  // G3: the exact command shows the typed title as one shell word and keeps only <body>, which the controller reads from a file.
+  const command = box.getByTestId('gh-dialog-command')
+  await expect(command).toContainText(`'--title=${action.defaults.title}'`)
+  await expect(command).not.toContainText('<title>')
+  await expect(command).toContainText('--body-file <body>')
+  await expect(box.getByTestId('gh-dialog-body-note')).toHaveText('The controller reads the body from a temporary file, shown here as <body>.')
+  await expect(box.getByTestId('gh-dialog-command-copy')).toBeEnabled()
+  await box.getByTestId('gh-param-title').fill('')
+  await expect(command).toContainText('--title=<title>')
+  await expect(box.getByTestId('gh-dialog-command-copy')).toBeDisabled()
+  await expect(box.getByTestId('gh-dialog-command-copy-status')).toHaveText('Fill the fields first')
+  // G2: parent renders (an actions poll re-renders the run page and builds a new scope) never close, reopen or refetch the
+  // dialog: the focus and the typed title stay, and no second GitHub read is made.
+  await box.evaluate(element => { (globalThis as unknown as { ghCloses: number }).ghCloses = 0; element.addEventListener('close', () => { (globalThis as unknown as { ghCloses: number }).ghCloses += 1 }) })
+  const dialogReads: string[] = []
+  page.on('request', request => { if (READ_PATH.test(new URL(request.url()).pathname)) dialogReads.push(request.url()) })
+  const actionsReads: string[] = []
+  page.on('request', request => { if (/\/api\/run-controls\/.*\/github$/.test(new URL(request.url()).pathname) && request.method() === 'GET') actionsReads.push(request.url()) })
+  const title = box.getByTestId('gh-param-title')
+  await title.click()
+  await page.keyboard.type(action.defaults.title!)
+  await page.clock.runFor(16_000)
+  await expect.poll(() => actionsReads.length, { message: 'an actions poll ran' }).toBeGreaterThan(0)
+  await page.keyboard.type('!')
+  await expect(title).toBeFocused()
+  await expect(title).toHaveValue(`${action.defaults.title}!`)
+  expect(await page.evaluate(() => (globalThis as unknown as { ghCloses: number }).ghCloses)).toBe(0)
+  expect(dialogReads, 'no second GitHub read while the dialog stays open').toEqual([])
+  await title.fill(action.defaults.title!)
+  // G15: multi-byte text is counted in bytes too, as the server limits it.
+  await box.getByTestId('gh-param-body').fill('Édité.')
+  await expect(box.getByTestId('gh-body-counter')).toHaveText('6 of 60000 characters · 8 bytes')
   await box.getByTestId('gh-param-body').fill('Edited body.')
   await expect(box.getByTestId('gh-body-counter')).toHaveText('12 of 60000 characters')
   await expect(confirm(page)).toHaveText('Open draft pull request')
   await expect(confirm(page)).toBeDisabled()
   await box.getByTestId('gh-typed-input').fill('kleros/vea')
   await expect(confirm(page)).toBeEnabled()
+  await expectDialogFits(page)
+  await page.setViewportSize({ width: 390, height: 844 })
+  await expectDialogFits(page)
+  await page.setViewportSize({ width: 1440, height: 900 })
   await attach(page, testInfo, 'github-open-pr-dialog')
   await confirm(page).click()
   await expect(box.getByTestId('gh-dialog-outcome')).toHaveAttribute('data-state', 'succeeded')
@@ -505,8 +633,13 @@ test(`[scenario:github-action-stale] A branch that moved after the dialog opened
   await expect(confirm(page)).toBeDisabled()
   await expect(dialog(page).getByTestId('gh-dialog-cancel')).toHaveText('Close')
   expect(mock.githubPosts[0]!.body.state_token).toBe(GITHUB_ACTIONS.pushPublic.state_token)
+  // G1: the 409 sentence sits in the pinned footer, on screen beside Close.
+  await expect(dialog(page).getByTestId('gh-dialog-alert')).toBeInViewport({ ratio: 1 })
+  await expectDialogFits(page)
   await attach(page, testInfo, 'github-action-stale')
   await phone(page)
+  await expect(dialog(page).getByTestId('gh-dialog-alert')).toBeInViewport({ ratio: 1 })
+  await expectDialogFits(page)
   // Reopened, the dialog posts the new token.
   await dialog(page).getByTestId('gh-dialog-cancel').click()
   await page.setViewportSize({ width: 1440, height: 900 })
@@ -517,6 +650,94 @@ test(`[scenario:github-action-stale] A branch that moved after the dialog opened
   await confirm(page).click()
   await expect(dialog(page).getByTestId('gh-dialog-outcome')).toHaveAttribute('data-state', 'succeeded')
   expect(mock.githubPosts.at(-1)!.body.state_token).toBe('gh-moved-0000000000')
+})
+
+// ---- Fixes after the run-teams review -----------------------------------------------------------------------------------
+
+test(`[scenario:github-copy-fallback] Without the clipboard (a plain-http origin) Copy run summary opens "Show the text", focuses it and selects all of it (${phase})`, async ({ page }, testInfo) => {
+  // G13: the selection target is shown first; a hidden <pre> would select nothing.
+  await page.addInitScript(() => { Object.defineProperty(Navigator.prototype, 'clipboard', { configurable: true, get: () => undefined }) })
+  serve(GITHUB_SITUATIONS['checks-failing'])
+  await open(page)
+  const share = page.getByTestId('gh-share-card')
+  await expect(share.getByTestId('gh-summary-text')).toBeHidden()
+  await share.getByTestId('gh-summary-copy').click()
+  await expect(share.getByTestId('gh-summary-copy')).toHaveText('Select to copy')
+  await expect(share.getByTestId('gh-summary-toggle')).toHaveAttribute('aria-expanded', 'true')
+  const text = share.getByTestId('gh-summary-text')
+  await expect(text).toBeVisible()
+  await expect(text).toBeFocused()
+  await expect(text).toBeInViewport()
+  const selected = await page.evaluate('String(window.getSelection() ?? "")') as string
+  expect(selected.trim()).toBe((await text.textContent())!.trim())
+  expect(selected).toContain(`### Run controls on the run page: ${GITHUB_RUN}`)
+  await attach(page, testInfo, 'github-copy-fallback')
+  await phone(page)
+})
+
+test(`[scenario:github-refresh-failed] When the background reads fail after a good one, the banner and the actions panel say the facts shown are from an earlier read; counts beyond the listed checks are said (${phase})`, async ({ page }, testInfo) => {
+  serve(GITHUB_UNLISTED_CHECKS, GITHUB_ACTIONS.requestReviewers)
+  await paired(page)
+  // G20: 120 passing counted, 3 listed.
+  await expect(page.getByTestId('gh-checks-unlisted')).toHaveText('and 117 more checks not listed')
+  await expect(page.getByTestId('gh-banner-refresh-failed')).toHaveCount(0)
+  await expect(page.getByTestId('gh-actions-stale')).toHaveCount(0)
+  // G4: from now on both reads fail; the page keeps what it read and says so.
+  const unavailable = { status: 503, contentType: 'application/json', body: JSON.stringify({ error: { code: 'UNAVAILABLE', message: 'The dashboard is restarting.' } }) }
+  await page.route(url => READ_PATH.test(url.pathname), route => route.fulfill(unavailable))
+  await page.route(url => /\/api\/run-controls\/.*\/github$/.test(url.pathname), route => (route.request().method() === 'GET' ? route.fulfill(unavailable) : route.fallback()))
+  await page.clock.runFor(61_000)
+  await expect(page.getByTestId('gh-banner-refresh-failed')).toHaveText(/^Last read failed[^:]*: .+; showing the read from .+ ago\.$/)
+  await expect(page.getByTestId('gh-actions-stale')).toHaveText(/^Could not refresh the actions: .+; showing the ones read earlier\.$/)
+  // What was read stays shown, never replaced by an error panel.
+  await expect(page.getByTestId('gh-pr-card')).toBeVisible()
+  await expect(page.getByTestId('gh-actions')).toHaveAttribute('data-state', 'offered')
+  await attach(page, testInfo, 'github-refresh-failed')
+  await phone(page)
+})
+
+test(`[scenario:github-action-unknown] A push whose outcome is unknown (exit 3, an "Unknown:" line) reads unknown in warn in Recent GitHub actions and in the dialog; nothing closes the dialog while it is sent (${phase})`, async ({ page }, testInfo) => {
+  serve(GITHUB_SITUATIONS['not-pushed'], GITHUB_ACTIONS.unknown)
+  await paired(page)
+  // G27: the listed record.
+  const record = page.getByTestId('gh-action-record')
+  await expect(record).toHaveCount(1)
+  await expect(record).toHaveAttribute('data-outcome', 'unknown')
+  await expect(record.locator('.gh-pill')).toHaveText('unknown')
+  await expect(record.locator('.gh-pill')).toHaveAttribute('data-tone', 'warn')
+  await expect(record.getByTestId('gh-record-unknown')).toHaveText(UNKNOWN_SENTENCE)
+  // The POST answers an unknown record, held until the test lets it go.
+  let release: () => void = () => undefined
+  const held = new Promise<void>(resolve => { release = resolve })
+  await page.route(url => /\/api\/run-controls\/.*\/github\/push_branch$/.test(url.pathname), async route => {
+    const body = route.request().postDataJSON() as { request_id: string }
+    await held
+    await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ record: { ...UNKNOWN_PUSH_RECORD, request_id: body.request_id } }) })
+  })
+  await openDialogFromPanel(page, 'push_branch')
+  const box = dialog(page)
+  await box.getByTestId('gh-typed-input').fill('kleros/vea')
+  await confirm(page).click()
+  // G9: while it is sent, Cancel is off and neither Escape nor the backdrop closes the dialog.
+  await expect(confirm(page)).toHaveAttribute('aria-busy', 'true')
+  await expect(box.getByTestId('gh-dialog-cancel')).toBeDisabled()
+  await page.keyboard.press('Escape')
+  await page.mouse.click(4, 4)
+  await expect(box).toBeVisible()
+  release()
+  const outcome = box.getByTestId('gh-dialog-outcome')
+  await expect(outcome).toHaveAttribute('data-outcome', 'unknown')
+  await expect(box.getByTestId('gh-dialog-outcome-pill')).toHaveText('unknown')
+  await expect(box.getByTestId('gh-dialog-outcome-pill')).toHaveAttribute('data-tone', 'warn')
+  await expect(box.getByTestId('gh-dialog-outcome-sentence')).toHaveText(UNKNOWN_SENTENCE)
+  await expect(box.getByTestId('gh-dialog-unknown-line')).toHaveText(UNKNOWN_PUSH_RECORD.output_tail[1]!)
+  await expectDialogFits(page)
+  await attach(page, testInfo, 'github-action-unknown')
+  await phone(page)
+  await expectDialogFits(page)
+  // A plain backdrop click (pressed and released on it) closes the dialog once nothing is being sent.
+  await page.mouse.click(2, 2)
+  await expect(box).toHaveCount(0)
 })
 
 // ---- Candidate phase: the real server's git and GitHub reads of the publish project ------------------------------------
