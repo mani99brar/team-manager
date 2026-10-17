@@ -143,7 +143,7 @@ function branchFields(index: number): string {
           __typename ... on User { login } ... on Team { slug organization { login } } ... on Bot { login } ... on Mannequin { login }
         } } }
         latestOpinionatedReviews(first: 50) { nodes { author { login } state submittedAt } }
-        commits(last: 1) { nodes { commit { oid statusCheckRollup { state contexts(first: 100) { nodes {
+        commits(last: 1) { nodes { commit { oid statusCheckRollup { state contexts(first: 100) { totalCount nodes {
           __typename ... on CheckRun { name status conclusion detailsUrl } ... on StatusContext { context state targetUrl }
         } } } } } }
       }
@@ -181,6 +181,7 @@ type GqlBranchContext = {
   __typename?: string; name?: string; status?: string | null; conclusion?: string | null; detailsUrl?: string | null
   context?: string; state?: string | null; targetUrl?: string | null
 }
+type GqlRollup = { state?: string | null; contexts?: { totalCount?: number; nodes?: GqlBranchContext[] } }
 type GqlBranchPr = {
   number: number; title?: string; url?: string; state?: string; isDraft?: boolean; isCrossRepository?: boolean
   author?: { login?: string | null } | null; headRefName?: string; baseRefName?: string; headRefOid?: string | null
@@ -189,7 +190,7 @@ type GqlBranchPr = {
   reviewThreads?: { totalCount?: number; nodes?: { isResolved?: boolean }[] }
   reviewRequests?: { nodes?: { requestedReviewer?: { __typename?: string; login?: string; slug?: string; organization?: { login?: string } | null } | null }[] }
   latestOpinionatedReviews?: { nodes?: { author?: { login?: string | null } | null; state?: string; submittedAt?: string | null }[] }
-  commits?: { nodes?: { commit?: { oid?: string; statusCheckRollup?: { state?: string | null; contexts?: { nodes?: GqlBranchContext[] } } | null } }[] }
+  commits?: { nodes?: { commit?: { oid?: string; statusCheckRollup?: GqlRollup | null } }[] }
 }
 
 const FAIL = new Set(['FAILURE', 'TIMED_OUT', 'CANCELLED', 'ACTION_REQUIRED', 'STARTUP_FAILURE', 'ERROR'])
@@ -210,10 +211,16 @@ export function checkBucket(kind: RunCheck['kind'], status: string | null, concl
 
 const BUCKET_ORDER: Record<RunCheck['bucket'], number> = { fail: 0, pending: 1, pass: 2, skip: 2, neutral: 2 }
 
-function mapRunChecks(rollup: { state?: string | null; contexts?: { nodes?: GqlBranchContext[] } } | null | undefined): RunPr['checks'] {
+/**
+ * The head commit's checks. The query reads the first 100 contexts; `total` is GitHub's `totalCount`. When the page is
+ * truncated, a failing (or pending) rollup with no failing (or pending) check on the page counts at least one, so a
+ * failure beyond the page is never reported as `failing: 0`.
+ */
+function mapRunChecks(rollup: GqlRollup | null | undefined): RunPr['checks'] {
   if (!rollup) return null
   const items: RunCheck[] = []
-  for (const node of rollup.contexts?.nodes ?? []) {
+  const nodes = rollup.contexts?.nodes ?? []
+  for (const node of nodes) {
     if (node.__typename === 'CheckRun' && node.name) {
       const status = node.status ?? null
       const conclusion = node.conclusion ?? null
@@ -226,7 +233,14 @@ function mapRunChecks(rollup: { state?: string | null; contexts?: { nodes?: GqlB
   items.sort((a, b) => BUCKET_ORDER[a.bucket] - BUCKET_ORDER[b.bucket] || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
   const count = (bucket: RunCheck['bucket']) => items.filter(item => item.bucket === bucket).length
   const state = ['SUCCESS', 'FAILURE', 'PENDING', 'ERROR', 'EXPECTED'].includes(String(rollup.state)) ? rollup.state as NonNullable<RunPr['checks']>['state'] : null
-  return { state, passing: count('pass'), failing: count('fail'), pending: count('pending'), skipped: count('skip'), total: items.length, items: items.slice(0, 100) }
+  const totalCount = rollup.contexts?.totalCount
+  const truncated = typeof totalCount === 'number' && Number.isInteger(totalCount) && totalCount > nodes.length
+  let failing = count('fail')
+  let pending = count('pending')
+  if (truncated && failing === 0 && (state === 'FAILURE' || state === 'ERROR')) failing = 1
+  if (truncated && pending === 0 && (state === 'PENDING' || state === 'EXPECTED')) pending = 1
+  const total = truncated ? Math.max(totalCount, items.length) : items.length
+  return { state, passing: count('pass'), failing, pending, skipped: count('skip'), total, items: items.slice(0, 100) }
 }
 
 function oneOf<T extends string>(value: unknown, allowed: readonly T[]): T | null {
@@ -395,8 +409,11 @@ export function parseGithub(stdout: string): { read: GithubRepoRead; viewer_logi
  */
 type Entry = { data: GithubRepoRead | null; readAtMs: number | null; attemptedAtMs: number | null; failReason: string | null; attempted: boolean }
 
-/** A run branch key's entry: as `Entry`, plus when a request last asked for it (only keys asked for recently are read). */
-type BranchEntry = { data: GithubBranchRead | null; readAtMs: number | null; attemptedAtMs: number | null; failReason: string | null; attempted: boolean; requestedAtMs: number | null }
+/**
+ * A run branch key's entry: as `Entry`, plus when a request last asked for it (only keys asked for recently are read) and
+ * `marks`, bumped by every `markDue`: a read in flight across a mark stores its data but leaves the key due.
+ */
+type BranchEntry = { data: GithubBranchRead | null; readAtMs: number | null; attemptedAtMs: number | null; failReason: string | null; attempted: boolean; requestedAtMs: number | null; marks?: number }
 
 /** `owner/name#<branch>` into its repository and branch (owner/name never holds `#`). */
 export function splitBranchKey(key: string): { repo: string; branch: string } | null {
@@ -625,6 +642,7 @@ export class GithubReader {
     if (entry) {
       entry.attemptedAtMs = null
       entry.requestedAtMs = this.options.now()
+      entry.marks = (entry.marks ?? 0) + 1
     } else {
       this.branchEntries.set(key, { data: null, readAtMs: null, attemptedAtMs: null, failReason: null, attempted: false, requestedAtMs: this.options.now() })
     }
@@ -657,10 +675,13 @@ export class GithubReader {
 
   private async readBranches(repo: string, branches: readonly string[]): Promise<void> {
     const runner = this.options.runner!
+    const entries = branches.map(branch => this.branchEntries.get(`${repo}#${branch}`)!)
+    const marks = entries.map(entry => entry.marks ?? 0)
     const result = await runner(branchArgv(repo, branches))
     const at = this.options.now()
-    const entries = branches.map(branch => this.branchEntries.get(`${repo}#${branch}`)!)
-    const fail = (reason: string) => { for (const entry of entries) { entry.attempted = true; entry.attemptedAtMs = at; entry.failReason = reason } }
+    // A markDue while gh was running (a push or PR landed mid-read): this read may predate it, so the key stays due.
+    const attempted = (entry: BranchEntry, i: number) => { entry.attempted = true; entry.attemptedAtMs = (entry.marks ?? 0) === marks[i] ? at : null }
+    const fail = (reason: string) => { entries.forEach((entry, i) => { attempted(entry, i); entry.failReason = reason }) }
     if (result.enoent) return fail(GH_REASONS.notInstalled)
     if (result.timedOut) return fail(GH_REASONS.timedOut)
     if (result.code !== 0) return fail(/auth login/i.test(result.stderr) ? GH_REASONS.notLoggedIn : `gh failed (exit ${result.code})`)
@@ -673,8 +694,7 @@ export class GithubReader {
     const readAt = new Date(at).toISOString()
     parsed.reads.forEach((read, i) => {
       const entry = entries[i]
-      entry.attempted = true
-      entry.attemptedAtMs = at
+      attempted(entry, i)
       entry.data = { ...read, read_at: readAt }
       entry.readAtMs = at
       entry.failReason = null
