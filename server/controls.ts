@@ -22,7 +22,7 @@ import {
 } from './controlsRunner.ts'
 import { DIRECTORY_FLAGS, at } from './files.ts'
 import {
-  GITHUB_READ_FAILED, GITHUB_READ_MISSING, GithubRecordStore, githubActionsOf, githubArgv, githubDisplay, githubStateToken, newGithubRecordId, reviewerSuggestions, shownPath,
+  GITHUB_ACTION_TIMEOUT_MS, GITHUB_EXIT_UNKNOWN, GITHUB_READ_FAILED, GITHUB_READ_MISSING, GITHUB_UNKNOWN_NOTE, GithubRecordStore, githubActionsOf, githubArgv, githubDisplay, githubStateToken, newGithubRecordId, reviewerSuggestions, shownPath,
   summaryDefaults, urlOf, validateGithubParams, type GithubSource, type StoredGithubRecord,
 } from './githubActions.ts'
 import { ProjectApiError, type LoadedRun, type RunStore } from './projects.ts'
@@ -51,6 +51,8 @@ export type ControlsRouteOptions = {
   github?: GithubSource
   /** Whether the GitHub actions are on; defaults to `MD_MANAGER_GITHUB_ACTIONS=on` in the server's environment. */
   githubActions?: boolean
+  /** The bound on one GitHub action's child; `GITHUB_ACTION_TIMEOUT_MS` (above the controller's worst case) unless a test lowers it. */
+  githubTimeoutMs?: number
 }
 
 type ErrorBody = { error: { code: string; message: string } }
@@ -237,7 +239,7 @@ if (SPECS.map(spec => spec.id).join() !== CONTROL_IDS.join()) throw new Error('T
 export const ANSWER_PANE_REASON = 'Typing the answer needs the lane\'s Herdr pane; answer in your terminal'
 export const NOTE_PANE_REASON = 'Typing a note needs the lane\'s Herdr pane; send it in your terminal'
 
-const TEXT_LIMITS = { text: { min: 1, max: 4000 }, note: { min: 1, max: 2000 }, accept: { min: 10, max: 500 }, abandon: { min: 1, max: 500 } } as const
+const TEXT_LIMITS = { text: { min: 1, max: 4000 }, note: { min: 1, max: 4000 }, accept: { min: 10, max: 500 }, abandon: { min: 1, max: 500 } } as const
 
 // ---- Reading the run ----------------------------------------------------------------------------------------------------
 
@@ -709,6 +711,7 @@ export async function controlRoutes(scope: FastifyInstance, options: ControlsRou
   scope.setNotFoundHandler((_request, reply) => send(reply, 404, errorBody('NOT_FOUND', 'No run control resource exists at that path.')))
   const githubSource = options.github ?? null
   const githubEnabled = options.githubActions ?? config.childEnv.MD_MANAGER_GITHUB_ACTIONS === 'on'
+  const githubTimeoutMs = options.githubTimeoutMs ?? GITHUB_ACTION_TIMEOUT_MS
   const githubRecords = new GithubRecordStore(config.stateDir, now, secrets)
   scope.addHook('onReady', async () => {
     const lost = await records.recoverLost() + await githubRecords.recoverLost()
@@ -900,20 +903,24 @@ export async function controlRoutes(scope: FastifyInstance, options: ControlsRou
       const logPath = githubRecords.logPath(key, recordId)
       let child
       try {
-        child = await runner.start(config.python, argv, logPath, true)
+        child = await runner.start(config.python, argv, logPath, true, githubTimeoutMs)
       } catch {
         await githubRecords.write(key, { ...base, status: 'refused', ended_at: fresh(now), output_tail: ['The command could not be started.'] })
         throw new ControlsError(500, 'SPAWN_FAILED', 'The command could not be started.')
       }
-      const result = await settle(await child.done)
+      const done = await child.done
+      const result = await settle(done)
+      // A command stopped by the bound, or the controller's exit 3, may have published: never told as "nothing happened".
+      const unknown = (done.kind === 'exit' && done.timedOut) || result.code === GITHUB_EXIT_UNKNOWN
+      const note = done.kind === 'exit' && done.timedOut ? GITHUB_UNKNOWN_NOTE : result.note
       const output = tailLines(await readLogTail(logPath), secrets)
       const ended: StoredGithubRecord = {
-        ...base, status: result.status, exit_code: result.code, ended_at: fresh(now), output_tail: [...output, ...(result.note ? [result.note] : [])].slice(-40),
+        ...base, status: result.status, exit_code: result.code, ended_at: fresh(now), output_tail: [...output, ...(note ? [note] : [])].slice(-40),
         url: result.status === 'succeeded' ? urlOf(output) : null,
       }
       await githubRecords.write(key, ended)
       if (ended.status === 'refused') throw new ControlsError(500, 'SPAWN_FAILED', 'The command could not be started.')
-      if (ended.status === 'succeeded') githubSource?.markDue(key.project, key.workflow, key.run)
+      if (ended.status === 'succeeded' || unknown) githubSource?.markDue(key.project, key.workflow, key.run)
       const { argv: _argv, ...shown } = ended
       void _argv
       return shown

