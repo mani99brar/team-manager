@@ -188,7 +188,8 @@ export const PUBLISH_PR_TITLE = 'Publish the run branch'
 /** The commit author every seeded commit carries (`fixtures/dispatch.ts` `GIT_SEED_ENV`). */
 export const PUBLISH_AUTHOR = 'Seed <seed@example.com>'
 const PUBLISH_READ_AT = '2026-10-16T10:00:00Z'
-const PUBLISH_DAY = '2025-02-10'
+/** A day before every clock the other specs pin, so these runs never fill another spec's Today or Recent. */
+const PUBLISH_DAY = '2024-03-05'
 
 /** A registry project as `seedCandidate` writes it. */
 export type RegistryProject = { project_id: string; name: string; repository: string; workflows: RegistryWorkflow[] }

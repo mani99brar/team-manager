@@ -2281,6 +2281,8 @@ test(`[scenario:filtered-lists] The project page's "Needs you and running" block
   const unfiltered = await needs.innerHTML()
   const rail = page.getByTestId('dispatch-rail-list').locator(`.dispatch-rail-row[data-project-id="${B_ORDER.project_id}"]`)
   const counts = async () => ({ rail: await rail.innerText(), figures: await page.getByTestId('dispatch-figures').innerText() })
+  // The rail row is compared before and after filtering: wait for the overview (its repository label) so a late overview is not a change.
+  await expect(rail).toContainText(`~/dev/${B_ORDER.project_id}`, { timeout: 30_000 })
   const before = await counts()
   // A text filter alone that matches one of the block's runs.
   await bar(page).getByTestId('run-filter-q').fill('order-running-1')

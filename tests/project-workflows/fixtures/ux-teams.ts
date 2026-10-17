@@ -494,6 +494,11 @@ function payloads(): Partial<UxPayloads> {
 // ---- The candidate seed --------------------------------------------------------------------------------------------
 
 const LAUNCHING = 'Launching or reconciling the exact native session'
+/**
+ * The seeded exports' clock: a day before every clock the other specs pin, so these runs never fill another spec's Today or
+ * Recent (the mock's details keep the fixtures' day; no team scenario reads a run date, and the session files keep it).
+ */
+const exportAt = (clock: string) => `2024-03-05T${clock}Z`
 
 /** The four verification packets of a finished two-lane run, in the `workflow/checks.py` layout (as the core seed writes them). */
 export function finishedPackets(context: Pick<SeedContext, 'writePacket'>, runId: string, runDir: string) {
@@ -509,6 +514,7 @@ export function finishedPackets(context: Pick<SeedContext, 'writePacket'>, runId
 /** One run directory: the export (finished: integrated through review; running: both lanes launched), its lanes' session files. */
 function seedRun(context: SeedContext, root: string, runId: string): LaneSessionFiles[] {
   const { writeRun, receipt, internalEvent, leakFor, repository } = context
+  const at = exportAt
   const runDir = join(root, runId)
   const lanes = laneSessionsOf(runId, runDir)
   const sessionOf = (lane: string) => lanes.find(entry => entry.lane === lane)?.sessionId ?? (lane === 'ui' ? UI_SESSION : ADAPTER_SESSION)
