@@ -8,7 +8,7 @@ import {
   type WorkflowStatus,
 } from '../contracts/projects/teams.ts'
 import { ID_PATTERN } from './projectsConfig.ts'
-import { readBounded, realpathOrNull, redactText } from './projects.ts'
+import { readBounded, realpathOrNull, redactCredentials, redactText } from './projects.ts'
 import { iso } from './sessions.ts'
 
 /**
@@ -726,13 +726,14 @@ export async function readSessionWorktrees(directory: FileHandle, rows: readonly
  * A file an agent edited, relative to the first base that holds it; the bases are only recorded worktrees (the agent's own
  * `worktreePath`, then the lane's). A path outside every base, and a relative path (its base is unknown), is never served
  * as a plain path (PRD "Team reader"): it becomes `<path>/<basename>`, which keeps the `<path>` marker so it is never
- * compared with the owned paths and still tells two outside files apart.
+ * compared with the owned paths and still tells two outside files apart. A path inside a base is already relative, so it
+ * goes through the credential filter only: the path filter would take `app/[slug]/page.tsx` for `app/[slug]<path>`.
  */
 export function servedFile(path: string, bases: readonly string[]): string {
   if (isAbsolute(path)) {
     for (const base of bases) {
       const inside = relative(base, path)
-      if (inside && inside !== '..' && !inside.startsWith(`..${sep}`) && !isAbsolute(inside)) return redactText(inside.split(sep).join('/'))
+      if (inside && inside !== '..' && !inside.startsWith(`..${sep}`) && !isAbsolute(inside)) return redactCredentials(inside.split(sep).join('/'))
     }
     return `<path>/${redactText(basename(path))}`
   }

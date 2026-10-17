@@ -712,3 +712,20 @@ test('[F7.3] a GitHub action outlives no bound shorter than the controller\'s wo
     assert.equal(r.source!.due.length, 2)
   })
 })
+
+test('[F2.1] the open_pr default body names no pull request when the branch has only a CLOSED or MERGED earlier one', () => {
+  const loaded = {
+    detail: { summary: { run_id: 'run-001', status: 'succeeded', activity: null } }, review: null, claudeUsd: null,
+    inputs: { feature: 'Widgets', source_branch: BRANCH, base_commit: null, workers: [{ node_id: 'ui', completion: { summary: 'Done.' } }] },
+  } as unknown as Parameters<typeof summaryDefaults>[0]
+  for (const state of ['CLOSED', 'MERGED'] as const) {
+    const read = readOf('draft')
+    read.pr!.state = state
+    read.pr!.draft = false
+    const { body } = summaryDefaults(loaded, WORKFLOW, read)
+    assert.ok(!body.includes('Pull request'), `${state}: ${body}`)
+    assert.ok(!body.includes('#531'), state)
+  }
+  // An OPEN pull request is the run's own, so the summary still names it.
+  assert.match(summaryDefaults(loaded, WORKFLOW, readOf('draft')).body, /\*\*Pull request:\*\* \[#531\]/)
+})

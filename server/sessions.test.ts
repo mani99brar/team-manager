@@ -384,19 +384,19 @@ test('sessions redaction: a path (one root-level segment too) and a fake 40-char
   assert.equal(redactText('/srv, (/tmp) and file:///etc'), '<path>, (<path>) and <path>')
   assert.equal(redactText('P0/P1 and/or 1/2 stay; ~ and ~5 stay; http://example.com/x stays'), 'P0/P1 and/or 1/2 stay; ~ and ~5 stay; http://example.com/x stays')
   assert.equal(redactText(`token sk-${'x'.repeat(40)}`), 'token <redacted>')
-  assert.equal(redactText(`ghp_${'A'.repeat(36)} github_pat_${'b'.repeat(30)} xoxb-1234567890-abc Bearer ${'c'.repeat(30)} token=abcdefghijklmnop password=hunter22`), '<redacted> <redacted> <redacted> <redacted> <redacted> <redacted>')
+  assert.equal(redactText(`ghp_${'A'.repeat(36)} github_pat_${'b'.repeat(30)} xoxb-1234567890-abc Bearer ${'c'.repeat(30)} token=abcdefghijklmnop password=hunter22`), '<redacted> <redacted> <redacted> <redacted> token=<redacted> password=<redacted>')
   assert.equal(redactText('the task-file is fine, sk- alone stays, and so does openai-codex/gpt-6.1-sol'), 'the task-file is fine, sk- alone stays, and so does openai-codex/gpt-6.1-sol')
 })
 
-test('sessions redaction (F1.1): credential assignments and Bearer match in any case; ordinary words with those names stay', () => {
+test('sessions redaction (F1.1): credential assignments keep their name and lose their value in any case; Bearer in any case; ordinary words with those names stay', () => {
   for (const name of ['token', 'Token', 'TOKEN', 'api_key', 'API_KEY', 'ApiKey', 'apikey', 'access_key', 'Access_Key']) {
-    assert.equal(redactText(`set ${name}=abcdefghijklmnop now`), name === name.toUpperCase() ? `set ${name}=<redacted> now` : 'set <redacted> now', name)
+    assert.equal(redactText(`set ${name}=abcdefghijklmnop now`), `set ${name}=<redacted> now`, name)
   }
   for (const name of ['password', 'Password', 'PASSWORD', 'passwd', 'Passwd', 'secret', 'Secret', 'SECRET']) {
-    assert.equal(redactText(`use ${name}=hunter2-correct here`), name === name.toUpperCase() ? `use ${name}=<redacted> here` : 'use <redacted> here', name)
+    assert.equal(redactText(`use ${name}=hunter2-correct here`), `use ${name}=<redacted> here`, name)
   }
   assert.equal(redactText(`bearer ${'a'.repeat(26)} and BEARER ${'b'.repeat(30)}`), '<redacted> and <redacted>')
-  assert.equal(redactText('api_key=some-secret-value'), '<redacted>')
+  assert.equal(redactText('api_key=some-secret-value'), 'api_key=<redacted>')
   // The minimum tails stay: short values and ordinary words are not credentials.
   const ordinary = 'The token count is 5; Password policy: twelve characters; keyboard, tokenizer, secretary, passwords and api keys; bearer of bad news; Token=short; secret=abc; apikey=12345'
   assert.equal(redactText(ordinary), ordinary)
