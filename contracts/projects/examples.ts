@@ -734,8 +734,8 @@ export const RELAUNCH_NOT_EFFECT = 'It reconciles and restarts nothing itself, a
 export const RETRY_ALL_FEWER = 'Fewer than two worker checks failed'
 export const RELAUNCH_NONE = 'No lane launch is waiting to be relaunched'
 /** The 1.2.0 control's texts (steering), as `server/controls.ts` serves them. */
-export const NOTE_EFFECT = 'Types your note into the lane\'s lead session between its turns and records it in <lane>.notes.json.'
-export const NOTE_NOT_EFFECT = 'It does not interrupt a running tool call; a team workflow that is running takes no input until it returns.'
+export const NOTE_EFFECT = 'Types your note into the lane\'s lead session pane as an operator note and records it in the lane\'s notes.'
+export const NOTE_NOT_EFFECT = 'A running team workflow takes no input: its agents never see the note, and the lead reads it when its current turn ends. It stops and restarts nothing.'
 export const NOTE_NONE = 'No lane\'s worker is launched and still working'
 export const NOTE_PANE = 'Typing a note needs the lane\'s Herdr pane; send it in your terminal'
 
