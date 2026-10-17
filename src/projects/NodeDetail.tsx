@@ -22,7 +22,7 @@ import { CandidateLanes, VerifiedEvidence, WorkerReportLink, type LaneEntry } fr
 import { WorkerSections } from './node/WorkerSections.tsx'
 import type { Teams } from '../../contracts/projects/teams.ts'
 import type { TeamQuery } from './routes.ts'
-import { teamSectionEntry, teamSessionsOf } from './teams/model.ts'
+import { teamSectionEntryFor } from './teams/model.ts'
 import { NodeTeamSection } from './teams/TeamSections.tsx'
 import { NodeHeader } from './NodeHeader.tsx'
 import { AppLink, ErrorPanel, LoadingPanel, StatusBadge } from './panels.tsx'
@@ -278,15 +278,16 @@ export function NodeDetail({ scope, detail, definition, node, attempt, events, o
 
   // The node's agent team (docs/PRD_RUN_TEAMS.md 6): a worker with a team session (its entry carries the agents' count, none for
   // records `none`); a repair or another step only when its session's records are found or unreadable. The teams are the run
-  // page's resource; a run whose teams were not read or not served shows no Team section.
+  // page's resource. A worker keeps the section while the teams load or after a failed read, so it says "Reading team records…"
+  // or offers Read again; a server that does not serve teams shows none.
   const teamsData = teams.status === 'ready' ? teams.data : null
-  const teamEntry = teamSectionEntry(teamSessionsOf(teamsData, node.node_id), isWorker)
+  const teamEntry = teamSectionEntryFor(teams.status, teamsData, node.node_id, isWorker)
   const teamBody = teamEntry === null ? null : (
     <NodeTeamSection
       teams={teams}
       onRetry={onRetryTeams}
       nodeId={node.node_id}
-      shared={{ scope, detail, inputs: inputs.status === 'ready' ? inputs.data : null, sessions: sessionsData, clock, live: detail.summary.status !== 'succeeded' && detail.summary.status !== 'cancelled', nodeHref: nodeId => runPathname(scope.projectId, scope.workflowId, scope.runId, nodeId), onNavigate, teamHref }}
+      shared={{ scope, detail, inputs: inputs.status === 'ready' ? inputs.data : null, sessions: sessionsData, clock, live: detail.summary.status !== 'succeeded' && detail.summary.status !== 'cancelled', nodeHref: nodeId => runPathname(scope.projectId, scope.workflowId, scope.runId, nodeId), onNavigate, teamHref, onOpenFile, resultStamp: stamp }}
     />
   )
 

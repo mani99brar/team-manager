@@ -3,12 +3,11 @@ import type { Now, RunAttention, Timeline } from '../../../contracts/projects/tr
 import type { PanelResults, ReviewResult, RunDetail, RunInputs, Sessions, WorkflowEvent } from '../api.ts'
 import type { Teams } from '../../../contracts/projects/teams.ts'
 import type { TeamQuery } from '../routes.ts'
-import { dockTeamLine, SPENT_TEAM_NOTE } from '../teams/model.ts'
+import { dockTeamLine, SPENT_TEAM_NOTE, workingCaption } from '../teams/model.ts'
 import type { StepRow } from '../steps.ts'
 import { formatSpan } from '../time.ts'
 import { sessionsCueText } from '../sessions/model.ts'
 import { spentText } from '../sessions/model.ts'
-import { GlyphDefs } from './Glyph.tsx'
 import { DOCK_COLUMN_FRAME, dockReserve, PHONE_STAGE_WIDTH } from './layout.ts'
 import { readDockOpen } from './dock.ts'
 import { LiveDock } from './LiveDock.tsx'
@@ -138,11 +137,11 @@ export function SignalRun({ detail, rows, timeline, events, inputs, review, atte
   // The dock's Working now row (docs/PRD_RUN_TEAMS.md 5): agents running, else an interrupted team workflow while the run is live.
   const live = detail.summary.status !== 'succeeded' && detail.summary.status !== 'cancelled'
   const teamLine = dockTeamLine(teams, live, clock)
-  const team = teamLine === null || !teamHref ? null : { line: teamLine, href: teamHref(teamLine.kind === 'running' ? { state: 'running' } : {}) }
+  // A finished run whose records still say agents run keeps the row and says why (the reader marks a workflow interrupted later).
+  const team = teamLine === null || !teamHref ? null : { line: teamLine, href: teamHref(teamLine.kind === 'running' ? { state: 'running' } : {}), caption: teamLine.kind === 'running' ? workingCaption(teams, live) : null }
   const spentNote = teams !== null && teams.totals.sessions_with_teams > 0 ? SPENT_TEAM_NOTE : null
   return (
     <div ref={frame} className={`sb-frame${column ? ' dock-col' : ''}`} data-testid="run-board" data-dock={column ? 'column' : 'overlay'} style={height === null ? undefined : { height }} onKeyDown={closeFromDock}>
-      <GlyphDefs />
       <LiveDock detail={detail} now={now} clock={clock} nodes={nodes} nowId={nowId} latest={latest} timeline={timeline} inputs={inputs} open={dockOpen} onOpenChange={setDockOpen} onGo={goTo} nodeHref={nodeHref} onNavigate={onNavigate} spent={sessions ? spentText(sessions.totals) : null} team={team} spentNote={spentNote} />
       <RunStage ref={stage} nodes={nodes} nowId={nowId} selectedId={selected} onSelect={select} reservedLeft={column ? 0 : dockReserve(frameWidth, dockOpen)} sheetOpen={selectedNode !== null} cued={hasCue}>
         {selectedNode && (

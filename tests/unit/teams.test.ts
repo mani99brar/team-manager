@@ -154,7 +154,7 @@ describe('the attention line (3.2)', () => {
   })
   test('rule 8, every workflow completed', () => {
     const completed = teamsPayload('r', [teamSession({ key: 'worker:ui', role: 'worker', label: 'Worker · ui', node_id: 'launch_ui', lane: 'ui', session_id: 's', workflows: [teamWorkflow({ run_id: 'wf_a', status: 'completed', duration_ms: 125000, phaseTitles: [], agents: [teamAgent(1, { label: 'a', state: 'done' })] })] })])
-    assert.deepEqual(attentionLine(lane(completed, 'ui').sessions, context(completed)), { text: 'Done · 1 workflow · 1 agents · ran 2m05s', tone: 'ok' })
+    assert.deepEqual(attentionLine(lane(completed, 'ui').sessions, context(completed)), { text: 'Done · 1 workflow · 1 agent · 2m05s of workflow time', tone: 'ok' })
   })
   test('rules 9 and 10, records none while the lead runs and after it ended', () => {
     const teams = noneTeams('r')
@@ -281,7 +281,7 @@ describe('Working now (3.6)', () => {
 describe('run view integration (5)', () => {
   test('a step card\'s team facts from its found sessions; none for records none or another node', () => {
     const team = stageTeam(example, 'launch_ui', WORKERS)!
-    assert.deepEqual(team, { workflows: 2, agents: 8, running: 1, failed: 1, outside: 2, agentLine: 'Fix · fix:finding-2 · Bash: npx tsx --test tests/unit/teams.test.ts' })
+    assert.deepEqual(team, { workflows: 2, agents: 8, running: 1, failed: 1, outside: 2, agentLine: 'Fix · fix:finding-2 · Bash: npx tsx --test tests/unit/teams.test.ts', caption: null })
     assert.equal(stageTeamName(team), 'team of 8 agents, 1 running, 1 failed')
     assert.equal(stageTeam(noneTeams('r'), 'launch_ui', WORKERS), null)
     assert.equal(stageTeam(example, 'repair-1', WORKERS), null)

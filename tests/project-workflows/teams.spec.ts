@@ -11,10 +11,10 @@
  */
 import { join } from 'node:path'
 import { test, expect, type Locator, type Page } from '@playwright/test'
-import type { Teams } from '../../contracts/projects/teams.ts'
+import type { AgentState, Teams } from '../../contracts/projects/teams.ts'
 import { teamsByRun } from './fixtures/index.ts'
 import { comparableTeams, refreshRunningRecords, runningWorkflowIds } from './fixtures/teamRecords.ts'
-import { SEEDED_SESSIONS, TEAMS_NOW, TEAMS_RUNS, UX_TEAMS_WORKFLOW_ID } from './fixtures/ux-teams.ts'
+import { SEEDED_SESSIONS, TEAMS_NOW, TEAMS_RUNS, UX_TEAMS_WORKFLOW_ID, teamsPayload } from './fixtures/ux-teams.ts'
 import { PROJECT } from './fixtures.ts'
 import { attach, expectNoExecutionControls, fetchFromPage, graphNode, installHooks, liveDock, nodeDetail, openStepSheet, phase, runUrl, runViewLink, stepSheet } from './support.ts'
 
@@ -120,8 +120,19 @@ test(`[scenario:team-view-completed] The finished workflow folds to its head (no
   await expect(finished.getByTestId('team-phase').nth(2)).toHaveAttribute('data-tone', 'fail')
   await expect(finished.getByTestId('team-phase').nth(2)).toContainText('1 failed · 1 done')
   await expect(agentRows(finished)).toHaveCount(6)
-  await finished.getByText('Script log and result').click()
+  // The script log is a disclosure with a chevron and a count, not a bare heading (T29).
+  const log = finished.getByTestId('team-log-summary')
+  await expect(log).toHaveText('Script log and result (2 lines · result)')
+  await expect(log.locator('svg.team-chev')).toHaveCount(1)
+  await log.click()
   await expect(finished.getByTestId('team-workflow-logs')).toHaveText('2 readers done\nreview: 1 issue')
+  // The adapter lane finished without a Claude team session: it never says "has not started yet" (T2).
+  await expect(lanePanel(page, 'adapter').getByTestId('team-session-empty')).toHaveText("This lane's session has no Claude team records (it ran on another transport or recorded no session id); its row is in the Sessions table.")
+  // The run succeeded but the records still say an agent runs: Working now keeps the row, says why, and its duration stops at
+  // the read rather than counting on with the clock (T4, T9).
+  const working = page.getByTestId('team-working-now')
+  await expect(working.getByTestId('team-finished-caption')).toHaveText('The run has finished; these records still say running. The reader marks a workflow interrupted after 15 quiet minutes.')
+  await expect(working.getByTestId('team-working-row').first()).toContainText('for 13m30s at last read')
   await expect(teamView(page)).not.toContainText('%')
   await attach(page, testInfo, 'team-view-completed')
   await expectPhoneFits(page)
@@ -158,6 +169,9 @@ test(`[scenario:team-view-interrupted] An interrupted workflow says no summary w
   const card = workflowCard(page, 'wf_12ab34cd-006')
   await expect(card).toHaveAttribute('data-state', 'interrupted')
   await expect(card.getByTestId('team-workflow-line')).toContainText('No summary was written and its records have not changed for 15 minutes')
+  // No summary was written, so the card does not promise that context arrives with it (T20).
+  await expect(card.getByTestId('team-workflow-facts')).toContainText('context not recorded')
+  await expect(card.getByTestId('team-workflow-facts')).not.toContainText('arrives with the final summary')
   await expect(lanePanel(page, 'ui').getByTestId('team-attention')).toHaveText('wire-the-dock was interrupted in Test; no summary was written')
   await expect(lanePanel(page, 'ui').getByTestId('team-attention')).toHaveAttribute('data-tone', 'pause')
   await expect(runViewLink(page, 'team').getByTestId('run-view-suffix')).toHaveText('interrupted')
@@ -189,9 +203,14 @@ test(`[scenario:team-view-unreadable] An unreadable worker folder leads its lane
   await expect(lanePanel(page, 'ui').getByTestId('team-attention')).toHaveText('Team records could not be read: The session folder could not be read.')
   await expect(lanePanel(page, 'ui').getByTestId('team-attention')).toHaveAttribute('data-tone', 'idle')
   await expect(lanePanel(page, 'ui').getByTestId('team-session-empty')).toHaveText('Team records could not be read: The session folder could not be read.')
+  // Unreadable records are not reported as proof that every worker ran single (T19).
+  await expect(page.getByTestId('team-head')).toContainText('Team records of 1 session could not be read; 1 other session ran as a single session.')
+  await expect(page.getByTestId('team-head')).not.toContainText('every worker ran as a single session')
   await open(page, teamPage(TEAMS_RUNS.base))
   const other = lanePanel(page, 'other')
   await expect(other.getByRole('heading', { name: 'Other sessions' })).toBeVisible()
+  // A lone session in Other sessions is still named (T30).
+  await expect(other.getByRole('heading', { name: 'Design challenge attempt 1' })).toBeVisible()
   await expect(other.locator('[data-session="challenge:1"]').getByTestId('team-session-empty')).toHaveText('Team records could not be read: The session folder could not be read.')
   await attach(page, testInfo, 'team-view-unreadable')
   await expectPhoneFits(page)
@@ -211,14 +230,22 @@ test(`[scenario:team-view-large-folding] 400 listed agents in six phases: done-o
     await expect(agentRows(group)).toHaveCount(rows)
   }
   await expect(card.locator('[data-testid="team-phase-group"][data-index="1"]')).toContainText('Show 60')
-  await expect(card.locator('[data-testid="team-phase-group"][data-index="3"]').getByRole('button', { name: 'Show 100 more' })).toBeVisible()
+  // "Show more" adds 20 rows at a time (T14); "Show all" is its own button.
+  const implement = card.locator('[data-testid="team-phase-group"][data-index="3"]')
+  await expect(implement.getByRole('button', { name: 'Show 20 more' })).toBeVisible()
+  await expect(implement.getByRole('button', { name: 'Show all 120' })).toBeVisible()
+  await implement.getByRole('button', { name: 'Show 20 more' }).click()
+  await expect(agentRows(implement)).toHaveCount(40)
+  await expect(implement.getByRole('button', { name: 'Show all 120' })).toBeVisible()
   await expect(card.getByTestId('team-agents-more')).toHaveText('112 more agents are not listed; the reader lists the first 400.')
   await expect(teamView(page)).not.toContainText('%')
-  // Opening a folded group shows its first 20 rows; Show more shows the rest.
-  await card.locator('[data-testid="team-phase-group"][data-index="1"] .team-group-head').click()
-  await expect(agentRows(card.locator('[data-testid="team-phase-group"][data-index="1"]'))).toHaveCount(20)
-  await card.locator('[data-testid="team-phase-group"][data-index="1"]').getByRole('button', { name: 'Show 40 more' }).click()
-  await expect(agentRows(card.locator('[data-testid="team-phase-group"][data-index="1"]'))).toHaveCount(60)
+  // Opening a folded group shows its first 20 rows; Show all the rest at once.
+  const understand = card.locator('[data-testid="team-phase-group"][data-index="1"]')
+  await understand.locator('.team-group-head').click()
+  await expect(agentRows(understand)).toHaveCount(20)
+  await understand.getByRole('button', { name: 'Show all 60' }).click()
+  await expect(agentRows(understand)).toHaveCount(60)
+  await expect(understand.getByRole('button', { name: /^Show/ })).toHaveCount(0)
   await attach(page, testInfo, 'team-view-large-folding')
   await expectPhoneFits(page)
 })
@@ -234,7 +261,7 @@ test(`[scenario:team-filters] The state radiogroup, the phase strip toggle and t
   const before = await (page.evaluate('history.length') as Promise<number>)
   await radios.getByRole('radio', { name: 'Failed 5' }).click()
   await expect(page).toHaveURL(/[?&]state=failed/)
-  await expect(card.getByTestId('team-scope')).toHaveText('Showing 5 of 400 agents')
+  await expect(card.getByTestId('team-scope')).toHaveText('Showing 5 of 400 listed agents (512 ran)')
   await expect(agentRows(card)).toHaveCount(5)
   expect(await (page.evaluate('history.length') as Promise<number>)).toBe(before)
   await radios.getByRole('radio', { name: 'All 400' }).click()
@@ -247,17 +274,20 @@ test(`[scenario:team-filters] The state radiogroup, the phase strip toggle and t
   await check.click()
   await expect(check).toHaveAttribute('aria-pressed', 'false')
   await filters.getByRole('searchbox', { name: 'Find an agent' }).fill('#7')
-  await expect(card.getByTestId('team-scope')).toHaveText('Showing 11 of 400 agents')
+  await expect(card.getByTestId('team-scope')).toHaveText('Showing 11 of 400 listed agents (512 ran)')
   await expect(page).toHaveURL(/[?&]q=%237/)
   // A filter in the URL is restored on load.
   await open(page, teamPage(TEAMS_RUNS.large, '?state=running'))
-  await expect(card.getByTestId('team-scope')).toHaveText('Showing 6 of 400 agents')
+  await expect(card.getByTestId('team-scope')).toHaveText('Showing 6 of 400 listed agents (512 ran)')
   await attach(page, testInfo, 'team-filters')
   await expectPhoneFits(page)
 })
 
 test(`[scenario:team-agent-drawer] A row opens the agent drawer (a non-modal dialog, focus on Close): facts with "not recorded", plain-text previews, Previous/Next, Escape returns the focus; duplicate labels open distinct agents by index (${phase})`, async ({ page }, testInfo) => {
-  await open(page, teamPage(TEAMS_RUNS.base))
+  // Arrive through the switcher, so the history holds the run page under the Team view.
+  await open(page, runPage(TEAMS_RUNS.base))
+  await runViewLink(page, 'team').click()
+  await expect(teamView(page)).toHaveAttribute('data-state', 'ready')
   const finished = workflowCard(page, 'wf_1a2b3c4d-5e6')
   await finished.getByRole('button', { name: 'build-run-teams' }).click()
   const opener = agentButton(finished, 5)
@@ -275,13 +305,25 @@ test(`[scenario:team-agent-drawer] A row opens the agent drawer (a non-modal dia
   await expect(sheet).toContainText('failed · no reason recorded')
   await expect(sheet).toContainText('openai-codex/gpt-6-astra')
   await expect(sheet).toContainText('The transcript stays on this machine; this page shows metadata only.')
+  // The open row is marked, and on a desk the view makes room so the drawer covers none of the roster's columns (T16).
+  await expect(finished.locator('[data-testid="team-agent-row"][data-index="5"]')).toHaveAttribute('data-selected', 'true')
+  await expect(teamView(page)).toHaveClass(/team-drawer-open/)
+  const rowBox = (await finished.locator('[data-testid="team-agent-row"][data-index="5"]').boundingBox())!
+  expect(rowBox.x + rowBox.width).toBeLessThanOrEqual((await sheet.boundingBox())!.x + 1)
   await sheet.getByRole('button', { name: 'Next agent' }).click()
   await expect(sheet).toHaveAttribute('data-index', '6')
+  await expect(finished.locator('[data-testid="team-agent-row"][data-selected="true"]')).toHaveAttribute('data-index', '6')
   await sheet.getByRole('button', { name: 'Previous agent' }).click()
   await expect(sheet).toHaveAttribute('data-index', '5')
   await page.keyboard.press('Escape')
   await expect(drawer(page)).toHaveCount(0)
   await expect(agentButton(finished, 5)).toBeFocused()
+  await expect(page).not.toHaveURL(/agent=/)
+  await expect(finished.locator('[data-testid="team-agent-row"][data-selected="true"]')).toHaveCount(0)
+  // Closing went back rather than replacing: one Back now leaves the Team view for the run page (T17).
+  await page.goBack()
+  await expect(page).not.toHaveURL(/\/team(\?|$)/)
+  await expect(page.getByTestId('workflow-graph')).toBeVisible()
   // Duplicate labels open distinct drawers by index; agent text is text: a <b> stays literal and a link is not made clickable.
   await open(page, teamPage(TEAMS_RUNS.large))
   const large = workflowCard(page, 'wf_55ee66ff-003')
@@ -364,13 +406,16 @@ test(`[scenario:run-card-team-line] A step whose session ran a team reads "worke
   await expect(card).toHaveClass(/is-team/)
   await expect(card.getByTestId('stage-team-line')).toHaveText('8 agents · 1 running · 1 failed')
   await expect(card).toContainText('team')
-  await expect(card).toHaveAccessibleName(/executed by a lead session with a team of agents.*, team of 8 agents, 1 running, 1 failed$/)
+  // The run succeeded while the records still say an agent runs: the name says so (T4).
+  await expect(card).toHaveAccessibleName(/executed by a lead session with a team of agents.*, team of 8 agents, 1 running, 1 failed\. The run has finished; these records still say running\. The reader marks a workflow interrupted after 15 quiet minutes\.$/)
   // The card keeps its 232 px width and grows at most to its 176 px maximum (CSS pixels; the stage may be zoomed).
   const [width, height] = await card.evaluate(element => { const box = element as unknown as { offsetWidth: number; offsetHeight: number }; return [box.offsetWidth, box.offsetHeight] })
   expect(width).toBe(232)
   expect(height).toBeLessThanOrEqual(176)
   const shadow = await card.evaluate(element => (globalThis as unknown as { getComputedStyle: (e: unknown) => { boxShadow: string } }).getComputedStyle(element).boxShadow)
-  expect(shadow).toContain('4px 4px')
+  // The deck is a 6 px offset with a 2 px Rule edge, visible at 100 % (T28).
+  expect(shadow).toContain('6px 6px 0px -2px')
+  expect(shadow).toContain('6px 6px 0px 0px')
   await expect(graphNode(page, 'launch_adapter')).not.toHaveClass(/is-team/)
   await expect(graphNode(page, 'launch_adapter').getByTestId('stage-team-line')).toHaveCount(0)
   await expect(page.getByTestId('legend-team')).toHaveText('Stacked edge · a lead session with a team of agents')
@@ -384,7 +429,9 @@ test(`[scenario:run-sheet-team-section] The worker's step sheet has a Team secti
   const section = stepSheet(page).getByTestId('sheet-team-section')
   await expect(section.getByRole('heading', { name: 'Team' })).toBeVisible()
   await expect(section.getByTestId('team-attention')).toHaveText("1 agent failed in Review · 2 files edited outside this lane's paths")
-  await expect(section.locator('[data-workflow="wf_7f8e9d0c-b1a"]')).toContainText('2 agents · 1 running · for 13m38s')
+  // The run finished: the running workflow's duration stops at the read and says so (T9); the caption says why it still runs (T4).
+  await expect(section.locator('[data-workflow="wf_7f8e9d0c-b1a"]')).toContainText('2 agents · 1 running · for 13m30s at last read')
+  await expect(section.getByTestId('team-finished-caption')).toContainText('The run has finished; these records still say running.')
   await expect(section.locator('.team-sheet-phases li')).toHaveText(['Fix · 1 running · 1 done', 'Check · not started'])
   await expect(section.locator('.team-sheet-agents li')).toHaveText(['fix:finding-2 · Fix · Bash · npx tsx --test tests/unit/teams.test.ts'])
   // The section sits before Events.
@@ -408,6 +455,7 @@ test(`[scenario:run-dock-working-now] While agents run, the live dock gains a Wo
   const row = liveDock(page).getByTestId('live-dock-working-now')
   await expect(row).toHaveText('Working now · 8 agents in 2 lanes · Implement, Read +2 · last activity 13 s ago ›')
   await expect(row).toHaveAttribute('data-kind', 'running')
+  await expect(liveDock(page).getByTestId('live-dock-team-caption')).toHaveCount(0)
   expect((await row.boundingBox())!.height).toBeGreaterThanOrEqual(44)
   await attach(page, testInfo, 'run-dock-working-now')
   await row.click()
@@ -417,6 +465,8 @@ test(`[scenario:run-dock-working-now] While agents run, the live dock gains a Wo
   await expect(liveDock(page).getByTestId('live-dock-working-now')).toHaveText('A team workflow in ui was interrupted · Team ›')
   await open(page, runPage(TEAMS_RUNS.base))
   await expect(liveDock(page).getByTestId('live-dock-working-now')).toHaveCount(1)
+  // The run succeeded but its records still say an agent runs: the row stays and says why (T4); a live run has no caption.
+  await expect(liveDock(page).getByTestId('live-dock-team-caption')).toHaveText('The run has finished; these records still say running. The reader marks a workflow interrupted after 15 quiet minutes.')
   await open(page, runPage(TEAMS_RUNS.killed))
   await expect(liveDock(page).getByTestId('live-dock-working-now')).toHaveCount(0)
   await open(page, runPage(TEAMS_RUNS.live))
@@ -474,9 +524,20 @@ test(`[scenario:node-team-section] The worker's page lists Team after Files in i
   await expect(section.getByTestId('team-attention')).toHaveText("1 agent failed in Review · 2 files edited outside this lane's paths")
   await expect(section.getByTestId('team-workflow')).toHaveCount(2)
   await expect(section.getByTestId('team-lead-commands')).toBeVisible()
+  // The glyph symbols are on the node page too, once (T1): the attention line's and the pills' glyphs resolve to a symbol.
+  expect(await (page.evaluate("document.querySelectorAll('#sb-g-ok').length") as Promise<number>)).toBe(1)
+  const href = await section.locator('.team-glyph use').first().getAttribute('href')
+  expect(href).toMatch(/^#sb-g-/)
+  expect(await (page.evaluate(`document.querySelector(${JSON.stringify(href)})?.tagName.toLowerCase() ?? null`) as Promise<string | null>)).toBe('symbol')
+  // The actions follow the attention line, before the workflow cards (T12).
+  const actionsTop = (await section.getByTestId('team-node-actions').boundingBox())!.y
+  expect(actionsTop).toBeLessThan((await section.getByTestId('team-workflow').first().boundingBox())!.y)
+  await expect(section.getByTestId('team-node-actions').getByTestId('node-team-link')).toBeVisible()
   await agentButton(workflowCard(section, 'wf_7f8e9d0c-b1a'), 2).click()
   await expect(drawer(page)).toHaveAttribute('data-index', '2')
   await expect(page).toHaveURL(new RegExp(`${nodePage(TEAMS_RUNS.base, 'launch_ui')}$`))
+  // On the worker's own page the drawer does not link to the page it is on (T13).
+  await expect(drawer(page).getByRole('link', { name: 'Open worker page ›' })).toHaveCount(0)
   await attach(page, testInfo, 'node-team-section')
   await drawer(page).getByTestId('team-open-in-view').click()
   await expect(page).toHaveURL(/\/team\?session=worker%3Aui&workflow=wf_7f8e9d0c-b1a&agent=2$/)
@@ -491,6 +552,14 @@ test(`[scenario:node-team-section] The worker's page lists Team after Files in i
   await open(page, nodePage(TEAMS_RUNS.base, 'handoff'))
   await expect(nodeDetail(page)).toBeVisible()
   await expect(page.getByTestId('team-section')).toHaveCount(0)
+  // A failed teams read on a worker's page says so with Read again, instead of dropping the section (T21).
+  const baseTeamsUrl = (url: URL) => url.pathname.endsWith(`/runs/${TEAMS_RUNS.base}/teams`)
+  await page.route(baseTeamsUrl, route => route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: { code: 'INTERNAL', message: 'The teams read failed' } }) }))
+  await open(page, nodePage(TEAMS_RUNS.base, 'launch_ui'))
+  await expect(nodeDetail(page)).toBeVisible()
+  await expect(page.getByTestId('team-section').getByTestId('team-not-loaded')).toContainText('Team records were not loaded')
+  await expect(page.getByTestId('team-section').getByRole('button', { name: 'Read again' })).toBeVisible()
+  await page.unroute(baseTeamsUrl)
   await open(page, nodePage(TEAMS_RUNS.base, 'launch_ui'))
   await expectPhoneFits(page)
 })
@@ -551,6 +620,210 @@ test(`[scenario:team-role-filter] A workflow whose agents carry three roles or m
   await expect(workflowCard(page, 'wf_55ee66ff-003').getByTestId('team-role-filter').getByRole('button')).toHaveText(['understand 60', 'plan 40', 'implement 120', 'review 100', 'fix 70', 'check 10'])
   await expectNoExecutionControls(page)
   await expectPhoneFits(page)
+})
+
+// ---- After the run-teams review: Needs a look, the view-wide search, the folded history, the walk, the announcer ----------
+
+/** Serves a run's teams from the page (a payload, or an HTTP status), over the fixture's; every later read gets the same answer. */
+async function serveTeams(page: Page, runId: string, answer: () => Teams | number) {
+  await page.route(url => url.pathname.endsWith(`/runs/${runId}/teams`), route => {
+    const value = answer()
+    return typeof value === 'number'
+      ? route.fulfill({ status: value, contentType: 'application/json', body: JSON.stringify({ error: { code: 'INTERNAL', message: 'The teams read failed' } }) })
+      : route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(value) })
+  })
+}
+
+/** A copy of a fixture payload (worker phase: the mock's own). */
+const fixtureTeams = (runId: string): Teams => JSON.parse(JSON.stringify(teamsByRun[runId]!)) as Teams
+
+/** The payload with one agent in a new state, its totals recounted (validateTeams checks them). */
+function withAgentState(teams: Teams, runId: string, index: number, state: AgentState): Teams {
+  const sessions = teams.sessions.map(session => ({ ...session, workflows: session.workflows.map(workflow => workflow.run_id !== runId ? workflow : {
+    ...workflow, agents: workflow.agents.map(agent => (agent.index === index ? { ...agent, state, duration_ms: agent.duration_ms ?? 60_000 } : agent)),
+  }) }))
+  return teamsPayload(teams.run_id, sessions, teams.read_at)
+}
+
+test(`[scenario:team-needs-look] One run-wide "Needs a look" panel between the head and Working now lists failed agents, outside-path edits and unreadable records; a row opens the agent's drawer or scrolls to the session; it is absent when nothing needs a look (${phase})`, async ({ page }, testInfo) => {
+  await open(page, teamPage(TEAMS_RUNS.base))
+  const look = page.getByTestId('team-needs-look')
+  await expect(look.getByRole('heading')).toHaveText('Needs a look · 4')
+  const rows = look.getByTestId('team-look-row')
+  await expect(rows).toHaveText([
+    'review:gpt #5 failed in Review · build-run-teams · ui',
+    "impl:server #4 edited 2 files outside lane ui's paths · build-run-teams",
+    "fix:finding-1 #1 edited 1 file outside lane ui's paths · fix-review-findings",
+    'Team records of Design challenge attempt 1 could not be read: The session folder could not be read.',
+  ])
+  await expect(rows.nth(0)).toHaveAttribute('data-kind', 'failed')
+  expect((await rows.nth(0).boundingBox())!.height).toBeGreaterThanOrEqual(44)
+  const order = await teamView(page).evaluate(view => [...view.children].map(child => child.getAttribute('data-testid')))
+  expect(order.indexOf('team-needs-look')).toBe(order.indexOf('team-head') + 1)
+  expect(order.indexOf('team-working-now')).toBe(order.indexOf('team-needs-look') + 1)
+  // The lanes keep their order: ui, adapter, then the other sessions.
+  await expect(page.getByTestId('team-lane')).toHaveCount(3)
+  await expect(page.getByTestId('team-lane').nth(0)).toHaveAttribute('data-lane', 'ui')
+  await rows.nth(0).click()
+  await expect(drawer(page)).toHaveAttribute('data-index', '5')
+  await expect(drawer(page)).toHaveAttribute('data-workflow', 'wf_1a2b3c4d-5e6')
+  await drawer(page).getByRole('button', { name: 'Close agent details' }).click()
+  await expect(drawer(page)).toHaveCount(0)
+  await rows.nth(3).click()
+  await expect(page.locator('#team-session-challenge-1')).toBeInViewport()
+  await attach(page, testInfo, 'team-needs-look')
+  await expectPhoneFits(page)
+  // A quiet agent is listed in words only; nothing needs a look on a run without team records.
+  await open(page, teamPage(TEAMS_RUNS.live))
+  await expect(page.getByTestId('team-look-row')).toHaveText(['impl:css #3 quiet 12m · build-team-view · ui'])
+  await expect(page.getByTestId('team-look-row').locator('svg')).toHaveCount(0)
+  await open(page, teamPage(TEAMS_RUNS.none))
+  await expect(page.getByTestId('team-needs-look')).toHaveCount(0)
+})
+
+test(`[scenario:team-view-search] One "Find an agent" field in the head searches every workflow: it names no workflow in the URL, opens each card holding a match, and says how many agents of how many it shows (${phase})`, async ({ page }, testInfo) => {
+  await open(page, teamPage(TEAMS_RUNS.base))
+  const finished = workflowCard(page, 'wf_1a2b3c4d-5e6')
+  const toggle = finished.getByRole('button', { name: 'build-run-teams' })
+  await expect(toggle).toHaveAttribute('aria-expanded', 'false')
+  const before = await (page.evaluate('history.length') as Promise<number>)
+  await page.getByTestId('team-view-search').fill('review')
+  await expect(page).toHaveURL(/[?&]q=review/)
+  await expect(page).not.toHaveURL(/workflow=/)
+  await expect(page.getByTestId('team-view-scope')).toHaveText('Showing 2 of 8 agents in 1 workflow')
+  await expect(toggle).toHaveAttribute('aria-expanded', 'true')
+  await expect(agentRows(finished)).toHaveCount(2)
+  await expect(agentRows(workflowCard(page, 'wf_7f8e9d0c-b1a'))).toHaveCount(0)
+  expect(await (page.evaluate('history.length') as Promise<number>)).toBe(before)
+  await attach(page, testInfo, 'team-view-search')
+  await expectPhoneFits(page)
+  // A partly listed team says listed and ran.
+  await page.setViewportSize(DESK)
+  await open(page, teamPage(TEAMS_RUNS.large))
+  await page.getByTestId('team-view-search').fill('#7')
+  await expect(page.getByTestId('team-view-scope')).toHaveText('Showing 11 of 400 listed agents (512 ran) in 1 workflow')
+})
+
+test(`[scenario:team-history-folding] A lead with eight workflows: the older ended ones sit under "Show 7 earlier workflows", the running one stays in view, folded cards are one row, a long description's More sits outside its clamp, and the step sheet lists at most three workflows (${phase})`, async ({ page }, testInfo) => {
+  const base = fixtureTeams(TEAMS_RUNS.base)
+  const [finished, live] = base.sessions[0]!.workflows
+  const history = Array.from({ length: 6 }, (_, offset) => ({ ...finished!, run_id: `wf_00000${offset}aa-00${offset}`, name: `history-${offset + 1}` }))
+  const long = { ...live!, description: 'Fix the review findings: '.concat('every finding of the panel review on the all-lanes branch, one agent per finding, then a check of each fix; '.repeat(4)) }
+  const payload = teamsPayload(base.run_id, [{ ...base.sessions[0]!, workflows: [...history, finished!, long] }, ...base.sessions.slice(1)], base.read_at)
+  await serveTeams(page, TEAMS_RUNS.base, () => payload)
+  await open(page, teamPage(TEAMS_RUNS.base))
+  const session = page.locator('[data-testid="team-session"][data-session="worker:ui"]')
+  const earlier = session.getByTestId('team-earlier')
+  await expect(earlier).toHaveText('Show 7 earlier workflows')
+  await expect(earlier).toHaveAttribute('aria-expanded', 'false')
+  await expect(session.getByTestId('team-earlier-list')).toBeHidden()
+  // The running card follows the one disclosure row directly, not a wall of seven folded cards.
+  const running = workflowCard(page, 'wf_7f8e9d0c-b1a')
+  await expect(running).toBeVisible()
+  const disclosure = (await earlier.boundingBox())!
+  expect((await running.boundingBox())!.y - (disclosure.y + disclosure.height)).toBeLessThan(24)
+  // Its description is clamped to two lines with More beside the paragraph, not inside it.
+  const description = running.getByTestId('team-workflow-description')
+  await expect(description).toHaveClass(/clamped/)
+  const more = running.getByRole('button', { name: 'More' })
+  await expect(more).toBeVisible()
+  expect(await description.locator('button').count()).toBe(0)
+  await more.click()
+  await expect(running.getByRole('button', { name: 'Less' })).toHaveAttribute('aria-expanded', 'true')
+  await expect(description).not.toHaveClass(/clamped/)
+  await running.getByRole('button', { name: 'Less' }).click()
+  // Opened, the earlier workflows keep their order and fold to one 44 px row each.
+  await earlier.click()
+  await expect(earlier).toHaveText('Hide 7 earlier workflows')
+  const tucked = session.getByTestId('team-earlier-list').getByTestId('team-workflow')
+  await expect(tucked).toHaveCount(7)
+  await expect(tucked.first()).toHaveAttribute('data-workflow', 'wf_000000aa-000')
+  await expect(tucked.last()).toHaveAttribute('data-workflow', 'wf_1a2b3c4d-5e6')
+  await expect(tucked.first().getByTestId('team-workflow-folded')).toHaveText('6 agents · ran 41m27s')
+  expect((await tucked.first().boundingBox())!.height).toBeLessThanOrEqual(60)
+  await attach(page, testInfo, 'team-history-folding')
+  await expectPhoneFits(page)
+  await expect(running.getByRole('button', { name: 'More' })).toBeVisible()
+  // The step sheet lists the running workflow (also the latest) and counts the rest in one line.
+  await page.setViewportSize(DESK)
+  await open(page, runPage(TEAMS_RUNS.base))
+  await openStepSheet(page, 'launch_ui')
+  const section = stepSheet(page).getByTestId('sheet-team-section')
+  await expect(section.locator('.team-sheet-workflows li[data-workflow]')).toHaveCount(1)
+  await expect(section.getByTestId('sheet-team-more')).toHaveText('and 7 more completed · Team ›')
+  // The section's link sits close under its heading, not below fourteen workflow lines.
+  const sectionTop = (await section.boundingBox())!.y
+  expect((await section.getByTestId('sheet-team-link').boundingBox())!.y - sectionTop).toBeLessThan(400)
+})
+
+test(`[scenario:team-drawer-walk-filters] Previous and Next walk the roster as the outside-paths toggle and the role chip show it; a filter change on another workflow closes the drawer instead of retargeting it; an edited file the worker handed over opens on the worker page (${phase})`, async ({ page }, testInfo) => {
+  // The large sweep, with two agents far apart that edited a server file from lane ui.
+  const large = fixtureTeams(TEAMS_RUNS.large)
+  for (const agent of large.sessions[0]!.workflows[0]!.agents) if (agent.index === 2 || agent.index === 45) agent.files_edited = ['server/outside.ts']
+  await serveTeams(page, TEAMS_RUNS.large, () => large)
+  await open(page, teamPage(TEAMS_RUNS.large))
+  const card = workflowCard(page, 'wf_55ee66ff-003')
+  await card.getByTestId('team-outside-filter').click()
+  await expect(card.getByTestId('team-outside-filter')).toHaveAttribute('aria-pressed', 'true')
+  await expect(agentRows(card)).toHaveCount(2)
+  await agentButton(card, 2).click()
+  await expect(drawer(page)).toHaveAttribute('data-index', '2')
+  await drawer(page).getByRole('button', { name: 'Next agent' }).click()
+  await expect(drawer(page)).toHaveAttribute('data-index', '45')
+  await expect(drawer(page).getByRole('button', { name: 'Next agent' })).toBeDisabled()
+  await drawer(page).getByRole('button', { name: 'Previous agent' }).click()
+  await expect(drawer(page)).toHaveAttribute('data-index', '2')
+  await expect(drawer(page).getByRole('button', { name: 'Previous agent' })).toBeDisabled()
+  await attach(page, testInfo, 'team-drawer-walk-filters')
+  // The role chip on the base run's finished workflow: impl #3, then impl #4, then nothing.
+  const base = fixtureTeams(TEAMS_RUNS.base)
+  for (const agent of base.sessions[0]!.workflows[0]!.agents) if (agent.index === 3) agent.files_edited = ['src/App.tsx', ...agent.files_edited]
+  await serveTeams(page, TEAMS_RUNS.base, () => base)
+  await open(page, teamPage(TEAMS_RUNS.base))
+  const finished = workflowCard(page, 'wf_1a2b3c4d-5e6')
+  await finished.getByRole('button', { name: 'build-run-teams' }).click()
+  await finished.getByTestId('team-role-filter').getByRole('button', { name: 'impl 2' }).click()
+  await agentButton(finished, 3).click()
+  await drawer(page).getByRole('button', { name: 'Next agent' }).click()
+  await expect(drawer(page)).toHaveAttribute('data-index', '4')
+  await expect(drawer(page).getByRole('button', { name: 'Next agent' })).toBeDisabled()
+  await drawer(page).getByRole('button', { name: 'Close agent details' }).click()
+  // A drawer open on the live workflow closes when the finished workflow's phase filter changes (it never jumps to #2 there).
+  await agentButton(workflowCard(page, 'wf_7f8e9d0c-b1a'), 2).click()
+  await expect(drawer(page)).toHaveAttribute('data-workflow', 'wf_7f8e9d0c-b1a')
+  await finished.locator('[data-testid="team-phase"]').first().click()
+  await expect(drawer(page)).toHaveCount(0)
+  await expect(page).not.toHaveURL(/agent=/)
+  await expect(page).toHaveURL(/workflow=wf_1a2b3c4d-5e6/)
+  // impl:frontend #3 edited src/App.tsx, which the ui worker handed over: it opens on the worker page; the others stay text.
+  await finished.locator('[data-testid="team-phase"]').first().click()
+  await agentButton(finished, 3).click()
+  const links = drawer(page).getByTestId('team-agent-file-link')
+  await expect(links).toHaveCount(1)
+  await expect(links).toHaveText('src/App.tsx')
+  await expect(drawer(page).getByTestId('team-agent-files')).toContainText('src/projects/teams/model.ts')
+  await links.click()
+  await expect(page).toHaveURL(new RegExp(`${nodePage(TEAMS_RUNS.base, 'launch_ui')}$`))
+  await expect(nodeDetail(page)).toBeVisible()
+  await expectPhoneFits(page)
+})
+
+test(`[scenario:team-announce-gap] A team change inside the announcer's 10 s gap is spoken when the gap ends, even when no later read changes anything (${phase})`, async ({ page }, testInfo) => {
+  test.slow()
+  const first = fixtureTeams(TEAMS_RUNS.live)
+  const failedOne = withAgentState(first, 'wf_11aa22bb-001', 2, 'failed')
+  const failedTwo = withAgentState(failedOne, 'wf_11aa22bb-001', 4, 'failed')
+  let answer: Teams = first
+  await serveTeams(page, TEAMS_RUNS.live, () => answer)
+  await open(page, teamPage(TEAMS_RUNS.live))
+  await expect(teamView(page)).toHaveAttribute('data-state', 'ready')
+  const announcer = page.locator('[role="status"][aria-live="polite"]').first()
+  answer = failedOne
+  await expect(announcer).toHaveText('impl:view #2 failed in Implement', { timeout: 15_000 })
+  // The second change arrives inside the gap (the page's clock is fixed) and polling then reads nothing new.
+  answer = failedTwo
+  await expect(announcer).toHaveText('review:claude #4 failed in Review', { timeout: 30_000 })
+  await attach(page, testInfo, 'team-announce-gap')
 })
 
 // ---- Both phases: the seeded runs, served by the mock (worker) or by the real reader from Claude Code's records (candidate) --

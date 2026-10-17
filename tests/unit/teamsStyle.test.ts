@@ -41,7 +41,7 @@ test('teams.css: no literal colour and no left border wider than 2px', () => {
   assert.deepEqual(widths.filter(width => Number(width) > 2), [])
 })
 
-test('teams.css: only the agent drawer floats (a list page casts no shadow)', () => {
-  const rules = [...CSS.matchAll(/([^{}]+)\{([^{}]*)\}/g)].filter(match => /box-shadow\s*:/.test(match[2]!) && !/box-shadow\s*:\s*none/.test(match[2]!))
+test('teams.css: only the agent drawer floats (a list page casts no shadow; an inset edge inside a row is not a shadow)', () => {
+  const rules = [...CSS.matchAll(/([^{}]+)\{([^{}]*)\}/g)].filter(match => /box-shadow\s*:/.test(match[2]!) && !/box-shadow\s*:\s*(none|inset\b)/.test(match[2]!))
   assert.deepEqual(rules.map(match => match[1]!.trim()).filter(selector => !selector.split(',').every(part => part.trim().startsWith('.team-drawer'))), [])
 })

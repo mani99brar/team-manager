@@ -1,5 +1,5 @@
-import { useState } from 'react'
-import type { TeamAgent, TeamSession } from '../../../contracts/projects/teams.ts'
+import { useState, type ReactNode } from 'react'
+import type { TeamAgent, TeamSession, TeamWorkflow } from '../../../contracts/projects/teams.ts'
 import type { RunScope, Sessions } from '../api.ts'
 import { openDialog, useRunControls } from '../controls/store.ts'
 import type { ControlId } from '../controls/types.ts'
@@ -9,7 +9,7 @@ import { STATUS_LABEL } from '../status.ts'
 import { stateTone, toneClass } from '../tone.ts'
 import { CopyButton } from './CopyButton.tsx'
 import { leadRunning, useTeam } from './context.ts'
-import { attentionLine, idPart, ownedPathsOf, sessionSentence, type LaneGroup, type ToneLine } from './model.ts'
+import { attentionLine, earlierLine, earlierWorkflows, idPart, laneNoSessionSentence, ownedPathsOf, sessionSentence, workflowMatches, type LaneGroup, type ToneLine } from './model.ts'
 import { WorkflowCard } from './WorkflowCard.tsx'
 
 /** The note control's id (controls 1.2.0). */
@@ -80,26 +80,66 @@ function useAttention(sessions: readonly TeamSession[]): ToneLine | null {
 }
 
 /**
- * The lane panel's body (3.2), shared by the Team view, the node page's Team section (6) and, in part, the step sheet: one block
- * per session in payload order (a subhead with the session's label when the lane has more than one): its workflow cards for
- * records `found`, else the sentence of its records. On the node page the attention line leads it.
+ * A session's workflow cards (3.3) in payload order. With more than four workflows, the older completed or killed ones that are
+ * not the latest sit under one "Show {n} earlier workflows" disclosure (in their order, opened in place); the latest and every
+ * running, failed or interrupted card stay out of it. The disclosure opens by itself when the selection or a view-wide search
+ * names one of the workflows it holds.
  */
-export function LaneBody({ sessions, attention, onOpen }: { sessions: readonly TeamSession[]; attention: boolean; onOpen: (session: TeamSession, workflow: string, agent: TeamAgent) => void }) {
+function SessionWorkflows({ session, owned, onOpen }: { session: TeamSession; owned: readonly string[] | null; onOpen: (session: TeamSession, workflow: string, agent: TeamAgent) => void }) {
+  const { query, idPrefix } = useTeam()
+  const earlier = earlierWorkflows(session.workflows)
+  const tucked = new Set(earlier.map(workflow => workflow.run_id))
+  const [expanded, setExpanded] = useState(false)
+  // Opens once for each new selection or search that names a tucked workflow, so the operator can still fold it again.
+  const viewQ = query.workflow === null ? query.q.trim() : ''
+  const wanted = (query.session === session.key && query.workflow !== null && tucked.has(query.workflow)) || (viewQ !== '' && earlier.some(workflow => workflowMatches(workflow, viewQ)))
+  const cue = `${query.session}|${query.workflow}|${viewQ}`
+  const [seen, setSeen] = useState(cue)
+  if (seen !== cue) {
+    setSeen(cue)
+    if (wanted && !expanded) setExpanded(true)
+  }
+  const last = session.workflows.length - 1
+  const card = (workflow: TeamWorkflow, index: number) => (
+    <WorkflowCard key={workflow.run_id} session={session} workflow={workflow} latest={index === last} owned={owned} onOpen={agent => onOpen(session, workflow.run_id, agent)} />
+  )
+  if (earlier.length === 0) return <>{session.workflows.map(card)}</>
+  const id = `${idPrefix}-earlier-${idPart(session.key)}`
+  return (
+    <>
+      <button type="button" className="team-earlier" aria-expanded={expanded} aria-controls={id} data-testid="team-earlier" data-team-select="" onClick={() => setExpanded(value => !value)}>
+        <svg className={`team-chev${expanded ? ' open' : ''}`} viewBox="0 0 20 20" aria-hidden="true"><path d="M7 5l5 5-5 5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" /></svg>
+        {expanded ? `Hide ${earlier.length} earlier ${earlier.length === 1 ? 'workflow' : 'workflows'}` : earlierLine(earlier.length)}
+      </button>
+      <div id={id} className="team-earlier-list" hidden={!expanded} data-testid="team-earlier-list">
+        {session.workflows.map((workflow, index) => (tucked.has(workflow.run_id) ? card(workflow, index) : null))}
+      </div>
+      {session.workflows.map((workflow, index) => (tucked.has(workflow.run_id) ? null : card(workflow, index)))}
+    </>
+  )
+}
+
+/**
+ * The lane panel's body (3.2), shared by the Team view, the node page's Team section (6) and, in part, the step sheet: one block
+ * per session in payload order (a subhead with the session's label when the lane has more than one, and always in Other
+ * sessions, whose sessions share no lane): its workflow cards for records `found`, else the sentence of its records. On the node
+ * page the attention line and then the section's actions (`actions`) lead it.
+ */
+export function LaneBody({ sessions, attention, onOpen, actions }: { sessions: readonly TeamSession[]; attention: boolean; onOpen: (session: TeamSession, workflow: string, agent: TeamAgent) => void; actions?: ReactNode }) {
   const context = useTeam()
   const line = useAttention(sessions)
   return (
     <div className="team-lane-body">
       {attention && line && <AttentionLine line={line} />}
+      {actions}
       {sessions.map(session => {
         const sentence = sessionSentence(session, leadRunning(context, session))
         const owned = ownedPathsOf(session, context.workers)
         return (
           <div key={session.key} className="team-session" data-testid="team-session" data-session={session.key} data-records={session.records} id={`${context.idPrefix}-session-${idPart(session.key)}`}>
-            {sessions.length > 1 && <h4 className="team-session-title">{session.label}</h4>}
+            {(sessions.length > 1 || session.lane === null) && <h4 className="team-session-title">{session.label}</h4>}
             {sentence !== null && <p className="team-session-empty" data-testid="team-session-empty">{sentence}</p>}
-            {session.workflows.map((workflow, index) => (
-              <WorkflowCard key={workflow.run_id} session={session} workflow={workflow} latest={index === session.workflows.length - 1} owned={owned} onOpen={agent => onOpen(session, workflow.run_id, agent)} />
-            ))}
+            <SessionWorkflows session={session} owned={owned} onOpen={onOpen} />
           </div>
         )
       })}
@@ -137,7 +177,7 @@ export function LanePanel({ group, onOpen }: { group: LaneGroup; onOpen: (sessio
         </div>
       </div>
       {line && <AttentionLine line={line} />}
-      {group.sessions.length === 0 && <p className="team-session-empty" data-testid="team-session-empty">No Claude session of this lane has started yet.</p>}
+      {group.sessions.length === 0 && <p className="team-session-empty" data-testid="team-session-empty">{laneNoSessionSentence(status, group.launchNodeId === null ? null : context.sessions?.sessions.find(row => row.node_id === group.launchNodeId) ?? null)}</p>}
       {!folded && <LaneBody sessions={group.sessions} attention={false} onOpen={onOpen} />}
     </section>
   )

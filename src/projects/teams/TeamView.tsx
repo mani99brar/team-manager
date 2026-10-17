@@ -6,10 +6,11 @@ import { LoadingPanel } from '../panels.tsx'
 import type { TeamQuery, TeamQueryMode } from '../routes.ts'
 import { formatAgo, type Zone } from '../time.ts'
 import type { Resource, ResourceMeta } from '../useResource.ts'
-import { TeamContext, type TeamContextValue } from './context.ts'
+import { TeamContext, useRosterExtras, type TeamContextValue } from './context.ts'
 import { DrawerHost } from './DrawerHost.tsx'
 import { LaneBody, LanePanel } from './LanePanel.tsx'
-import { CONTEXT_NOTE, headSentence, idPart, laneGroups, laneWorkers, otherSessionsLine, otherSessionsPanel, teamChanges } from './model.ts'
+import { CONTEXT_NOTE, frozenAtOf, headSentence, idPart, laneGroups, laneWorkers, needsALook, openQuery, otherSessionsLine, otherSessionsPanel, ownedPathsOf, teamChanges, teamClockOf, viewScopeLine } from './model.ts'
+import { NeedsALook } from './NeedsALook.tsx'
 import { WorkingNow } from './WorkingNow.tsx'
 import './teams.css'
 
@@ -46,6 +47,10 @@ export type TeamViewProps = {
   onNavigate: (pathname: string) => void
   /** The page's single polite announcer (docs/PRD_RUN_TEAMS.md 10). */
   onAnnounce: (message: string) => void
+  /** Opens a worker page on one of its changed files (the drawer's edited files link there). */
+  onOpenFile?: (nodeId: string, path: string) => void
+  /** The run results' cache stamp, for the drawer's read of a worker's frozen file list. */
+  resultStamp?: string
 }
 
 /** The announcer speaks at most every 10 s, coalescing what remains (docs/PRD_RUN_TEAMS.md 10). */
@@ -58,24 +63,40 @@ const ANNOUNCE_GAP_MS = 10_000
  * line, the switcher and the visually hidden `h2#run-view-title` above it. The view states of 3.9: loading, not loaded (with
  * Read again; a failed poll keeps the last read and says so), not served, and no sessions yet.
  */
-export function TeamView({ scope, detail, inputs, sessions, teams, teamsMeta, onRetryTeams, clock, live, query, onQuery, nodeHref, onNavigate, onAnnounce }: TeamViewProps) {
+export function TeamView({ scope, detail, inputs, sessions, teams, teamsMeta, onRetryTeams, clock, live, query, onQuery, nodeHref, onNavigate, onAnnounce, onOpenFile, resultStamp }: TeamViewProps) {
   const data = teams.status === 'ready' ? teams.data : null
   const workers = useMemo(() => laneWorkers(inputs.status === 'ready' ? inputs.data : null), [inputs])
   const opener = useRef<Element | null>(null)
+  const { extras, onExtras } = useRosterExtras()
+  // Whether the open drawer's entry was pushed by `open` (so Close goes back); a Back that closed it clears the mark.
+  const pushed = useRef(false)
+  useEffect(() => { if (query.agent === null) pushed.current = false }, [query.agent])
 
   // The polite announcer: a workflow's status change, then a newly failed agent; nothing on the first read, at most every 10 s.
+  // What arrives inside the gap is spoken when the gap ends, even when no later read comes (the run finished, polling stopped).
   const previous = useRef<Teams | null>(null)
   const pending = useRef<string[]>([])
   const spokenAt = useRef(0)
+  const flushTimer = useRef<number | null>(null)
   useEffect(() => {
     if (data === null) return
     pending.current.push(...teamChanges(previous.current, data))
     previous.current = data
-    if (pending.current.length === 0 || Date.now() - spokenAt.current < ANNOUNCE_GAP_MS) return
-    spokenAt.current = Date.now()
-    onAnnounce(pending.current.join('. '))
-    pending.current = []
+    if (pending.current.length === 0) return
+    const flush = () => {
+      flushTimer.current = null
+      if (pending.current.length === 0) return
+      spokenAt.current = Date.now()
+      onAnnounce(pending.current.join('. '))
+      pending.current = []
+    }
+    // A flush already waits for the gap to end: it speaks what is queued then, this read's changes included.
+    if (flushTimer.current !== null) return
+    const elapsed = Date.now() - spokenAt.current
+    if (elapsed >= ANNOUNCE_GAP_MS) { flush(); return }
+    flushTimer.current = window.setTimeout(flush, ANNOUNCE_GAP_MS - elapsed)
   }, [data, onAnnounce])
+  useEffect(() => () => { if (flushTimer.current !== null) window.clearTimeout(flushTimer.current) }, [])
 
   // A link that names a session ("Open in Team view ›") scrolls its block into view once the records are there.
   const scrolledTo = useRef<string | null>(null)
@@ -111,21 +132,38 @@ export function TeamView({ scope, detail, inputs, sessions, teams, teamsMeta, on
     )
   }
 
-  const context: TeamContextValue = { scope, detail, teams: data, workers, sessions, clock, live, query, onQuery, nodeHref, onNavigate, idPrefix: 'team' }
+  const teamClock = teamClockOf(data, clock)
+  const context: TeamContextValue = {
+    scope, detail, teams: data, workers, sessions, clock: teamClock, live, frozenAt: frozenAtOf(data, live), query, onQuery, nodeHref, onNavigate, idPrefix: 'team',
+    currentNodeId: null, extras, onExtras, onOpenFile, resultStamp,
+  }
   const { lanes, other } = laneGroups(data, workers)
   const open = (session: TeamSession, workflow: string, agent: TeamAgent) => {
     opener.current = document.activeElement
-    onQuery({ ...query, session: session.key, workflow, agent: agent.index }, 'push')
+    pushed.current = true
+    onQuery(openQuery(query, session.key, workflow, agent.index), 'push')
   }
   const failedPoll = teamsMeta.failures > 0 && teamsMeta.settledAt !== null
+  const look = needsALook([...lanes.flatMap(group => group.sessions), ...other], { owned: session => ownedPathsOf(session, workers), readAt: data.read_at })
+  // The view-wide search (3.5): one field over every workflow; it names no session or workflow, so each card applies it.
+  const viewQ = query.workflow === null ? query.q : ''
+  const search = (q: string) => onQuery({ ...query, session: null, workflow: null, agent: null, state: null, phase: null, q }, 'replace')
+  const hasTeams = data.totals.sessions_with_teams > 0
   return (
     <TeamContext.Provider value={context}>
-      <section className="team-view team-tones" data-testid="team-view" data-state="ready" aria-label="Team">
+      <section className={`team-view team-tones${query.agent !== null ? ' team-drawer-open' : ''}`} data-testid="team-view" data-state="ready" aria-label="Team">
         <div className="team-head" data-testid="team-head">
-          <p className="team-head-line">{headSentence(data, lanes, clock)}</p>
-          {failedPoll && <p className="team-caption" data-testid="team-read-failed">Last read failed; showing the read from {formatAgo(teamsMeta.settledAt!, clock)}.</p>}
-          {data.totals.sessions_with_teams > 0 && <p className="team-caption">{CONTEXT_NOTE}</p>}
+          <p className="team-head-line">{headSentence(data, lanes, teamClock)}</p>
+          {failedPoll && <p className="team-caption" data-testid="team-read-failed">Last read failed; showing the read from {formatAgo(teamsMeta.settledAt!, teamClock)}.</p>}
+          {hasTeams && <p className="team-caption">{CONTEXT_NOTE}</p>}
+          {hasTeams && (
+            <div className="team-view-search">
+              <input className="team-search" type="search" aria-label="Find an agent in every workflow" placeholder="Find an agent" data-testid="team-view-search" value={viewQ} onChange={event => search(event.target.value)} />
+              {viewQ.trim() !== '' && <p className="team-scope" role="status" data-testid="team-view-scope">{viewScopeLine(data, viewQ)}</p>}
+            </div>
+          )}
         </div>
+        <NeedsALook rows={look} onOpen={open} />
         <WorkingNow onOpen={open} />
         {lanes.map(group => <LanePanel key={group.lane} group={group} onOpen={open} />)}
         {other.length > 0 && (otherSessionsPanel(other) ? (
@@ -134,7 +172,7 @@ export function TeamView({ scope, detail, inputs, sessions, teams, teamsMeta, on
             <LaneBody sessions={other} attention={false} onOpen={open} />
           </section>
         ) : <p className="team-caption" data-testid="team-other-line">{otherSessionsLine(other.length)}</p>)}
-        <DrawerHost opener={opener} />
+        <DrawerHost opener={opener} pushedRef={pushed} />
       </section>
     </TeamContext.Provider>
   )

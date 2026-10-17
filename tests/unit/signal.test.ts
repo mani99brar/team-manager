@@ -488,7 +488,7 @@ describe('agent teams on the stage (docs/PRD_RUN_TEAMS.md 5)', () => {
     const before = withTeams(run, null)
     const after = withTeams(run, teams)
     const card = after.find(node => node.id === first!.node_id)!
-    assert.deepEqual(card.team && { ...card.team }, { workflows: 1, agents: 2, running: 1, failed: 1, outside: card.team!.outside, agentLine: 'Build · impl:a · Bash: npm test' })
+    assert.deepEqual(card.team && { ...card.team }, { workflows: 1, agents: 2, running: 1, failed: 1, outside: card.team!.outside, agentLine: 'Build · impl:a · Bash: npm test', caption: card.team!.caption })
     assert.equal(stageExecutor(card).word, 'team')
     assert.equal(card.tone, before.find(node => node.id === first!.node_id)!.tone, 'the team never changes the step\'s tone')
     assert.deepEqual(after.filter(node => node.id !== first!.node_id), before.filter(node => node.id !== first!.node_id))

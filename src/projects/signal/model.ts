@@ -255,7 +255,7 @@ export function stageNodes(input: StageModelInput, span: (ms: number) => string)
       openFindings: stageCard ? stageCard.openP01 : reviewOpen,
       cost: stageCard ? stageCard.cost : null,
       projected,
-      team: stageTeam(teams ?? null, node.node_id, workers),
+      team: stageTeam(teams ?? null, node.node_id, workers, detail.summary.status !== 'succeeded' && detail.summary.status !== 'cancelled'),
     }
     return { ...card, facts: factsOf(card, span) }
   })
