@@ -1481,7 +1481,7 @@ test('[note] offered for a working lane with a pane while the supervisor runs; o
     const controls = await r.controls('n1')
     const note = byId(controls, 'note')
     assert.equal(note.available, true, note.reason ?? '')
-    assert.deepEqual(note.params, [{ name: 'lane', kind: 'choice', choices: ['ui'], required: true }, { name: 'text', kind: 'text', min_length: 1, max_length: 2000, required: true }])
+    assert.deepEqual(note.params, [{ name: 'lane', kind: 'choice', choices: ['ui'], required: true }, { name: 'text', kind: 'text', min_length: 1, max_length: 4000, required: true }])
     assert.equal(note.command, '$PY -m workflow note "$RUN" <lane> --by operator -- "<text>"')
     assert.equal(note.label, 'Send a note to the lead')
     const text = '--help: also cover the empty state\nsecond line'
@@ -1512,12 +1512,16 @@ test('[note] the refusals workflow note would give are reasons, and the text is 
     assert.equal(await reason('ledger'), 'The workers are frozen: a note reaches a lead only before freeze')
     assert.equal(await reason('asking'), 'Every working lane waits on a question; answer it instead')
     assert.equal(await reason('abandoned'), 'The run was abandoned')
-    for (const params of [{ lane: 'ui', text: 'x'.repeat(2001) }, { lane: 'ui', text: '   ' }, { lane: 'adapter', text: 'ok' }, { lane: 'ui', text: 'nul\0' }, { lane: 'ui' }]) {
+    // PRD_RUN_TEAMS "Steering": textSpec('text', 1, 4000); workflow note itself sets no lower limit.
+    for (const params of [{ lane: 'ui', text: 'x'.repeat(4001) }, { lane: 'ui', text: '   ' }, { lane: 'adapter', text: 'ok' }, { lane: 'ui', text: 'nul\0' }, { lane: 'ui' }]) {
       const response = await r.act('ok', 'note', params)
       assert.equal(response.statusCode, 400, JSON.stringify(params))
       assert.equal(errorOf(response).code, 'INVALID_PARAMS')
     }
     assert.equal(r.spawner.calls.length, 0)
+    r.spawner.auto.code = 0
+    assert.equal((await r.act('ok', 'note', { lane: 'ui', text: 'x'.repeat(4000) })).statusCode, 200, 'a note of 4,000 characters is sent')
+    assert.equal(r.spawner.calls.length, 1)
     const blocked = await r.act('asking', 'note', { lane: 'ui', text: 'ok' })
     assert.equal(blocked.statusCode, 422)
   })

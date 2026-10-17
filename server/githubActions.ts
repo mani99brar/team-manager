@@ -17,8 +17,10 @@ import { redactText, type LoadedRun } from './projects.ts'
  * operator-confirmed actions on a run's branch, push it, open a draft pull request, mark it ready, request reviewers, offered from
  * the run's GitHub read (`RunGithub`, injected: the GitHub-read lane builds it from local git and the timer-driven gh reader) and
  * the run's status. Like every run control each maps to one fixed controller argv, `$PY -m workflow github <action> <run> --repo
- * <repository> ... --by operator` (PRD_RUN_CONTROLS principle 1): the server never runs git or gh for a write, and the controller
- * checks the branch, sha and pull request again (workflow/github.py). This module holds the pure parts the routes in
+ * <repository> --repo-name <owner/name> --branch <run branch> --head <full sha> ... --by operator` (PRD_RUN_CONTROLS principle 1):
+ * the server never runs git or gh for a write, it passes the identities the operator confirmed, and the controller refuses on any
+ * mismatch with what it reads again (workflow/github.py). An action that depends on GitHub's facts is offered only from a current
+ * read (status `read`, no `reason` from a failed refresh), and push and open_pr also need GitHub's branch head to agree. This module holds the pure parts the routes in
  * `controls.ts` use (they live in the run-control scope, so the browser guards and the pairing token apply): the offers, the
  * state token, the parameter checks, the argv and its redacted display, the default title and body, and the records
  * (`<MD_MANAGER_CONTROLS_STATE>/<project>/<workflow>/<run>.github.jsonl`). The actions are off unless the dashboard runs with
@@ -36,6 +38,14 @@ export type GithubSource = {
 export const GITHUB_ACTIONS_OFF = 'GitHub actions are off on this dashboard: start it with MD_MANAGER_GITHUB_ACTIONS=on'
 export const GITHUB_READ_MISSING = 'This dashboard has no run GitHub read to offer actions from'
 export const GITHUB_READ_FAILED = 'The run\'s GitHub facts could not be read; reload the page'
+/**
+ * The bound on one GitHub action's controller child: above the controller's worst case (its reads share a 180 s budget and its one
+ * write gets 120 s, workflow/github.py), so the server never kills a command that may be publishing.
+ */
+export const GITHUB_ACTION_TIMEOUT_MS = 6 * 60 * 1000
+/** The controller's exit code for a write that timed out and may have reached GitHub (workflow/github.py EXIT_UNKNOWN). */
+export const GITHUB_EXIT_UNKNOWN = 3
+export const GITHUB_UNKNOWN_NOTE = 'Unknown: the command ran longer than 6 minutes and was stopped; it may have been published; check GitHub.'
 
 export const TITLE_MAX = 256
 export const BODY_MAX = 60000
@@ -46,6 +56,7 @@ const WRITERS = new Set(['ADMIN', 'MAINTAIN', 'WRITE'])
 const LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/
 const TEAM = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})\/[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,99})$/
 const GITHUB_URL = /https:\/\/github\.com\/\S+/
+const FULL_SHA = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/
 
 /** Whether `value` is a GitHub login or an `org/team` slug, as the controller checks it. */
 export function isReviewerName(value: string): boolean {
@@ -61,11 +72,16 @@ export function isBranchName(value: string | null): value is string {
 
 // ---- The state token ----------------------------------------------------------------------------------------------------
 
-/** A digest of the facts the offers depend on: the branch shas and the pull request. A push or a new PR changes it. */
+/**
+ * A digest of the facts the offers and the argv depend on: the repository, its default branch and visibility, the run branch's name
+ * and shas, the GitHub read's state, and the pull request. A push, a new PR, a renamed default branch or a failed refresh changes it.
+ */
 export function githubStateToken(read: RunGithub | null, runStatus: string): string {
   const facts = read === null ? null : [
-    read.branch.local_sha, read.branch.tracking_sha, read.branch.github_sha, read.branch.push_state,
-    read.pr ? [read.pr.number, read.pr.state, read.pr.draft, read.pr.head_sha] : null, read.repo.owner_name, read.github.visibility,
+    read.repo.owner_name, read.repo.default_branch, read.github.visibility, read.github.status, read.github.reason,
+    read.branch.name, read.branch.local_sha, read.branch.tracking_sha, read.branch.github_sha, read.branch.push_state,
+    read.branch.integrated_commit, read.branch.contains_integrated,
+    read.pr ? [read.pr.number, read.pr.state, read.pr.draft, read.pr.head_ref, read.pr.head_sha] : null,
   ]
   return `gh-${createHash('sha256').update(JSON.stringify([facts, runStatus])).digest('hex').slice(0, 32)}`
 }
@@ -156,8 +172,15 @@ export function unavailableReason(id: GithubActionId, input: Pick<OfferInput, 'e
     if (read.github.status === 'pending') return 'GitHub has not been read for this branch yet; it is read within a minute'
     return read.github.reason ?? `GitHub is ${read.github.status.replace('_', ' ')} for ${repo}`
   }
+  // A refresh that failed keeps the last data with a reason: visibility, permission and the PR may have changed since.
+  if (read.github.reason !== null) return `GitHub's facts for ${repo} are not current (${read.github.reason}); the actions wait for a fresh read`
   const branch = read.branch
   const pr = read.pr
+  if (branch.local_sha === null || !FULL_SHA.test(branch.local_sha)) {
+    if (branch.push_state === 'no_local_branch') return 'The run branch is not in the repository'
+    return 'The run branch\'s head is not recorded in full'
+  }
+  const local = branch.local_sha
   switch (id) {
     case 'push_branch': {
       const permission = read.github.viewer_permission
@@ -166,6 +189,13 @@ export function unavailableReason(id: GithubActionId, input: Pick<OfferInput, 'e
       if (input.runStatus !== 'succeeded') return 'Only an integrated or accepted run\'s branch is pushed'
       if (!isBranchName(branch.name)) return 'The run records no valid branch name'
       if (branch.name === read.repo.default_branch || PROTECTED.has(branch.name)) return `${branch.name} is a default or protected branch; only a run branch is pushed`
+      if (branch.contains_integrated === false) return 'The run branch no longer contains the run\'s integrated commit; only the integrated branch is pushed'
+      // GitHub's own head must agree with the last fetch, or the push state and the commit preview describe another branch.
+      if (branch.github_sha !== branch.tracking_sha) {
+        if (branch.github_sha === local) return 'The branch is already on GitHub at the same commit'
+        if (branch.github_sha === null) return `GitHub no longer has the run branch (the last fetch still shows it at ${branch.tracking_sha!.slice(0, 12)}); fetch with --prune and look again`
+        return `GitHub has the run branch at ${branch.github_sha.slice(0, 12)}, which the last fetch did not see; fetch and look before pushing`
+      }
       switch (branch.push_state) {
         case 'up_to_date': return 'The branch is already on GitHub at the same commit'
         case 'remote_ahead': return 'GitHub has commits the run branch lacks; nothing is pushed over them'
@@ -174,11 +204,12 @@ export function unavailableReason(id: GithubActionId, input: Pick<OfferInput, 'e
         case 'unknown': return 'Where the run branch stands against GitHub is not known'
         default: break
       }
-      if (branch.local_sha === null || branch.local_sha.length < 12) return 'The run branch\'s head is not recorded in full'
       return null
     }
     case 'open_pr': {
       if (pr !== null && pr.state === 'OPEN') return `Pull request #${pr.number} is already open for this branch`
+      if (branch.github_sha === null) return 'Push the branch first: GitHub does not have the run branch at its head'
+      if (branch.github_sha !== local) return `GitHub has the run branch at ${branch.github_sha.slice(0, 12)}, not at its local head ${local.slice(0, 12)}`
       if (branch.push_state !== 'up_to_date') return 'Push the branch first: GitHub does not have the run branch at its head'
       if (!isBranchName(branch.name)) return 'The run records no valid branch name'
       if (!isBranchName(read.repo.default_branch)) return `The default branch of ${repo} is not known`
@@ -188,12 +219,20 @@ export function unavailableReason(id: GithubActionId, input: Pick<OfferInput, 'e
     case 'mark_ready': {
       if (pr === null || pr.state !== 'OPEN') return 'No pull request is open for this branch'
       if (!pr.draft) return `Pull request #${pr.number} is already ready for review`
-      return null
+      return prHeadReason(pr, local, branch.name)
     }
     case 'request_reviewers':
       if (pr === null || pr.state !== 'OPEN') return 'No pull request is open for this branch'
-      return null
+      return prHeadReason(pr, local, branch.name)
   }
+}
+
+/** Why a PR action is not offered for this pull request's head (the controller refuses unless it is the run branch at its local head). */
+function prHeadReason(pr: NonNullable<RunGithub['pr']>, local: string, branch: string | null): string | null {
+  if (!isBranchName(branch) || pr.head_ref !== branch) return `Pull request #${pr.number} is not from the run branch`
+  if (pr.head_sha === null) return `GitHub did not report the head of pull request #${pr.number}`
+  if (pr.head_sha !== local) return `Pull request #${pr.number} is at ${pr.head_sha.slice(0, 12)}, not at the run branch's local head ${local.slice(0, 12)}`
+  return null
 }
 
 /** The reviewers to suggest: the pull request's requested and latest reviewers, then the repository's recent authors; at most 30. */
@@ -212,25 +251,53 @@ export function reviewerSuggestions(read: RunGithub | null, recentAuthors: strin
 const W = ['-m', 'workflow', 'github']
 const BY = ['--by', 'operator']
 
-/** The argv after the Python executable; `bodyFile` is the server's temporary body file for `open_pr`. */
+/** The identities the operator confirmed, which the controller compares with what it reads again: repository, branch, head. */
+function confirmed(read: RunGithub): string[] {
+  return ['--repo-name', read.repo.owner_name!, '--branch', read.branch.name!, '--head', read.branch.local_sha!]
+}
+
+/**
+ * The argv after the Python executable; `bodyFile` is the server's temporary body file for `open_pr`. The title is one element,
+ * `--title=<title>`, so a title starting with `-` stays a title.
+ */
 export function githubArgv(id: GithubActionId, runDir: string, repository: string, read: RunGithub, params: GithubParams, bodyFile: string | null): string[] {
+  const head = [runDir, '--repo', repository, ...confirmed(read)]
   switch (id) {
-    case 'push_branch': return [...W, 'push', runDir, '--repo', repository, '--sha', read.branch.local_sha!, ...BY]
-    case 'open_pr': return [...W, 'pr', runDir, '--repo', repository, '--base', read.repo.default_branch!, '--title', params.title!, '--body-file', bodyFile!, ...BY]
-    case 'mark_ready': return [...W, 'ready', runDir, '--repo', repository, '--pr', String(read.pr!.number), ...BY]
-    case 'request_reviewers': return [...W, 'reviewers', runDir, '--repo', repository, '--pr', String(read.pr!.number), '--add', params.reviewers!.join(','), ...BY]
+    case 'push_branch': return [...W, 'push', ...head, ...BY]
+    case 'open_pr': return [...W, 'pr', ...head, '--base', read.repo.default_branch!, `--title=${params.title!}`, '--body-file', bodyFile!, ...BY]
+    case 'mark_ready': return [...W, 'ready', ...head, '--pr', String(read.pr!.number), ...BY]
+    case 'request_reviewers': return [...W, 'reviewers', ...head, '--pr', String(read.pr!.number), '--add', params.reviewers!.join(','), ...BY]
   }
 }
 
-/** The redacted command as the page shows it: `$PY`, `"$RUN"`, home as `~`, a 12-character sha, typed values as placeholders. */
+const SHELL_SAFE = /^[A-Za-z0-9_@%+=:,./-]+$/
+
+/** One argv element for a POSIX shell: as is when it holds only safe characters, else in single quotes (`'` as `'\''`). */
+export function shellQuote(value: string): string {
+  return value !== '' && SHELL_SAFE.test(value) ? value : `'${value.replace(/'/g, `'\\''`)}'`
+}
+
+/** The repository path quoted, keeping a leading `~/` outside the quotes so the shell still expands it. */
+function shellPath(path: string): string {
+  return path.startsWith('~/') ? `~/${shellQuote(path.slice(2))}` : shellQuote(path)
+}
+
+/**
+ * The redacted command as the page shows it: `$PY`, `"$RUN"`, home as `~`, typed values as `<placeholders>`; every value the server
+ * fills in is shell-quoted as one element, so a copied command runs exactly this argv and nothing else.
+ */
 export function githubDisplay(id: GithubActionId, repositoryShown: string, read: RunGithub | null, params: GithubParams = {}): string {
-  const repo = `--repo ${repositoryShown}`
+  const value = (text: string | null | undefined, placeholder: string) => (text ? shellQuote(text) : placeholder)
+  const head = [
+    '"$RUN"', '--repo', shellPath(repositoryShown), '--repo-name', value(read?.repo.owner_name, '<owner/name>'), '--branch', value(read?.branch.name, '<branch>'),
+    '--head', value(read?.branch.local_sha, '<sha>'),
+  ].join(' ')
   const pr = read?.pr ? String(read.pr.number) : '<pr>'
   switch (id) {
-    case 'push_branch': return `$PY -m workflow github push "$RUN" ${repo} --sha ${read?.branch.local_sha ? read.branch.local_sha.slice(0, 12) : '<sha>'} --by operator`
-    case 'open_pr': return `$PY -m workflow github pr "$RUN" ${repo} --base ${read?.repo.default_branch ?? '<base>'} --title ${params.title === undefined ? '<title>' : JSON.stringify(params.title)} --body-file <body> --by operator`
-    case 'mark_ready': return `$PY -m workflow github ready "$RUN" ${repo} --pr ${pr} --by operator`
-    case 'request_reviewers': return `$PY -m workflow github reviewers "$RUN" ${repo} --pr ${pr} --add ${params.reviewers ? params.reviewers.join(',') : '<reviewers>'} --by operator`
+    case 'push_branch': return `$PY -m workflow github push ${head} --by operator`
+    case 'open_pr': return `$PY -m workflow github pr ${head} --base ${value(read?.repo.default_branch, '<base>')} ${params.title === undefined ? '--title=<title>' : shellQuote(`--title=${params.title}`)} --body-file <body> --by operator`
+    case 'mark_ready': return `$PY -m workflow github ready ${head} --pr ${pr} --by operator`
+    case 'request_reviewers': return `$PY -m workflow github reviewers ${head} --pr ${pr} --add ${params.reviewers ? shellQuote(params.reviewers.join(',')) : '<reviewers>'} --by operator`
   }
 }
 
@@ -325,8 +392,22 @@ export function summaryInput(loaded: LoadedRun, workflowId: string, read: RunGit
 export function summaryDefaults(loaded: LoadedRun, workflowId: string, read: RunGithub | null, teams: Teams | null = null): { title: string; body: string } {
   const input = summaryInput(loaded, workflowId, read, teams)
   const title = runSummaryTitle(input, redactText).replace(/[\r\n]+/g, ' ').slice(0, TITLE_MAX)
-  const body = runSummaryMarkdown(input, redactText)
-  return { title, body: body.length > BODY_MAX ? `${body.slice(0, BODY_MAX - 2)}…\n` : body }
+  return { title, body: truncateBytes(runSummaryMarkdown(input, redactText), BODY_MAX) }
+}
+
+/** `text` when it fits in `maxBytes` of UTF-8, else cut on a code point with `…\n` appended, the whole within `maxBytes` bytes. */
+export function truncateBytes(text: string, maxBytes: number): string {
+  if (Buffer.byteLength(text, 'utf8') <= maxBytes) return text
+  const suffix = '…\n'
+  let budget = maxBytes - Buffer.byteLength(suffix, 'utf8')
+  let end = 0
+  for (const char of text) {
+    const size = Buffer.byteLength(char, 'utf8')
+    if (size > budget) break
+    budget -= size
+    end += char.length
+  }
+  return `${text.slice(0, end)}${suffix}`
 }
 
 // ---- Output -------------------------------------------------------------------------------------------------------------------

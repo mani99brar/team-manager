@@ -341,8 +341,9 @@ export class Runner {
     return found ? { ok: true } : { ok: false, reason: 'systemd-run is not available on this host; run the command in your terminal' }
   }
 
-  /** Starts one child with stdout and stderr appended to `logPath`; a synchronous failure to start is thrown. */
-  async start(command: string, args: string[], logPath: string, bound: boolean): Promise<RunningChild> {
+  /** Starts one child with stdout and stderr appended to `logPath`; a synchronous failure to start is thrown. A bound child is killed
+   * after `timeoutMs` (the runner's short-control bound unless the caller names its own, as the GitHub actions do). */
+  async start(command: string, args: string[], logPath: string, bound: boolean, timeoutMs: number = this.timeoutMs): Promise<RunningChild> {
     const fd = openSync(logPath, 'a', 0o600)
     let child: ChildProcess
     try {
@@ -369,7 +370,7 @@ export class Runner {
       timer = setTimeout(() => {
         timedOut = true
         try { this.kill(pid, 'SIGKILL') } catch { /* already gone */ }
-      }, this.timeoutMs)
+      }, timeoutMs)
       timer.unref()
     }
     return { pid: child.pid, done }
