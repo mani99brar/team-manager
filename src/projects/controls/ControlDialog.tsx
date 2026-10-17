@@ -154,8 +154,10 @@ function Body({ scope, id, preset, questions, onClose }: { scope: ControlScope; 
           setPinned(null)
         })
       }
-      // Nothing ran, so the next Confirm is a new request.
-      if (outcome.retryable) setRequestId(newRequestId())
+      // STATE_CHANGED and BUSY mean nothing ran, so the next Confirm is a new request. A network failure may have lost only the
+      // answer: the retry keeps this request_id, so the server returns the first record instead of running the control twice.
+      const lostAnswer = (error as { code?: unknown } | null)?.code === 'NETWORK'
+      if (outcome.retryable && !lostAnswer) setRequestId(newRequestId())
     } finally {
       inFlight.current = false
       setSending(false)

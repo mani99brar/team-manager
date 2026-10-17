@@ -24,8 +24,8 @@ const nodePage = runUrl(RUN, 'launch_ui', UX_TEAMS_WORKFLOW_ID)
 const DESK = { width: 1440, height: 900 }
 const PHONE = { width: 390, height: 844 }
 
-const EFFECT = 'Types your note into the lane\'s lead session between its turns and records it in <lane>.notes.json.'
-const NOT_EFFECT = 'It does not interrupt a running tool call; a team workflow that is running takes no input until it returns.'
+const EFFECT = 'Types your note into the lane\'s lead session pane as an operator note and records it in the lane\'s notes.'
+const NOT_EFFECT = 'A running team workflow takes no input: its agents never see the note, and the lead reads it when its current turn ends. It stops and restarts nothing.'
 const HELPER = 'Plain text, up to 4,000 characters. The lead reads it as an operator note, which may amend its task.'
 const UNDELIVERABLE = 'Not delivered: the pane was busy, not attached, or the lane was not working or idle. Nothing was typed; look at the pane, then send it again.'
 const NOTE_TEXT = 'Use the shared tone map; do not add a colour of your own.'

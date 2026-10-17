@@ -606,7 +606,7 @@ It is offered for a launched lane that is not frozen, not finished and not waiti
 
 **Precedence** within a container is fail > run > pause > ok > idle, so a failure is never hidden by activity. Rows are never tinted: only pills, the Now-banner GitHub answer and finding lines take soft fills, and containers take the 5 px band.
 
-**Team executor outline.** The card keeps the **solid** 1.5 px Rule outline, because the lead is an agent session. It adds a stacked "deck": a `::before` copy of the card's shape, offset 4 px right and 4 px down behind it, with a Sheet fill and a 1.5 px Rule border, at the same 10 px radius. It sits inside the 72/44 px gaps and below the float shadow, so hover still lifts. Dashed (verifier) and dotted (controller) are unchanged, no colour joins the outline, and a single-session worker keeps the plain card. The word `team` on row two repeats it.
+**Team executor outline.** The card keeps the **solid** 1.5 px Rule outline, because the lead is an agent session. It adds a stacked "deck": a copy of the card's edge offset 6 px right and 6 px down behind it, with a Sheet fill and a 2 px Rule edge, at the same 10 px radius, drawn as two offset box-shadows because the card clips a `::before` (as built; the first draft said a 4 px `::before`, too faint at 100 % zoom). It sits inside the 72/44 px gaps and below the float shadow, so hover still lifts. Dashed (verifier) and dotted (controller) are unchanged, no colour joins the outline, and a single-session worker keeps the plain card. The word `team` on row two repeats it.
 
 **Density.**
 - Rows: at least 44 px.

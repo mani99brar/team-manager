@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react'
+import { useMemo, type ReactNode } from 'react'
 import { ControlsHistory } from '../controls/ControlsRow.tsx'
 import { ControlsMenu } from '../controls/ControlsMenu.tsx'
 import { acceptedFindingsText, acceptedOf, isUntried } from '../../../contracts/projects/triage.ts'
@@ -70,7 +70,8 @@ export function IdentityLine({ detail, inputs, onRetryInputs, current, freshness
   const title = data?.feature ?? workflowTitle(definition)
   const definitionChanged = current !== null && current.definition_revision !== definition.definition_revision
   const accepted = acceptedOf(detail)
-  const scope = { projectId: summary.project_id, workflowId: summary.workflow_id, runId: summary.run_id }
+  // One object per run, so the Controls menu and its dialogs do not see a new scope on every clock tick or poll.
+  const scope = useMemo(() => ({ projectId: summary.project_id, workflowId: summary.workflow_id, runId: summary.run_id }), [summary.project_id, summary.workflow_id, summary.run_id])
   return (
     <header className={`sb-idline ${toneClass(tone)}`} data-testid="run-header" data-tone={tone} aria-labelledby="run-summary-title">
       <h2 id="run-summary-title" className="sb-runid">{summary.run_id}</h2>

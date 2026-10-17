@@ -401,6 +401,8 @@ export function RunView({ scope, detail, current, selectedNodeId, selectedAttemp
               runGithub={runGithub}
               runGithubMeta={runGithubMeta}
               onRetryRunGithub={reloadRunGithub}
+              sessionsStatus={sessions.status}
+              teamsStatus={teams.status}
               review={reviewData}
               now={now}
               {...zoneProps}
