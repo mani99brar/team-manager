@@ -53,13 +53,21 @@ const base: RunGithub = {
   branch: { ...exampleRunGithub.branch, name: GITHUB_BRANCH },
 }
 const examplePr = exampleRunGithub.pr!
+type CheckItem = NonNullable<RunPr['checks']>['items'][number]
+/** Passing check rows beyond the named ones, so every fixture lists as many rows as its counts say (no count without rows). */
+const MORE_CHECKS = ['build', 'contracts / unit', 'contracts / lint', 'contracts / build', 'relayer / build', 'relayer / lint', 'validator / unit', 'validator / build', 'web / build', 'web / lint', 'web / unit', 'sdk / unit', 'sdk / build', 'docs']
+const passingRows = (n: number): CheckItem[] => MORE_CHECKS.slice(0, n).map(name => ({ name, kind: 'check_run', status: 'COMPLETED', conclusion: 'SUCCESS', bucket: 'pass', url: null }))
+const SKIPPED_ROW: CheckItem = { name: 'release / publish', kind: 'check_run', status: 'COMPLETED', conclusion: 'SKIPPED', bucket: 'skip', url: null }
 const openPr: NonNullable<RunGithub['pr']> = {
   ...examplePr, head_ref: GITHUB_BRANCH, draft: false, review_decision: 'REVIEW_REQUIRED',
   checks: { state: 'SUCCESS', passing: 16, failing: 0, pending: 0, skipped: 1, total: 17, items: [
     { name: 'GitGuardian Security Checks', kind: 'status', status: null, conclusion: 'SUCCESS', bucket: 'pass', url: null },
     { name: 'relayer-cli / unit', kind: 'check_run', status: 'COMPLETED', conclusion: 'SUCCESS', bucket: 'pass', url: 'https://github.com/kleros/vea/actions/runs/1/job/3' },
+    ...passingRows(14), SKIPPED_ROW,
   ] },
 }
+/** The example's failing draft, its 14 passing and 1 skipped listed in full. */
+const failingChecks: NonNullable<RunPr['checks']> = { ...examplePr.checks!, items: [...examplePr.checks!.items, ...passingRows(13), SKIPPED_ROW] }
 const notPushedBranch: RunGithub['branch'] = {
   ...base.branch, tracking_sha: null, github_sha: null, push_state: 'not_pushed', ahead_of_remote: null, behind_remote: null, unpublished: UNPUBLISHED, unpublished_more: 0,
 }
@@ -70,7 +78,8 @@ const unread = (reason: string): Partial<RunGithub> => ({ github: githubState({ 
 
 /** One read per section 4.2 row, in table order. */
 export const GITHUB_SITUATIONS: Record<SituationId, RunGithub> = {
-  'no-branch': withBranch({ name: null, local_sha: null, tracking_sha: null, github_sha: null, push_state: 'unknown', ahead_of_remote: null, behind_remote: null, ahead_of_default: null, behind_default: null }),
+  // The server's blank branch (runGithub.ts blankBranch): with no branch, whether it contains the integrated commit is null.
+  'no-branch': withBranch({ name: null, local_sha: null, tracking_sha: null, github_sha: null, push_state: 'unknown', ahead_of_remote: null, behind_remote: null, ahead_of_default: null, behind_default: null, contains_integrated: null, unpublished: [], unpublished_more: 0 }),
   'no-remote': withBranch({ tracking_sha: null, github_sha: null, push_state: 'unknown' }, {
     repo: { status: 'no_remote', reason: null, owner_name: null, url: null, remote: null, default_branch: null },
     github: githubState({ status: 'not_github', reason: 'not a GitHub remote', read_at: null, viewer_login: null, visibility: null, viewer_permission: null }),
@@ -91,14 +100,14 @@ export const GITHUB_SITUATIONS: Record<SituationId, RunGithub> = {
   diverged: withBranch({ push_state: 'diverged', ahead_of_remote: 1, behind_remote: 2, github_sha: OLD_SHA, tracking_sha: OLD_SHA }),
   'remote-ahead': withBranch({ push_state: 'remote_ahead', ahead_of_remote: 0, behind_remote: 2, github_sha: OLD_SHA, tracking_sha: OLD_SHA }),
   conflicts: withPr({ mergeable: 'CONFLICTING' }),
-  'checks-failing': { ...base, pr: { ...examplePr, head_ref: GITHUB_BRANCH } },
+  'checks-failing': { ...base, pr: { ...examplePr, head_ref: GITHUB_BRANCH, checks: failingChecks } },
   'changes-requested': withPr({
     review_decision: 'CHANGES_REQUESTED', unresolved_threads: 2,
     latest_reviews: [{ author: 'gitguardian', state: 'COMMENTED', submitted_at: '2026-10-16T09:50:00Z' }, { author: 'jaybuidl', state: 'CHANGES_REQUESTED', submitted_at: '2026-10-16T08:00:00Z' }],
   }),
   'pr-behind-local': withPr({}, { push_state: 'local_ahead', ahead_of_remote: 2, behind_remote: 0, github_sha: OLD_SHA, tracking_sha: OLD_SHA, unpublished: UNPUBLISHED.slice(0, 2) }),
   approved: withPr({ review_decision: 'APPROVED', latest_reviews: [{ author: 'jaybuidl', state: 'APPROVED', submitted_at: '2026-10-16T09:30:00Z' }] }),
-  draft: withPr({ draft: true, checks: { ...openPr.checks!, state: 'PENDING', passing: 15, pending: 1, items: [{ name: 'contracts / coverage', kind: 'check_run', status: 'IN_PROGRESS', conclusion: null, bucket: 'pending', url: null }, ...openPr.checks!.items] } }),
+  draft: withPr({ draft: true, checks: { ...openPr.checks!, state: 'PENDING', passing: 15, pending: 1, items: [{ name: 'contracts / coverage', kind: 'check_run', status: 'IN_PROGRESS', conclusion: null, bucket: 'pending', url: null }, ...openPr.checks!.items.filter(item => item.name !== 'docs')] } }),
   'in-review': withPr({}),
   'not-pushed': withBranch(notPushedBranch),
   'local-ahead': withBranch({ push_state: 'local_ahead', ahead_of_remote: 2, behind_remote: 0, github_sha: OLD_SHA, tracking_sha: OLD_SHA, unpublished: UNPUBLISHED.slice(0, 2) }),
@@ -120,6 +129,9 @@ export const GITHUB_MANY_CHECKS: RunGithub = withPr({
     ],
   },
 })
+
+/** Counts that exceed the listed rows (the contract caps the list at 100): the card says how many are not listed. */
+export const GITHUB_UNLISTED_CHECKS: RunGithub = withPr({ checks: { state: 'SUCCESS', passing: 120, failing: 0, pending: 0, skipped: 0, total: 120, items: passingRows(3) } })
 
 // ---- Actions ---------------------------------------------------------------------------------------------------------
 
@@ -165,7 +177,19 @@ export const GITHUB_ACTIONS = {
       ...exampleActions.records,
     ],
   }),
+  /** A push whose outcome is unknown (the controller's exit 3 with an `Unknown:` line), listed among the records. */
+  unknown: offers([push(true, 'PUBLIC'), openPrAction(false, PUSH_FIRST), ready(false), reviewers(false)], {
+    records: [
+      { record_id: 'g-00000000000d', request_id: '4d4e28ba-2fa1-4d3b-8b2c-6a1f0e9d8c7b', action: 'push_branch', params: {}, command: COMMAND('push', ''), status: 'failed', exit_code: 3, started_at: at(55), ended_at: at(56), output_tail: ['git push timed out after 300 s', 'Unknown: git push timed out after 300 s; the branch may be on GitHub. Check before you push again.'], url: null },
+    ],
+  }),
 } satisfies Record<string, RunGithubActions>
+
+/** The record a POST answers when the push times out again: failed, exit 3, its outcome unknown. */
+export const UNKNOWN_PUSH_RECORD: RunGithubActions['records'][number] = {
+  record_id: 'g-00000000000e', request_id: '5e4e28ba-2fa1-4d3b-8b2c-6a1f0e9d8c7b', action: 'push_branch', params: {}, command: COMMAND('push', ''), status: 'failed', exit_code: 3,
+  started_at: GITHUB_READ_AT, ended_at: GITHUB_READ_AT, output_tail: ['git push timed out after 300 s', 'Unknown: git push timed out after 300 s; the branch may be on GitHub. Check before you push again.'], url: null,
+}
 
 /** Registers the default payloads (the example's checks-failing draft and its offers); the spec swaps them per scenario. */
 export const uxRunGithub: UxFixtureModule = {

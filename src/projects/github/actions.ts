@@ -10,7 +10,7 @@
  */
 import type { GithubAction, GithubActionId, GithubActionRecord, GithubParams, RunGithub, RunGithubActions } from '../../../contracts/projects/github.ts'
 import type { Tone } from '../tone.ts'
-import { parseReviewers, plural, short, unpublishedCount } from './model.ts'
+import { parseReviewers, plural, shellQuote, short, unpublishedCount } from './model.ts'
 
 // ---- Panel (4.4) -------------------------------------------------------------------------------------------------------
 
@@ -29,6 +29,12 @@ export function panelState(controls: { mode: 'loading' | 'off' | 'on'; paired: b
   if (!controls.paired) return 'unpaired'
   if (actions === null) return problem === null ? 'loading' : 'unreadable'
   return actions.enabled ? 'offered' : 'actions-off'
+}
+
+/** Said above the offers when a later read of the actions failed and the ones shown are from an earlier read. */
+export function staleActionsLine(actions: RunGithubActions | null, problem: string | null): string | null {
+  if (actions === null || problem === null) return null
+  return `Could not refresh the actions: ${problem.replace(/\.$/, '')}; showing the ones read earlier.`
 }
 
 /** The line under an action: what it publishes when offered, "Not offered: {reason}" when not. */
@@ -94,13 +100,14 @@ export type Visibility = RunGithubActions['visibility']
 /** The visibility block: a heading (bold) and a body, and whether it takes the warn band. */
 export type VisibilityBlock = { band: boolean; heading: string | null; body: string }
 
-export function visibilityBlock(id: GithubActionId, repo: string, visibility: Visibility, commits: number): VisibilityBlock {
+/** `commits` is null while the branch facts are not read (or could not be): the block then says "these commits", never 0. */
+export function visibilityBlock(id: GithubActionId, repo: string, visibility: Visibility, commits: number | null): VisibilityBlock {
   if (visibility === null) return { band: true, heading: null, body: 'The repository\'s visibility was not read, so treat it as public.' }
   if (visibility === 'PRIVATE') return { band: false, heading: null, body: `${repo} is private: what this publishes is visible to everyone with access to the repository.` }
   if (visibility === 'INTERNAL') return { band: false, heading: null, body: `${repo} is internal: what this publishes is visible to everyone with access to the repository.` }
   const heading = `${repo} is public.`
   if (id === 'push_branch') {
-    return { band: true, heading, body: `After this push anyone on the internet can read these ${plural(commits, 'commit')}: their messages, their authors' names and email addresses, and every line they change. A push cannot be taken back: deleting the branch later does not remove copies already fetched or forked.` }
+    return { band: true, heading, body: `After this push anyone on the internet can read these ${commits === null ? 'commits' : plural(commits, 'commit')}: their messages, their authors' names and email addresses, and every line they change. A push cannot be taken back: deleting the branch later does not remove copies already fetched or forked.` }
   }
   if (id === 'open_pr') return { band: true, heading, body: 'Anyone on the internet can read the title and the text below, and the pull request stays listed on the repository even if you close it.' }
   return { band: true, heading, body: 'Anyone on the internet can see this on the pull request.' }
@@ -155,7 +162,7 @@ export function initialDialogValues(action: GithubAction): DialogValues {
 /** The confirm button's words. */
 export function confirmLabel(id: GithubActionId, repo: string, read: RunGithub | null, values: DialogValues): string {
   switch (id) {
-    case 'push_branch': return `Push ${plural(read ? unpublishedCount(read.branch) : 0, 'commit')} to ${repo}`
+    case 'push_branch': return read ? `Push ${plural(unpublishedCount(read.branch), 'commit')} to ${repo}` : `Push the branch to ${repo}`
     case 'open_pr': return 'Open draft pull request'
     case 'mark_ready': return 'Mark ready for review'
     case 'request_reviewers': return `Request ${plural(parseReviewers(values.reviewers).items.length, 'reviewer')}`
@@ -175,6 +182,7 @@ export function fieldsProblem(action: GithubAction, values: DialogValues): strin
   if (body && body.kind === 'multiline') {
     if (values.body.trim().length < Math.max(1, body.min_length)) return 'Write the body.'
     if (values.body.length > body.max_length) return `The body is at most ${body.max_length} characters.`
+    if (utf8Bytes(values.body) > body.max_length) return `The body is at most ${body.max_length} bytes of UTF-8.`
   }
   const reviewers = spec(action, 'reviewers')
   if (reviewers && reviewers.kind === 'list') {
@@ -183,6 +191,38 @@ export function fieldsProblem(action: GithubAction, values: DialogValues): strin
     if (parsed.items.length === 0) return 'Name at least one reviewer.'
   }
   return null
+}
+
+/** A text's length in UTF-8 bytes, as the server counts the body (`Buffer.byteLength`). */
+export const utf8Bytes = (text: string): number => new TextEncoder().encode(text).length
+
+/** The body counter: "{n} of {max} characters", with " · {bytes} bytes" when multi-byte text makes the two differ. */
+export function bodyCounter(body: string, max: number): string {
+  const bytes = utf8Bytes(body)
+  return `${body.length} of ${max} characters${bytes !== body.length ? ` · ${bytes} bytes` : ''}`
+}
+
+export const BODY_FILE_NOTE = 'The controller reads the body from a temporary file, shown here as <body>.'
+export const FILL_FIELDS_FIRST = 'Fill the fields first'
+
+/**
+ * "The exact command" with the typed values filled in, as the server words the record's command (`githubDisplay`): the title as
+ * one shell word `--title=…` and the reviewers as one comma-joined word. `<body>` stays, since the controller reads the body
+ * from a temporary file. `copyable` is false while a field is incomplete or any other `<…>` placeholder remains, so no
+ * placeholder reaches the clipboard (pasted into bash, `<title>` is a redirection).
+ */
+export function filledCommand(action: GithubAction, values: DialogValues): { text: string; copyable: boolean; hasBody: boolean } {
+  let text = action.command
+  const problem = fieldsProblem(action, values)
+  const title = spec(action, 'title')
+  if (title && values.title.trim() !== '') text = text.replace('--title=<title>', shellQuote(`--title=${values.title}`))
+  const reviewers = spec(action, 'reviewers')
+  if (reviewers && reviewers.kind === 'list') {
+    const parsed = parseReviewers(values.reviewers, reviewers.max_items)
+    if (parsed.problem === null && parsed.items.length > 0) text = text.replace('<reviewers>', shellQuote(parsed.items.join(',')))
+  }
+  const placeholders = (text.match(/<[^<>\s]+>/g) ?? []).filter(word => word !== '<body>')
+  return { text, copyable: problem === null && placeholders.length === 0, hasBody: text.includes('<body>') }
 }
 
 /** The request's `params`: only what the action's specs name. */

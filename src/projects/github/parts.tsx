@@ -4,6 +4,7 @@
  * line. Copy only ever writes text the page shows; it acts on nothing.
  */
 import { useEffect, useRef, useState, type ReactNode, type RefObject } from 'react'
+import { flushSync } from 'react-dom'
 import { Glyph } from '../signal/Glyph.tsx'
 import type { Tone } from '../tone.ts'
 
@@ -29,16 +30,19 @@ function select(element: HTMLElement) {
 }
 
 /**
- * A Copy button: writes `text` (null keeps it off, with `waiting` beside it), says "Copied" in its live span, or selects
- * `target` and says "Select to copy" when the clipboard cannot be written.
+ * A Copy button: writes `text` (null keeps it off, with `waiting` beside it), or selects `target` and says "Select to copy" when
+ * the clipboard cannot be written. The button's own label says "Copied" or "Select to copy"; the live span beside it repeats that
+ * for a screen reader only (visually hidden), and shows only the `waiting` hint. `onFallback` runs (and renders) before the
+ * selection, so a target inside a closed disclosure is opened first; the target is then focused and scrolled into view.
  */
-export function CopyButton({ text, target, label = 'Copy', accessibleName, testId, waiting, className = '' }: {
+export function CopyButton({ text, target, label = 'Copy', accessibleName, testId, waiting, onFallback, className = '' }: {
   text: string | null
   target?: RefObject<HTMLElement | null>
   label?: string
   accessibleName?: string
   testId?: string
   waiting?: string
+  onFallback?: () => void
   className?: string
 }) {
   const [outcome, setOutcome] = useState<'copied' | 'selected' | null>(null)
@@ -54,7 +58,13 @@ export function CopyButton({ text, target, label = 'Copy', accessibleName, testI
       await navigator.clipboard.writeText(text)
       setOutcome('copied')
     } catch {
-      if (target?.current) select(target.current)
+      if (onFallback) flushSync(onFallback)
+      const element = target?.current
+      if (element) {
+        if (element.hasAttribute('tabindex')) element.focus({ preventScroll: true })
+        element.scrollIntoView({ block: 'nearest' })
+        select(element)
+      }
       setOutcome('selected')
     }
   }
@@ -63,7 +73,9 @@ export function CopyButton({ text, target, label = 'Copy', accessibleName, testI
       <button type="button" className="button button-small gh-copy-button" data-testid={testId} aria-label={accessibleName} disabled={text === null} onClick={() => void copy()}>
         {outcome === 'copied' ? 'Copied' : outcome === 'selected' ? 'Select to copy' : label}
       </button>
-      <span className="gh-copied" role="status">{text === null && waiting ? waiting : outcome === 'copied' ? 'Copied' : outcome === 'selected' ? 'Select the text to copy it' : ''}</span>
+      <span className={text === null && waiting ? 'gh-copied' : 'gh-copied visually-hidden'} role="status" data-testid={testId ? `${testId}-status` : undefined}>
+        {text === null && waiting ? waiting : outcome === 'copied' ? 'Copied' : outcome === 'selected' ? 'Select the text to copy it' : ''}
+      </span>
     </span>
   )
 }

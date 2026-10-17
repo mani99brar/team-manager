@@ -2,7 +2,7 @@ import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type Mouse
 import type { Now } from '../../../contracts/projects/triage.ts'
 import { textToString } from '../../../contracts/projects/triage.ts'
 import { runSummaryMarkdown, runSummaryTitle } from '../../../contracts/projects/summary.ts'
-import type { ReviewResult, RunDetail, RunGithub, RunInputs, RunScope, Sessions, Teams } from '../api.ts'
+import { describeApiError, type ReviewResult, type RunDetail, type RunGithub, type RunInputs, type RunScope, type Sessions, type Teams } from '../api.ts'
 import type { ControlsState } from '../controls/store.ts'
 import { fetchDispatchOverview } from '../dispatch/client.ts'
 import { ErrorPanel, LoadingPanel } from '../panels.tsx'
@@ -11,11 +11,11 @@ import { withoutGlyph } from '../steps.ts'
 import { formatAgo, formatClock, formatSpan, type Zone } from '../time.ts'
 import { useResource, type Resource, type ResourceMeta } from '../useResource.ts'
 import { useRunResults } from '../useRunData.ts'
-import { actionNote, PANEL_COPY, panelState, recentRecords, recordLabel, recordShown, UNKNOWN_SENTENCE, unknownLine } from './actions.ts'
+import { actionNote, PANEL_COPY, panelState, recentRecords, recordLabel, recordShown, staleActionsLine, UNKNOWN_SENTENCE, unknownLine } from './actions.ts'
 import {
   BRANCH_FRESHNESS, checkRowTone, checksLine, COMMANDS_CAPTION, CONNECTION_NOTE, connectionLine, conversationLine, defaultBranchLine, earlierPrsLine, freshness,
-  githubSituation, handCommands, headCommitNote, integratedLine, mergeWord, NO_CHECKOUT_NOTE, NO_PR_TEXT, parseReviewers, prStatePill, pushPill, reviewDecisionWord,
-  reviewerChip, reviewStateWord, SHARE_TEXT, shasLine, short, summaryInput, unpublishedCount, visibilityWord, type Situation,
+  githubSituation, handCommands, headCommitNote, integratedLine, mergeWord, NO_CHECKOUT_NOTE, noBranchLine, noPrCard, parseReviewers, prStatePill, pushPill, redactSummaryText,
+  refreshFailedLine, reviewerChip, reviewRow, reviewStateWord, SHARE_TEXT, shasLine, short, summaryInput, unlistedChecks, unpublishedCount, visibilityWord, type Situation,
 } from './model.ts'
 import { CommandBox, CopyButton, Pill } from './parts.tsx'
 import { openGithubDialog, useGithubActions, type GithubActionsState } from './store.ts'
@@ -35,6 +35,13 @@ export type GithubViewProps = {
   sessions: Sessions | null
   /** The teams read, for the run summary; null when not loaded or not served. */
   teams: Teams | null
+  /**
+   * Whether the sessions and teams reads have settled (their resources' status): Copy run summary waits until each is `ready`
+   * or `error`, so a summary copied early never drops their facts. Left out, they count as settled (the page then cannot tell
+   * loading from not served).
+   */
+  sessionsStatus?: Resource<unknown>['status']
+  teamsStatus?: Resource<unknown>['status']
   /** The run's GitHub read: `ready` with null when the server does not serve it (404 `NOT_RECORDED.runGithub`). */
   runGithub: Resource<RunGithub | null>
   runGithubMeta: ResourceMeta
@@ -80,7 +87,7 @@ function FoldList({ id, items, className }: { id: string; items: ReactNode[]; cl
 const notRecorded = <em className="gh-none">not recorded</em>
 const ago = (iso: string | null, now: number) => (iso ? formatAgo(iso, now) : null)
 
-function Banner({ situation, read, now, actionsState, controls, scope }: { situation: Situation; read: RunGithub; now: number; actionsState: GithubActionsState; controls: ControlsState; scope: RunScope }) {
+function Banner({ situation, read, now, actionsState, controls, scope, refreshFailed }: { situation: Situation; read: RunGithub; now: number; actionsState: GithubActionsState; controls: ControlsState; scope: RunScope; refreshFailed: string | null }) {
   const lines = freshness(read, now)
   const offered = situation.next.action !== null && controls.mode === 'on' && controls.paired && actionsState.data?.enabled
     ? actionsState.data.actions.find(action => action.id === situation.next.action && action.available) ?? null
@@ -101,6 +108,7 @@ function Banner({ situation, read, now, actionsState, controls, scope }: { situa
       </p>
       <p className="gh-fresh" data-testid="gh-banner-fresh">{lines.banner}</p>
       {lines.failed && <p className="gh-fresh" data-testid="gh-banner-failed">{lines.failed}</p>}
+      {refreshFailed && <p className="gh-fresh gh-stale" role="status" data-testid="gh-banner-refresh-failed">{refreshFailed}</p>}
       {(offered || fallback) && (
         <p className="gh-banner-next" data-testid="gh-banner-next">
           {offered
@@ -123,8 +131,8 @@ function PrCard({ read, now, order }: { read: RunGithub; now: number; order: num
   const pr = read.pr
   if (pr === null) return null
   const pill = prStatePill(pr)
-  const decision = reviewDecisionWord(pr.review_decision)
-  const merge = mergeWord(pr)
+  const review = reviewRow(pr)
+  const merge = mergeWord(pr, now)
   const head = headCommitNote(pr, read.branch)
   const earlier = earlierPrsLine(read.earlier_prs)
   const items = pr.checks?.items ?? []
@@ -141,7 +149,7 @@ function PrCard({ read, now, order }: { read: RunGithub; now: number; order: num
       <p className="gh-line gh-muted">by {pr.author} · updated {ago(pr.updated_at, now)}</p>
       {head && <p className="gh-line" data-testid="gh-pr-head-commit">{head}</p>}
       <dl className="gh-facts">
-        <div><dt>Review</dt><dd data-testid="gh-pr-review">{decision ? <Pill tone={decision.tone} word={decision.word} /> : notRecorded}</dd></div>
+        {review.shown && <div><dt>Review</dt><dd data-testid="gh-pr-review">{review.word ? <Pill tone={review.word.tone} word={review.word.word} /> : notRecorded}</dd></div>}
         <div><dt>Merge</dt><dd data-testid="gh-pr-merge">{merge === null ? notRecorded : merge.tone === null ? <span className="gh-muted">{merge.word}</span> : <Pill tone={merge.tone} word={merge.word} />}</dd></div>
         <div><dt>Conversation</dt><dd data-testid="gh-pr-conversation">{conversationLine(pr)}</dd></div>
       </dl>
@@ -162,6 +170,7 @@ function PrCard({ read, now, order }: { read: RunGithub; now: number; order: num
               )
             })}
           </ul>
+          {unlistedChecks(pr.checks) !== null && <p className="gh-line gh-muted" data-testid="gh-checks-unlisted">{unlistedChecks(pr.checks)}</p>}
           {foldPassing && (
             <button type="button" className="button button-small" data-testid="gh-checks-fold" aria-expanded={showPassing} aria-controls="gh-check-rows" onClick={() => setShowPassing(value => !value)}>
               {showPassing ? 'Hide passing' : `Show ${passingCount} passing`}
@@ -194,16 +203,24 @@ function BranchCard({ read, now, zone, order }: { read: RunGithub; now: number; 
   const integrated = integratedLine(branch)
   const defaults = defaultBranchLine(branch, read.repo.default_branch)
   const count = unpublishedCount(branch)
+  if (branch.name === null) {
+    // No branch: nothing to compare, publish or list, so only the integrated commit is said.
+    return (
+      <Card id="gh-branch" title="Branch" testId="gh-branch-card" order={order}>
+        <p className="gh-line gh-muted" data-testid="gh-branch-none">This run records no branch.</p>
+        <p className="gh-line" data-testid="gh-branch-integrated">{noBranchLine(branch)}</p>
+        <p className="gh-fresh">{freshness(read, now).local}. {BRANCH_FRESHNESS}</p>
+      </Card>
+    )
+  }
   return (
     <Card id="gh-branch" title="Branch" testId="gh-branch-card" order={order}>
-      {branch.name === null ? <p className="gh-line gh-muted">This run records no branch.</p> : (
-        <p className="gh-branch-name">
-          <code ref={name} className="gh-mono gh-wrap" data-testid="gh-branch-name">{branch.name}</code>
-          <CopyButton text={branch.name} target={name} accessibleName="Copy the branch name" testId="gh-branch-copy" />
-        </p>
-      )}
+      <p className="gh-branch-name">
+        <code ref={name} className="gh-mono gh-wrap" data-testid="gh-branch-name">{branch.name}</code>
+        <CopyButton text={branch.name} target={name} accessibleName="Copy the branch name" testId="gh-branch-copy" />
+      </p>
       <p className="gh-line"><Pill tone={pill.tone} word={pill.word} testId="gh-push-state" /></p>
-      <p className="gh-line gh-mono" data-testid="gh-branch-shas">{shasLine(branch)}</p>
+      <p className="gh-line gh-mono" data-testid="gh-branch-shas">{shasLine(branch, read.github.status)}</p>
       {defaults && <p className="gh-line" data-testid="gh-branch-default">{defaults}</p>}
       <p className={`gh-line${integrated.tone ? ` gh-tone-text tone-${integrated.tone}` : ''}`} data-testid="gh-branch-integrated">
         {integrated.tone && <Glyph tone={integrated.tone} className="gh-glyph" />}{integrated.text}
@@ -240,21 +257,22 @@ function ConnectionCard({ read, order }: { read: RunGithub; order: number }) {
   )
 }
 
+/**
+ * Share with teammates: Copy run summary stays off ("Reading the run…") until every input it reads has loaded or failed, so an
+ * early copy never silently drops lane reports, team facts or the spend. Without the clipboard (a plain-http origin) Copy opens
+ * "Show the text" first, then selects the text, focuses it and scrolls it into view.
+ */
 function ShareCard({ markdown, order }: { markdown: string | null; order: number }) {
   const [open, setOpen] = useState(false)
   const text = useRef<HTMLPreElement>(null)
   return (
     <Card id="gh-share" title="Share with teammates" testId="gh-share-card" order={order}>
       <p className="gh-line">{SHARE_TEXT}</p>
-      {markdown === null ? <p className="gh-line gh-muted">The run's inputs are still being read.</p> : (
-        <>
-          <p className="gh-share-actions">
-            <CopyButton text={markdown} target={text} label="Copy run summary" testId="gh-summary-copy" />
-            <button type="button" className="button button-small" data-testid="gh-summary-toggle" aria-expanded={open} aria-controls="gh-summary-text" onClick={() => setOpen(value => !value)}>{open ? 'Hide the text' : 'Show the text'}</button>
-          </p>
-          <pre ref={text} id="gh-summary-text" className="gh-summary" data-testid="gh-summary-text" hidden={!open}>{markdown}</pre>
-        </>
-      )}
+      <p className="gh-share-actions">
+        <CopyButton text={markdown} target={text} label="Copy run summary" testId="gh-summary-copy" waiting="Reading the run…" onFallback={() => setOpen(true)} />
+        {markdown !== null && <button type="button" className="button button-small" data-testid="gh-summary-toggle" aria-expanded={open} aria-controls="gh-summary-text" onClick={() => setOpen(value => !value)}>{open ? 'Hide the text' : 'Show the text'}</button>}
+      </p>
+      {markdown !== null && <pre ref={text} id="gh-summary-text" className="gh-summary" data-testid="gh-summary-text" tabIndex={-1} hidden={!open}>{markdown}</pre>}
     </Card>
   )
 }
@@ -291,10 +309,12 @@ function CommandsCard({ read, situation, checkout, summary, order }: { read: Run
 function ActionsPanel({ scope, state, controls, now, order }: { scope: RunScope; state: GithubActionsState; controls: ControlsState; now: number; order: number }) {
   const panel = panelState(controls, state.data, state.problem)
   const records = recentRecords(state.data, state.mine)
+  const staleLine = panel === 'offered' || panel === 'actions-off' ? staleActionsLine(state.data, state.problem) : null
   return (
     <section className="gh-card gh-actions" data-testid="gh-actions" data-state={panel} aria-labelledby="gh-actions-title" style={{ order }}>
       <h3 className="gh-card-h" id="gh-actions-title">Publish on GitHub</h3>
       {panel === 'loading' && <p className="gh-line gh-muted">Reading the run controls…</p>}
+      {staleLine !== null && <p className="gh-line gh-stale" role="status" data-testid="gh-actions-stale">{staleLine}</p>}
       {panel === 'controls-off' && <p className="gh-line" data-testid="gh-actions-copy">{PANEL_COPY.controlsOff}</p>}
       {panel === 'unpaired' && <p className="gh-line" data-testid="gh-actions-copy">{PANEL_COPY.unpaired}</p>}
       {panel === 'actions-off' && <p className="gh-line" data-testid="gh-actions-copy">{PANEL_COPY.actionsOff}</p>}
@@ -350,9 +370,18 @@ function useCheckout(projectId: string): string | null {
 }
 
 function GithubBody(props: GithubViewProps & { read: RunGithub }) {
-  const { scope, detail, inputs, sessions, teams, read, review, now: nowBanner, clock, zone, onAnnounce } = props
-  // Ages read against the later of the page's clock and the read itself: a finished run's clock stops, the poll does not.
-  const now = Math.max(clock, Date.parse(read.read_at))
+  const { scope, detail, inputs, sessions, teams, read, review, now: nowBanner, clock, zone, onAnnounce, runGithubMeta: meta, sessionsStatus, teamsStatus } = props
+  // When the page last saw the read's poll fail. The poll itself is the slow tick: each attempt (every minute on this view)
+  // settles or fails, so ages keep moving on a finished run whose page clock has stopped, without a second clock.
+  const [failedAt, setFailedAt] = useState<number | null>(null)
+  const failures = meta.failures
+  useEffect(() => {
+    if (failures === 0) return
+    const timer = window.setTimeout(() => setFailedAt(Date.now()), 0)
+    return () => window.clearTimeout(timer)
+  }, [failures])
+  const now = Math.max(clock, meta.settledAt ?? 0, failures > 0 ? failedAt ?? 0 : 0, Date.parse(read.read_at))
+  const refreshFailed = failures > 0 ? refreshFailedLine({ message: describeApiError(meta.lastError), failedAt, settledAt: meta.settledAt }, now) : null
   const situation = githubSituation(read, now)
   const { controls, state } = useGithubActions(scope)
   const checkout = useCheckout(scope.projectId)
@@ -360,10 +389,12 @@ function GithubBody(props: GithubViewProps & { read: RunGithub }) {
   // Each lane's worker report: the result of its launch step, read once per URI through the run's cache.
   const reportUris = useMemo(() => (inputsData?.workers ?? []).map(worker => detail.snapshot.nodes.find(node => node.node_id === worker.launch_node_id)?.result_uri ?? null), [inputsData, detail.snapshot.nodes])
   const fetchUris = useMemo(() => reportUris.filter((uri): uri is string => uri !== null), [reportUris])
-  const { results } = useRunResults(scope, fetchUris, '0')
+  const { results, pending } = useRunResults(scope, fetchUris, '0')
   const headline = useMemo(() => (nowBanner === null ? null : textToString(withoutGlyph(nowBanner.headline, nowBanner.glyph), Date.parse(read.read_at), { clock: (at: string) => formatClock(at, { zone }), ago: formatAgo, span: formatSpan })), [nowBanner, read.read_at, zone])
+  const settled = (status: Resource<unknown>['status'] | undefined) => status === undefined || status === 'ready' || status === 'error'
+  const summaryReady = (inputs.status === 'ready' || inputs.status === 'error') && pending === 0 && settled(sessionsStatus) && settled(teamsStatus)
   const summary = useMemo(() => {
-    if (inputs.status !== 'ready' && inputs.status !== 'error') return null
+    if (!summaryReady) return null
     const reports = new Map<string, string>()
     for (const [index, worker] of (inputsData?.workers ?? []).entries()) {
       const uri = reportUris[index]
@@ -371,8 +402,9 @@ function GithubBody(props: GithubViewProps & { read: RunGithub }) {
       if (result) reports.set(worker.node_id, result.summary)
     }
     const input = summaryInput({ detail, inputs: inputsData, review, headline, teams, sessions, runGithub: read, reports })
-    return { title: runSummaryTitle(input), markdown: runSummaryMarkdown(input) }
-  }, [inputs.status, inputsData, reportUris, results, detail, review, headline, teams, sessions, read])
+    // The same redaction as the server's pull request body: paths and credential-shaped strings never reach the clipboard.
+    return { title: runSummaryTitle(input, redactSummaryText), markdown: runSummaryMarkdown(input, redactSummaryText) }
+  }, [summaryReady, inputsData, reportUris, results, detail, review, headline, teams, sessions, read])
   // The polite announcer speaks a change of GitHub situation, never the first read (docs/PRD_RUN_TEAMS.md 10).
   const spoken = useRef<string | null>(null)
   useEffect(() => {
@@ -381,17 +413,18 @@ function GithubBody(props: GithubViewProps & { read: RunGithub }) {
     if (previous !== null && previous !== situation.id) onAnnounce(`GitHub: ${situation.suffix}`)
   }, [situation.id, situation.suffix, onAnnounce])
   const hasPr = read.pr !== null
+  const noPr = hasPr ? null : noPrCard(read, situation.id)
   return (
     <div className="gh-layout" data-testid="gh-layout">
-      <Banner situation={situation} read={read} now={now} actionsState={state} controls={controls} scope={scope} />
+      <Banner situation={situation} read={read} now={now} actionsState={state} controls={controls} scope={scope} refreshFailed={refreshFailed} />
       <div className="gh-columns">
         <div className="gh-col gh-main">
           {hasPr && <PrCard read={read} now={now} order={2} />}
           <BranchCard read={read} now={now} zone={zone} order={3} />
-          {!hasPr && (
-            <Card id="gh-nopr" title="No pull request" testId="gh-no-pr-card" order={4}>
-              <p className="gh-line">{NO_PR_TEXT}</p>
-              <p className="gh-fresh">{freshness(read, now).github ?? 'not read from GitHub yet'}</p>
+          {noPr !== null && (
+            <Card id="gh-nopr" title={noPr.title} testId="gh-no-pr-card" order={4}>
+              <p className={`gh-line${noPr.read ? '' : ' gh-muted'}`} data-testid="gh-no-pr-text" data-read={noPr.read}>{noPr.text}</p>
+              {noPr.read && <p className="gh-fresh">{freshness(read, now).github ?? 'not read from GitHub yet'}</p>}
             </Card>
           )}
         </div>
@@ -414,12 +447,19 @@ function GithubBody(props: GithubViewProps & { read: RunGithub }) {
  * switcher and the visually hidden `h2#run-view-title` above it; the read has its own poll, which keeps going after the run.
  */
 export function GithubView(props: GithubViewProps) {
-  const { runGithub, onRetryRunGithub } = props
+  const { runGithub, onRetryRunGithub, scope } = props
+  // The last read shown, kept while a fresh read loads (the re-read after an action ends starts a new load): the view stays
+  // mounted with its fields, folds and announcer instead of blanking to a loading panel, and says the change when it lands.
+  const key = `${scope.projectId}/${scope.workflowId}/${scope.runId}`
+  const ready = runGithub.status === 'ready' ? runGithub.data : null
+  const [kept, setKept] = useState<{ key: string; read: RunGithub } | null>(null)
+  if (ready !== null && (kept === null || kept.key !== key || kept.read !== ready)) setKept({ key, read: ready })
+  const shown = ready ?? (runGithub.status === 'loading' && kept !== null && kept.key === key ? kept.read : null)
   let body: ReactNode
-  if (runGithub.status === 'idle' || runGithub.status === 'loading') body = <LoadingPanel>Reading where the run branch stands against GitHub…</LoadingPanel>
+  if (shown !== null) body = <GithubBody {...props} read={shown} />
+  else if (runGithub.status === 'idle' || runGithub.status === 'loading') body = <LoadingPanel>Reading where the run branch stands against GitHub…</LoadingPanel>
   else if (runGithub.status === 'error') body = <ErrorPanel error={runGithub.error} what="The run's GitHub read" onRetry={onRetryRunGithub} />
-  else if (runGithub.data === null) body = <p className="gh-line gh-muted" data-testid="gh-not-served">This server does not serve the run's GitHub read: it predates the GitHub view. Nothing about GitHub is shown rather than guessed.</p>
-  else body = <GithubBody {...props} read={runGithub.data} />
+  else body = <p className="gh-line gh-muted" data-testid="gh-not-served">This server does not serve the run's GitHub read: it predates the GitHub view. Nothing about GitHub is shown rather than guessed.</p>
   return (
     <section className="gh-view" data-testid="gh-view" aria-labelledby="run-view-title">
       {body}
