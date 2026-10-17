@@ -828,14 +828,19 @@ export async function controlRoutes(scope: FastifyInstance, options: ControlsRou
       try { recent = await githubSource.recentAuthors(key.project) } catch { recent = [] }
     }
     // The draft PR body says when a lane worked as a team; the team read is only worth its cost while a PR can still be opened.
+    // The draft PR body says when a lane worked as a team and states the sessions' metered spend, as Copy run summary does;
+    // both reads are only worth their cost while a PR can still be opened.
     let teams: Teams | null = null
+    let meteredUsd: number | null = null
     if (githubEnabled && read !== null && read.pr === null) {
-      try { teams = await store.teams(store.scope(key.project, key.workflow), key.run) } catch { teams = null }
+      const scope = store.scope(key.project, key.workflow)
+      try { teams = await store.teams(scope, key.run) } catch { teams = null }
+      try { meteredUsd = (await store.sessions(scope, key.run)).totals.metered_usd } catch { meteredUsd = null }
     }
     const repositoryShown = shownPath(facts.repository, secrets)
     const actions = githubActionsOf({
       enabled: githubEnabled, read, readReason, runStatus: facts.status, repositoryShown, suggestions: reviewerSuggestions(read, recent),
-      defaults: summaryDefaults(facts.loaded, key.workflow, read, teams),
+      defaults: summaryDefaults(facts.loaded, key.workflow, read, teams, meteredUsd),
     })
     return { read, actions, repositoryShown, token: githubStateToken(read, facts.status) }
   }

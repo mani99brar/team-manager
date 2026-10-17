@@ -12,7 +12,8 @@
  * GitHub's state never changes the run's own status or verdict; nothing here guesses a fact the read does not hold.
  */
 import type { GithubActionId, RunBranch, RunGithub, RunPr } from '../../../contracts/projects/github.ts'
-import type { RunSummaryInput, RunSummaryLane } from '../../../contracts/projects/summary.ts'
+import { redactCredentials, redactPaths, redactText } from '../../../contracts/projects/redact.ts'
+import { headlineWithoutStatus, type RunSummaryInput, type RunSummaryLane } from '../../../contracts/projects/summary.ts'
 import type { Teams } from '../../../contracts/projects/teams.ts'
 import type { Sessions } from '../../../contracts/projects/sessions.ts'
 import type { ReviewResult, RunDetail, RunInputs } from '../../../contracts/projects/v1.ts'
@@ -473,50 +474,11 @@ export function handCommands(read: RunGithub, situation: Situation, options: { c
 
 // ---- Run summary input (4.3 "Input mapping") -------------------------------------------------------------------------
 
-/**
- * Every absolute or home path becomes `<path>`, as the server's `redactPaths` does (server/projects.ts): a path under `/srv` or
- * `/opt` is as private as one under `/home`. A URL's `//` and a relative `a/b` stay (the slash follows a letter or a slash).
- */
-export function redactPaths(text: string): string {
-  return text.replace(/(?:file:\/\/(?=\/)|(?<![\p{Script=Latin}\p{Script=Greek}\p{Script=Cyrillic}\p{Nd}._@~+/-]))(?:~(?:\/[\p{L}\p{M}\p{N}._@~+-]*)+|\/[\p{L}\p{M}\p{N}._@~+-]+(?:\/[\p{L}\p{M}\p{N}._@~+-]*)*)/gu, '<path>')
-}
-
-/**
- * Credential-shaped strings become `<redacted>`, the same patterns as the server's `redactCredentials` (server/projects.ts): GitHub
- * tokens, `sk-` keys, Slack tokens, a `Bearer` header, `token=`/`password=` assignments, a PEM block, and an upper-case secret
- * assignment keeps its name (`TELEGRAM_BOT_TOKEN=<redacted>`). Kept in step with the server until both import one module.
- */
-const CREDENTIAL_PATTERNS: readonly RegExp[] = [
-  /-----BEGIN ([A-Z0-9 ]{1,64})-----[\s\S]*?(?:-----END \1-----|$)/g,
-  /\bgh[pousr]_[A-Za-z0-9]{20,}/g,
-  /\bgithub_pat_[A-Za-z0-9_]{20,}/g,
-  /\bsk-[A-Za-z0-9_-]{20,}/g,
-  /\bxox[abprs]-[A-Za-z0-9-]{10,}/g,
-  /\bBearer\s+[A-Za-z0-9._~+/-]{20,}=*/g,
-  /\btoken=[A-Za-z0-9._~+/-]{12,}/g,
-  /\bpassword=\S{6,}/g,
-]
-const SECRET_ASSIGNMENT = /\b((?:[A-Z][A-Z0-9_]*)?(?:SECRET[A-Z0-9_]*|TOKEN|KEY|PASSWORD|PASSWD))=(?:"[^"\n]*"|'[^'\n]*'|[^\s"']+)/g
-export function redactCredentials(text: string): string {
-  return CREDENTIAL_PATTERNS.reduce((acc, pattern) => acc.replace(pattern, '<redacted>'), text).replace(SECRET_ASSIGNMENT, '$1=<redacted>')
-}
-
 /** The run summary's redaction (the server's `redactText`): paths first, then credentials. */
-export const redactSummaryText = (text: string): string => redactCredentials(redactPaths(text))
+export const redactSummaryText = redactText
+export { redactCredentials, redactPaths }
 
-/**
- * The Now headline without a leading status word: "Succeeded · no push performed" under the status "succeeded" becomes "no push
- * performed", so the summary's status line does not say it twice ("needs_attention" matches "Needs attention").
- */
-export function headlineWithoutStatus(headline: string, status: string): string {
-  const words = status.replace(/[_-]+/g, ' ').trim().toLowerCase()
-  const lead = headline.trimStart()
-  if (words === '' || !lead.toLowerCase().startsWith(words)) return headline
-  const rest = lead.slice(words.length)
-  if (rest.trim() === '') return ''
-  const match = /^\s*·\s*/.exec(rest)
-  return match ? rest.slice(match[0].length) : headline
-}
+export { headlineWithoutStatus }
 
 /** One lane's agent team from the teams read: the worker session's workflows, agents and failed agents; null without one. */
 export function laneTeam(teams: Teams | null, lane: string): RunSummaryLane['team'] {

@@ -47,7 +47,6 @@ Not run: the candidate phase, the full browser suite, `npm run build` and `workf
 
 ## Known gaps / for the integrator
 
-- **The server's note effect texts are not section 7's.** `server/controls.ts` serves "Types your note into the lane's lead session between its turns and records it in <lane>.notes.json." and "It does not interrupt a running tool call; a team workflow that is running takes no input until it returns." The dialog shows them verbatim, as the brief asks. Section 7's wording ("...as an operator note and records it in the lane's notes." / "A running team workflow takes no input: its agents never see the note...") would be a server change, outside this lane.
 - **Dialog order.** The shared Controls dialog shows title, effect, not-effect, command, then the fields. Section 7 lists the field before "What it does". I kept the shared order.
 - **Closing the drawer** (Close or Escape) replaces the entry instead of going back. After a Close, one Back press lands on the same view without an agent.
 - **The role and outside filters are per card** and not in the URL. The drawer's Previous/Next walk ignores both, as it already ignored the outside toggle.

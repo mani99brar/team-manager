@@ -7,7 +7,7 @@ import {
   type GithubParams, type RunGithub, type RunGithubActions,
 } from '../contracts/projects/github.ts'
 import type { Teams } from '../contracts/projects/teams.ts'
-import { runSummaryMarkdown, runSummaryTitle, type RunSummaryInput } from '../contracts/projects/summary.ts'
+import { headlineWithoutStatus, runSummaryMarkdown, runSummaryTitle, type RunSummaryInput } from '../contracts/projects/summary.ts'
 import { ControlsError } from './controlsGuard.ts'
 import { readLogTail, redactText as redactSecrets, tailLines, type RunKey } from './controlsRunner.ts'
 import { redactText, type LoadedRun } from './projects.ts'
@@ -372,25 +372,37 @@ function laneTeam(teams: Teams | null, lane: string): RunSummaryInput['lanes'][n
   return { workflows: session.workflows.length, agents, failed }
 }
 
-export function summaryInput(loaded: LoadedRun, workflowId: string, read: RunGithub | null, teams: Teams | null = null): RunSummaryInput {
+/** The Now headline without a leading status word, as the viewer shows it; null when nothing is left. */
+function shownHeadline(headline: string | null, status: string): string | null {
+  if (headline === null) return null
+  const rest = headlineWithoutStatus(headline, status)
+  return rest === '' ? null : rest
+}
+
+/**
+ * The draft PR body's input, mapped as the viewer's Copy run summary maps it (src/projects/github/model.ts `summaryInput`): the
+ * headline loses a leading status word (`headlineWithoutStatus`) and the spend is the sessions' metered Claude dollars when any
+ * is recorded, so both texts say the same thing.
+ */
+export function summaryInput(loaded: LoadedRun, workflowId: string, read: RunGithub | null, teams: Teams | null = null, meteredUsd: number | null = null): RunSummaryInput {
   const review = loaded.review
   const open = review ? review.findings.filter(finding => finding.disposition === 'open') : []
   return {
     runId: loaded.detail.summary.run_id, workflowId, feature: loaded.inputs?.feature ?? null, status: loaded.detail.summary.status,
-    headline: loaded.detail.summary.activity?.headline ?? null, branch: read?.branch.name ?? loaded.inputs?.source_branch ?? null,
+    headline: shownHeadline(loaded.detail.summary.activity?.headline ?? null, loaded.detail.summary.status), branch: read?.branch.name ?? loaded.inputs?.source_branch ?? null,
     baseCommit: loaded.inputs?.base_commit ?? null, integratedCommit: read?.branch.integrated_commit ?? null,
     review: review ? {
       verdict: review.verdict, reviewers: review.reviewers.map(reviewer => reviewer.reviewer_id),
       open: { p0: open.filter(finding => finding.severity === 'P0').length, p1: open.filter(finding => finding.severity === 'P1').length, p2: open.filter(finding => finding.severity === 'P2').length },
     } : null,
     lanes: (loaded.inputs?.workers ?? []).map(worker => ({ lane: worker.node_id, summary: worker.completion?.summary ?? null, team: laneTeam(teams, worker.node_id) })),
-    costUsd: loaded.claudeUsd,
+    costUsd: meteredUsd !== null && meteredUsd > 0 ? meteredUsd : null,
     pr: read?.pr ? { number: read.pr.number, url: read.pr.url, state: read.pr.state, draft: read.pr.draft } : null,
   }
 }
 
-export function summaryDefaults(loaded: LoadedRun, workflowId: string, read: RunGithub | null, teams: Teams | null = null): { title: string; body: string } {
-  const input = summaryInput(loaded, workflowId, read, teams)
+export function summaryDefaults(loaded: LoadedRun, workflowId: string, read: RunGithub | null, teams: Teams | null = null, meteredUsd: number | null = null): { title: string; body: string } {
+  const input = summaryInput(loaded, workflowId, read, teams, meteredUsd)
   const title = runSummaryTitle(input, redactText).replace(/[\r\n]+/g, ' ').slice(0, TITLE_MAX)
   return { title, body: truncateBytes(runSummaryMarkdown(input, redactText), BODY_MAX) }
 }

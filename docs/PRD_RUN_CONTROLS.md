@@ -265,8 +265,8 @@ The fake controller for browser checks and the critique app (`tests/project-work
 
 **Contract 1.2.0** appends a fifteenth control, `note` ("Send a note to the lead"), after `relaunch`; the first fourteen keep their order.
 
-- It runs `$PY -m workflow note "$RUN" <lane> --by operator -- "<text>"` (short, plain confirm). The text is 1 to 2000 characters and travels after `--`, one argv element.
-- Effect: "Types your note into the lane's lead session between its turns and records it in <lane>.notes.json." Not: "It does not interrupt a running tool call; a team workflow that is running takes no input until it returns."
+- It runs `$PY -m workflow note "$RUN" <lane> --by operator -- "<text>"` (short, plain confirm). The text is 1 to 4000 characters and travels after `--`, one argv element.
+- Effect: "Types your note into the lane's lead session pane as an operator note and records it in the lane's notes." Not: "A running team workflow takes no input: its agents never see the note, and the lead reads it when its current turn ends. It stops and restarts nothing." (docs/PRD_RUN_TEAMS.md section 7).
 - Offered for the lanes `workflow note` would accept as far as the server can see (workflow/sidecar.py `refusal`): a launch receipt and no stop, handoff or completion file, before freeze (no `snapshots.json`, no closed sidecar ledger), no unanswered question (answer it instead), the run neither abandoned nor accepted, and, like Answer, a Herdr pane for the lane (`HERDR_ENV=1` and `terminals.json`). It needs no quiet run: a note reaches a lead while the supervisor runs. The controller still decides; a pane that is busy or detached is recorded `undeliverable` by `note` itself and shown as a failed record.
 
 **The GitHub family** (`contracts/projects/github.ts`, `runGithubActionsSchema` 1.0.0, `server/githubActions.ts`) lives in the same scope, so guards 1 to 4 apply unchanged, and shares the one-in-flight-per-run rule (409 `BUSY`) with the controls:
