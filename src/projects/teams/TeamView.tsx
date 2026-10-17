@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { Now } from '../../../contracts/projects/triage.ts'
 import type { TeamAgent, TeamSession } from '../../../contracts/projects/teams.ts'
 import { describeApiError, type ReviewResult, type RunDetail, type RunInputs, type RunScope, type Sessions, type Teams } from '../api.ts'
@@ -10,7 +10,7 @@ import { TeamContext, useRosterExtras, type TeamContextValue } from './context.t
 import { DrawerHost } from './DrawerHost.tsx'
 import { LaneBody, LanePanel } from './LanePanel.tsx'
 import { currentHistoryKey, drawerEntryKey, markDrawerEntry, markWideSearch, wideSearchMark } from './history.ts'
-import { closeMode, CONTEXT_NOTE, frozenAtOf, headSentence, idPart, laneGroups, laneWorkers, needsALook, openMode, openQuery, otherSessionsLine, otherSessionsPanel, ownedPathsOf, teamChanges, teamClockOf, viewScopeLine, viewSearchOf, wideSearch } from './model.ts'
+import { closeMode, CONTEXT_NOTE, foldHeldWrite, heldQuery, type HeldWrites, frozenAtOf, headSentence, idPart, laneGroups, laneWorkers, needsALook, openMode, openQuery, otherSessionsLine, otherSessionsPanel, ownedPathsOf, teamChanges, teamClockOf, viewScopeLine, viewSearchOf, wideSearch } from './model.ts'
 import { NeedsALook } from './NeedsALook.tsx'
 import { WorkingNow } from './WorkingNow.tsx'
 import './teams.css'
@@ -54,25 +54,42 @@ export type TeamViewProps = {
   resultStamp?: string
 }
 
+/** What a caller runs once its write is in the history: `moved` is true when the write pushed a new entry. */
+type AfterWrite = (moved: boolean) => void
+
 /**
- * The view's query writer with the drawer entry kept in mind (3.8, final review F7.1): a `replace` that clears the agent (the
- * view-wide search, another card's filter) while the current entry is the drawer entry the view pushed goes back instead, then
- * writes the new selection onto the landed entry, so no drawer entry is left behind and one Back still leaves the view. Writes
- * that arrive while that Back is on its way (the next keystrokes) are folded into the one written when it lands.
+ * The view's query writer with the drawer entry kept in mind (3.8, final review F7.1, F4.1): a `replace` that clears the agent
+ * (the view-wide search, another card's filter) while the current entry is the drawer entry the view pushed goes back instead,
+ * then writes the new selection onto the landed entry, so no drawer entry is left behind and one Back still leaves the view.
+ * Writes that arrive while that Back is on its way (the next keystrokes, an agent open) are folded into the held writes
+ * (`foldHeldWrite`) and the view renders the latest of them at once, so the search field shows every keystroke; when Back lands
+ * the selection is written with replace and a held agent open is pushed after it, keeping its push.
  */
-function useDrawerAwareQuery(write: (query: TeamQuery, mode: TeamQueryMode) => void): (query: TeamQuery, mode: TeamQueryMode) => void {
-  const pending = useRef<TeamQuery | null>(null)
-  return useCallback((next: TeamQuery, mode: TeamQueryMode) => {
-    if (pending.current !== null) { pending.current = next; return }
-    if (mode !== 'replace' || next.agent !== null || closeMode(currentHistoryKey(), drawerEntryKey()) !== 'back') { write(next, mode); return }
-    pending.current = next
-    window.addEventListener('popstate', () => {
-      const landed = pending.current!
-      pending.current = null
-      if (teamQuerySearch(landed) !== window.location.search) write(landed, 'replace')
-    }, { once: true })
-    window.history.back()
+function useDrawerAwareQuery(query: TeamQuery, write: (query: TeamQuery, mode: TeamQueryMode) => void): [TeamQuery, (query: TeamQuery, mode: TeamQueryMode, then?: AfterWrite) => void] {
+  const held = useRef<HeldWrites<TeamQuery, AfterWrite> | null>(null)
+  // The ref folds writes synchronously (two keystrokes in one task); the state renders the latest of them.
+  const [shown, setShown] = useState<TeamQuery | null>(null)
+  const writeNow = useCallback((next: TeamQuery, mode: TeamQueryMode, then: AfterWrite | null) => {
+    const before = currentHistoryKey()
+    write(next, mode)
+    then?.(mode === 'push' && currentHistoryKey() !== before)
   }, [write])
+  const onQuery = useCallback((next: TeamQuery, mode: TeamQueryMode, then?: AfterWrite) => {
+    if (held.current !== null) { held.current = foldHeldWrite(held.current, next, mode, then ?? null); setShown(heldQuery(held.current)); return }
+    if (mode !== 'replace' || next.agent !== null || closeMode(currentHistoryKey(), drawerEntryKey()) !== 'back') { writeNow(next, mode, then ?? null); return }
+    held.current = foldHeldWrite(null, next, mode, then ?? null)
+    window.addEventListener('popstate', () => {
+      const landed = held.current!
+      held.current = null
+      if (teamQuerySearch(landed.base) !== window.location.search) write(landed.base, 'replace')
+      landed.baseThen?.(false)
+      if (landed.push !== null) writeNow(landed.push, 'push', landed.pushThen)
+      setShown(null)
+    }, { once: true })
+    setShown(next)
+    window.history.back()
+  }, [write, writeNow])
+  return [shown ?? query, onQuery]
 }
 
 /** The announcer speaks at most every 10 s, coalescing what remains (docs/PRD_RUN_TEAMS.md 10). */
@@ -85,8 +102,8 @@ const ANNOUNCE_GAP_MS = 10_000
  * line, the switcher and the visually hidden `h2#run-view-title` above it. The view states of 3.9: loading, not loaded (with
  * Read again; a failed poll keeps the last read and says so), not served, and no sessions yet.
  */
-export function TeamView({ scope, detail, inputs, sessions, teams, teamsMeta, onRetryTeams, clock, live, query, onQuery: writeQuery, nodeHref, onNavigate, onAnnounce, onOpenFile, resultStamp }: TeamViewProps) {
-  const onQuery = useDrawerAwareQuery(writeQuery)
+export function TeamView({ scope, detail, inputs, sessions, teams, teamsMeta, onRetryTeams, clock, live, query: urlQuery, onQuery: writeQuery, nodeHref, onNavigate, onAnnounce, onOpenFile, resultStamp }: TeamViewProps) {
+  const [query, onQuery] = useDrawerAwareQuery(urlQuery, writeQuery)
   const data = teams.status === 'ready' ? teams.data : null
   const workers = useMemo(() => laneWorkers(inputs.status === 'ready' ? inputs.data : null), [inputs])
   const opener = useRef<Element | null>(null)
@@ -168,11 +185,13 @@ export function TeamView({ scope, detail, inputs, sessions, teams, teamsMeta, on
     // Close closes the drawer; the mark stays, as the entry's key does (3.8).
     const mode = openMode(query)
     const fromWide = viewQ.trim() !== ''
-    const before = currentHistoryKey()
-    onQuery(openQuery(query, session.key, workflow, agent.index, fromWide), mode)
-    // Marked only when the push really made a new entry (a host without pushes replaces, and Close must not go back then).
-    if (mode === 'push' && currentHistoryKey() !== before) markDrawerEntry()
-    markWideSearch(fromWide ? query.q : null)
+    const q = query.q
+    // Marked once the write is in the history (after a held Back lands, F4.1), and the drawer entry only when the push really
+    // made a new entry (a host without pushes replaces, and Close must not go back then).
+    onQuery(openQuery(query, session.key, workflow, agent.index, fromWide), mode, moved => {
+      if (moved) markDrawerEntry()
+      markWideSearch(fromWide ? q : null)
+    })
   }
   const failedPoll = teamsMeta.failures > 0 && teamsMeta.settledAt !== null
   const look = needsALook([...lanes.flatMap(group => group.sessions), ...other], { owned: session => ownedPathsOf(session, workers), readAt: data.read_at })

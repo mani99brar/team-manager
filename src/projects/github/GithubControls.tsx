@@ -2,7 +2,9 @@
  * The GitHub actions' dialog and the Controls menu's GitHub group (docs/PRD_RUN_TEAMS.md 4.4 "Controls menu" and 4.5
  * "Dialogs"). The dialog reuses the `ControlDialog` shell's behaviour: a native modal `<dialog>` (focus trapped, Escape and
  * Cancel close it without sending, the opener gets focus back; while the action is being sent nothing closes it, and a native
- * close the page could not stop closes the store's dialog too), the `request_id` rule of `nextAttempt` (the same id only for a
+ * close the page could not stop closes the store's dialog too; the focus stays in it, on a pressed Confirm that is aria-disabled,
+ * not disabled, through the send and a failed answer, and a close tried mid-send is said in its polite live region, final review
+ * F3.1), the `request_id` rule of `nextAttempt` (the same id only for a
  * retry after a lost answer with unchanged fields, so the server's dedup answers it with the first record; a new one after an
  * edit or any answered failure) and the actions' `state_token` from when it opened, so a moved branch answers 409 and the
  * dialog says so. Its parts, in order: title,
@@ -16,7 +18,7 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import { fetchRunGithub, postGithubAction, type GithubActionId, type RunGithub, type RunScope } from '../api.ts'
 import { ControlError, readToken } from '../controls/client.ts'
-import { attemptFingerprint, describeFailure, heldAfterFailure, nextAttempt, type RequestAttempt } from '../controls/model.ts'
+import { attemptFingerprint, confirmOff, describeFailure, heldAfterFailure, nextAttempt, SENDING_HINT, type RequestAttempt } from '../controls/model.ts'
 import { setMenu, unpairBrowser } from '../controls/store.ts'
 import {
   actionNote, BODY_FILE_NOTE, bodyCounter, buildGithubParams, COMMAND_NOTE, confirmLabel, dialogTitle, factsLine, fieldsProblem, filledCommand, hasReviewer,
@@ -83,6 +85,8 @@ function DialogShell({ scope, id }: { scope: RunScope; id: GithubActionId }) {
   const pressed = useRef<EventTarget | null>(null)
   useLayoutEffect(() => { scopeRef.current = scope })
   const close = useCallback(() => closeGithubDialog(scopeRef.current), [])
+  // A close tried while the action is sent: the body's live region then says why the dialog stays open (final review F3.1).
+  const [blocked, setBlocked] = useState(false)
   useLayoutEffect(() => {
     const dialog = ref.current
     if (!dialog) return
@@ -94,6 +98,7 @@ function DialogShell({ scope, id }: { scope: RunScope; id: GithubActionId }) {
     const onCancel = (event: Event) => {
       event.preventDefault()
       if (!isSending(dialog)) closeGithubDialog(scopeRef.current)
+      else setBlocked(true)
     }
     // A close the cancel event could not stop (a non-cancelable cancel under the close-watcher rules, a second Escape or a back
     // gesture) still closes the native dialog: the store's dialog closes with it, so the action can be opened again. The close
@@ -116,17 +121,19 @@ function DialogShell({ scope, id }: { scope: RunScope; id: GithubActionId }) {
       onClick={event => {
         const started = pressed.current
         pressed.current = null
-        if (event.target === event.currentTarget && started === event.currentTarget && !isSending(event.currentTarget)) close()
+        if (event.target !== event.currentTarget || started !== event.currentTarget) return
+        if (isSending(event.currentTarget)) setBlocked(true)
+        else close()
       }}
     >
-      <DialogBody scope={scope} id={id} onClose={close} />
+      <DialogBody scope={scope} id={id} onClose={close} blocked={blocked} onBlocked={setBlocked} />
     </dialog>
   )
 }
 
 const EMPTY_VALUES: DialogValues = { title: '', body: '', reviewers: '', typed: '' }
 
-function DialogBody({ scope, id, onClose }: { scope: RunScope; id: GithubActionId; onClose: () => void }) {
+function DialogBody({ scope, id, onClose, blocked, onBlocked }: { scope: RunScope; id: GithubActionId; onClose: () => void; blocked: boolean; onBlocked: (on: boolean) => void }) {
   const state = useGithubActionsState(scope)
   // The offers the dialog opened on: their state_token is the one posted, so a branch that moved answers 409.
   const [opened] = useState(() => state.data)
@@ -137,6 +144,9 @@ function DialogBody({ scope, id, onClose }: { scope: RunScope; id: GithubActionI
   const held = useRef<RequestAttempt | null>(null)
   const [read, setRead] = useState<RunGithub | 'loading' | 'failed'>('loading')
   const [sending, setSending] = useState(false)
+  // Once Confirm was pressed it stays focusable (aria-disabled, `confirmOff`), so a send or a failed answer keeps the focus on it.
+  const [pressed, setPressed] = useState(false)
+  const sendingHint = useId()
   const [alert, setAlert] = useState<string | null>(null)
   const [stale, setStale] = useState(false)
   const [recordId, setRecordId] = useState<string | null>(null)
@@ -182,6 +192,8 @@ function DialogBody({ scope, id, onClose }: { scope: RunScope; id: GithubActionI
     if (token === null) return
     inFlight.current = true
     setSending(true)
+    setPressed(true)
+    onBlocked(false)
     setAlert(null)
     const params = buildGithubParams(action, values)
     const attempt = nextAttempt(held.current, attemptFingerprint(opened.state_token, params))
@@ -311,12 +323,18 @@ function DialogBody({ scope, id, onClose }: { scope: RunScope; id: GithubActionI
           </div>
         )}
         {alert !== null && <p className="ctl-error" role="alert" data-testid="gh-dialog-alert">{alert}</p>}
+        {sending && <p className="ctl-hint" id={sendingHint} data-testid="gh-dialog-sending-hint">{SENDING_HINT}</p>}
+        {/* The dialog's polite live region (final review F3.1): Escape, Cancel or the backdrop tried mid-send says why nothing closed. */}
+        <p className="visually-hidden" role="status" data-testid="gh-dialog-status">{blocked && sending ? SENDING_HINT : ''}</p>
         <div className="ctl-actions">
-          <button type="button" className="button button-small" data-testid="gh-dialog-cancel" disabled={sending} onClick={() => { if (!sending) onClose() }}>{record || stale ? 'Close' : 'Cancel'}</button>
+          <button
+            type="button" className="button button-small" data-testid="gh-dialog-cancel" aria-disabled={sending || undefined} aria-describedby={sending ? sendingHint : undefined}
+            onClick={() => { if (!sending && !inFlight.current) onClose(); else onBlocked(true) }}
+          >{record || stale ? 'Close' : 'Cancel'}</button>
           {!record && (
             <button
               type="button" className={`button button-small ctl-primary${typed ? ' is-destructive' : ''}`} data-testid="gh-dialog-confirm"
-              disabled={!canConfirm} aria-busy={sending} onClick={() => void confirm()}
+              {...confirmOff(canConfirm, pressed || sending)} aria-busy={sending} onClick={() => void confirm()}
             >{sending ? 'Sending…' : confirmLabel(id, repoName, facts, values)}</button>
           )}
         </div>

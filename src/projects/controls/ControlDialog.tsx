@@ -1,7 +1,7 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import { postCleanPreview, postControl, postRelaunchPreview, readToken } from './client.ts'
 import {
-  answerCheck, askCheck, attemptFingerprint, buildParams, currentCheck, describeFailure, dialogValid, headlineOf, heldAfterFailure, initialValues, nextAttempt, NOTE_CONFIRM, NOTE_FIELD_HELPER, NOTE_FIELD_LABEL,
+  answerCheck, askCheck, attemptFingerprint, buildParams, confirmOff, currentCheck, describeFailure, dialogValid, headlineOf, heldAfterFailure, initialValues, nextAttempt, NOTE_CONFIRM, NOTE_FIELD_HELPER, NOTE_FIELD_LABEL,
   noteOutcome, noteTitle, pinToken, SENDING_HINT, paramProblem, reasonOf, relaunchConfirmable, typedConfirm, type DialogPreset, type DialogValues, type RelaunchCheck, type RequestAttempt,
 } from './model.ts'
 import { adoptRecord, closeDialog, refreshControls, unpairBrowser, useRunControls } from './store.ts'
@@ -64,7 +64,7 @@ function Field({ control, spec, values, set, runId }: { control: ControlId; spec
   }
 }
 
-function Body({ scope, id, preset, questions, onClose }: { scope: ControlScope; id: ControlId; preset: DialogPreset; questions: Record<string, WaitingQuestion>; onClose: () => void }) {
+function Body({ scope, id, preset, questions, onClose, blocked, onBlocked }: { scope: ControlScope; id: ControlId; preset: DialogPreset; questions: Record<string, WaitingQuestion>; onClose: () => void; blocked: boolean; onBlocked: (on: boolean) => void }) {
   const state = useRunControls(scope)
   const live = state.data?.controls.find(item => item.id === id)
   const [opened] = useState<Control | undefined>(live)
@@ -73,6 +73,8 @@ function Body({ scope, id, preset, questions, onClose }: { scope: ControlScope; 
   // The last attempt, held only while its answer was lost (the request_id rule in model.ts `nextAttempt`).
   const held = useRef<RequestAttempt | null>(null)
   const [sending, setSending] = useState(false)
+  // Once Confirm was pressed it stays focusable (aria-disabled, `confirmOff`), so a send or a failed answer keeps the focus on it.
+  const [pressed, setPressed] = useState(false)
   const [alert, setAlert] = useState<string | null>(null)
   const [preview, setPreview] = useState<CleanPreview | 'loading' | 'failed'>('loading')
   const inFlight = useRef(false)
@@ -140,6 +142,8 @@ function Body({ scope, id, preset, questions, onClose }: { scope: ControlScope; 
     if (secret === null) return
     inFlight.current = true
     setSending(true)
+    setPressed(true)
+    onBlocked(false)
     setAlert(null)
     const params = buildParams(control, values)
     const attempt = nextAttempt(held.current, attemptFingerprint(token, params))
@@ -234,15 +238,17 @@ function Body({ scope, id, preset, questions, onClose }: { scope: ControlScope; 
       })()}
       {alert !== null && <p className="ctl-error" role="alert" data-testid="dialog-alert">{alert}</p>}
       {sending && <p className="ctl-hint" id={sendingHint} data-testid="dialog-sending-hint">{SENDING_HINT}</p>}
+      {/* The dialog's polite live region (final review F3.1): Escape, Cancel or the backdrop tried mid-send says why nothing closed. */}
+      <p className="visually-hidden" role="status" data-testid="dialog-status">{blocked && sending ? SENDING_HINT : ''}</p>
       <div className="ctl-actions">
         <button
           type="button" className="button button-small" data-testid="dialog-cancel" aria-disabled={sending || undefined} aria-describedby={sending ? sendingHint : undefined}
-          onClick={() => { if (!sending && !inFlight.current) onClose() }}
+          onClick={() => { if (!sending && !inFlight.current) onClose(); else onBlocked(true) }}
         >{finished === null ? 'Cancel' : 'Close'}</button>
         {finished === null && (
           <button
             type="button" className={`button button-small ctl-primary${typedConfirm(control) ? ' is-destructive' : ''}`} data-testid="dialog-confirm"
-            disabled={!canConfirm} aria-busy={sending} onClick={() => void confirm()}
+            {...confirmOff(canConfirm, pressed || sending)} aria-busy={sending} onClick={() => void confirm()}
           >{sending ? 'Sending…' : note ? NOTE_CONFIRM : 'Confirm'}</button>
         )}
       </div>
@@ -256,6 +262,8 @@ function Body({ scope, id, preset, questions, onClose }: { scope: ControlScope; 
  * One `request_id` per dialog, one request in flight; Escape or Cancel closes it without sending and the opener gets focus back.
  * While a Confirm is being sent nothing closes it (final review F4.1): Cancel is aria-disabled with the reason beside it, the
  * backdrop and Escape do nothing, and a forced native close opens it again, so the held request_id is never lost mid-send.
+ * The focus stays in the dialog meanwhile (final review F3.1): a pressed Confirm is aria-disabled, not disabled, so it keeps the
+ * focus through the send and after a failed answer, and a close tried mid-send is said in the dialog's polite live region.
  */
 export function ControlDialogHost({ scope, questions }: { scope: ControlScope; questions: Record<string, WaitingQuestion> }) {
   const state = useRunControls(scope)
@@ -266,6 +274,8 @@ export function ControlDialogHost({ scope, questions }: { scope: ControlScope; q
 function DialogShell({ scope, id, preset, questions }: { scope: ControlScope; id: ControlId; preset: DialogPreset; questions: Record<string, WaitingQuestion> }) {
   const ref = useRef<HTMLDialogElement>(null)
   const close = useRef<() => void>(() => undefined)
+  // A close tried while a Confirm is sent: the body's live region then says why the dialog stays open (final review F3.1).
+  const [blocked, setBlocked] = useState(false)
   useLayoutEffect(() => { close.current = () => closeDialog(scope) })
   useLayoutEffect(() => {
     const dialog = ref.current
@@ -275,6 +285,7 @@ function DialogShell({ scope, id, preset, questions }: { scope: ControlScope; id
     const onCancel = (event: Event) => {
       event.preventDefault()
       if (!isSending(dialog)) close.current()
+      else setBlocked(true)
     }
     // A close the cancel event could not stop (a non-cancelable cancel under the close-watcher rules, a second Escape or a back
     // gesture): while a Confirm is being sent the dialog opens again, since unmounting it would drop the held request_id and a
@@ -282,7 +293,7 @@ function DialogShell({ scope, id, preset, questions }: { scope: ControlScope; id
     // event is queued, so one left over from a remount's own close() (React's strict effects) finds the dialog open again.
     const onNativeClose = () => {
       if (dialog.open || !dialog.isConnected) return
-      if (isSending(dialog)) dialog.showModal()
+      if (isSending(dialog)) { dialog.showModal(); setBlocked(true) }
       else close.current()
     }
     dialog.addEventListener('cancel', onCancel)
@@ -296,8 +307,12 @@ function DialogShell({ scope, id, preset, questions }: { scope: ControlScope; id
     }
   }, [])
   return (
-    <dialog ref={ref} className="ctl-dialog" aria-labelledby="ctl-dialog-title" data-testid="control-dialog" data-control={id} onClick={event => { if (event.target === event.currentTarget && !isSending(event.currentTarget)) close.current() }}>
-      <Body scope={scope} id={id} preset={preset} questions={questions} onClose={() => closeDialog(scope)} />
+    <dialog ref={ref} className="ctl-dialog" aria-labelledby="ctl-dialog-title" data-testid="control-dialog" data-control={id} onClick={event => {
+      if (event.target !== event.currentTarget) return
+      if (isSending(event.currentTarget)) setBlocked(true)
+      else close.current()
+    }}>
+      <Body scope={scope} id={id} preset={preset} questions={questions} onClose={() => closeDialog(scope)} blocked={blocked} onBlocked={setBlocked} />
     </dialog>
   )
 }

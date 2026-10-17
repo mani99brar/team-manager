@@ -907,6 +907,31 @@ export function closeMode(key: string | null, drawerKey: string | null): 'back' 
 }
 
 /**
+ * The writes held while the Back that leaves a pushed drawer entry is on its way (3.8, final review F4.1): `base` is the
+ * selection to write onto the entry Back lands on (with replace), `push` the agent open to push after it (or null), each with
+ * the caller's `then` to run once it is written. The page renders `heldQuery` meanwhile, so every keystroke shows at once.
+ */
+export type HeldWrites<Q, T> = { base: Q; baseThen: T | null; push: Q | null; pushThen: T | null }
+
+/**
+ * Folds one more write into the held ones, as if the Back had already landed: a push (an agent open) is held to push after the
+ * landing; a replace that names an agent while a push is held rewrites that push (another row, Previous/Next); a replace that
+ * clears the agent drops the held push (the drawer it would open is closed again) and becomes the selection to land on; any
+ * other replace becomes the selection to land on. Nothing typed is lost: each write starts from `heldQuery`, the latest one.
+ */
+export function foldHeldWrite<Q extends { agent: number | null }, T>(held: HeldWrites<Q, T> | null, next: Q, mode: 'push' | 'replace', then: T | null = null): HeldWrites<Q, T> {
+  if (held === null) return { base: next, baseThen: then, push: null, pushThen: null }
+  if (mode === 'push') return { ...held, push: next, pushThen: then }
+  if (held.push !== null && next.agent !== null) return { ...held, push: next, pushThen: then ?? held.pushThen }
+  return { base: next, baseThen: then, push: null, pushThen: null }
+}
+
+/** The selection the page shows while writes are held: the held push when there is one, else the selection to land on. */
+export function heldQuery<Q>(held: HeldWrites<Q, unknown>): Q {
+  return held.push ?? held.base
+}
+
+/**
  * The selection Close lands on (3.8): the current one without the agent; a view-wide search names no session or workflow again.
  */
 export function closedQuery<Q extends { session: string | null; workflow: string | null; agent: number | null; state: AgentState | null; phase: number | null; q: string }>(query: Q, wide: boolean): Q {
