@@ -10,10 +10,16 @@ Like the real controller (workflow/guardrails.py: one parser per verb, no subpar
 `argparse.ArgumentParser` per verb, so an argv the server builds wrongly fails here as it would there: free text must come
 after `--` (answer) or be attached with `=` (`--reason=`, `--accept-challenge=`), or a leading `-` is read as an option and
 the parse exits 2 with a usage message (decisions [L6] 3).
+
+`github <push|pr|ready|reviewers> <run> --repo R --repo-name O/N --branch B --head SHA ... --by operator` (docs/PRD_RUN_TEAMS.md
+"GitHub actions") is parsed like `workflow/github.py`'s parser (each action's own required options; a title must be attached
+as `--title=T`), and a short head is refused as the controller refuses it (`Blocked: ...`, exit 2). It prints one line (the
+pull request URL for `pr`) and exits 0; nothing is pushed and GitHub is never called.
 """
 import argparse
 import json
 import os
+import re
 import sys
 import time
 
@@ -59,6 +65,56 @@ def _parser(verb: str) -> argparse.ArgumentParser:
     return parser
 
 
+GITHUB_ACTIONS = ("push", "pr", "ready", "reviewers")
+
+
+def _github_parser(action: str) -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog=f"workflow github {action}", exit_on_error=False)
+    parser.add_argument("directory")
+    parser.add_argument("--repo", required=True)
+    parser.add_argument("--repo-name", required=True)
+    parser.add_argument("--branch", required=True)
+    parser.add_argument("--head", required=True)
+    parser.add_argument("--by", required=True, choices=["operator", "maintainer"])
+    if action == "pr":
+        parser.add_argument("--base", required=True)
+        parser.add_argument("--title", required=True)
+        parser.add_argument("--body-file", required=True)
+    elif action in ("ready", "reviewers"):
+        parser.add_argument("--pr", type=int, required=True)
+        if action == "reviewers":
+            parser.add_argument("--add", required=True)
+    return parser
+
+
+def github(rest: list[str]) -> int:
+    if not rest or rest[0] not in GITHUB_ACTIONS:
+        print("Blocked: unknown github action", file=sys.stderr)
+        return 2
+    action = rest[0]
+    try:
+        args = _github_parser(action).parse_args(rest[1:])
+    except (argparse.ArgumentError, SystemExit) as error:
+        if isinstance(error, argparse.ArgumentError):
+            print(f"usage: workflow github {action} ...\nerror: {error}", file=sys.stderr)
+        return 2
+    if "refuse" in os.path.basename(args.directory.rstrip("/")):
+        print(f"Blocked: github {action} refused for this run (the fake controller refuses every run named refuse)", file=sys.stderr)
+        return 2
+    if not re.fullmatch(r"[0-9a-f]{40}([0-9a-f]{24})?", args.head):
+        print("Blocked: --head must be the run branch's full commit sha", file=sys.stderr)
+        return 2
+    if action == "push":
+        print(f"Pushed {args.head[:12]} to origin/{args.branch} on github.com/{args.repo_name}; never forced")
+    elif action == "pr":
+        print(f"https://github.com/{args.repo_name}/pull/8")
+    elif action == "ready":
+        print(f"Marked pull request #{args.pr} on {args.repo_name} ready for review")
+    else:
+        print(f"Requested reviewers on #{args.pr}: {args.add}")
+    return 0
+
+
 def main(argv: list[str]) -> int:
     log = os.environ.get("MD_MANAGER_FAKE_CONTROLLER_LOG")
     if log:
@@ -68,6 +124,8 @@ def main(argv: list[str]) -> int:
         print("Blocked: the fake controller only answers `-m workflow <verb> <run> ...`")
         return 2
     verb = argv[2]
+    if verb == "github":
+        return github(argv[3:])
     if verb not in CANNED:
         print(f"Blocked: unknown verb {verb}")
         return 2

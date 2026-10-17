@@ -2,10 +2,12 @@
  * The run's GitHub view (docs/PRD_RUN_TEAMS.md 4 "GitHub view", 11 P0 items 7-8 and P1 items 10-11): the answer banner per
  * section 4.2 situation with its exact sentence and the switcher suffix, the cards, the commands to run by hand (no
  * placeholder copyable), Copy run summary, the actions panel's four states and its records, and the publishing dialogs with
- * their exact copy, typed confirmation, `request_id` and `state_token`, and the 409 stale outcome. Worker phase only: the
- * fixtures (`fixtures/ux-run-github.ts`) are swapped per test in the maps the mocks read per request; the candidate phase
- * serves whatever the real server reads, and the server's own tests cover its read. Every scenario runs at 1440 × 900 and
- * 390 × 844 and asserts no sideways page scroll.
+ * their exact copy, typed confirmation, `request_id` and `state_token`, and the 409 stale outcome. Those run in the worker
+ * phase: their fixtures (`fixtures/ux-run-github.ts`) are swapped per test in the maps the mocks read per request. The
+ * `github-real-*` scenarios run in the candidate phase against the real server: the `publish` project's checkout is a real git
+ * repository under the test root (a run branch not pushed, and one pushed with a draft pull request in the GitHub fixture), so
+ * the page shows what the server's own git and GitHub reads give (never real `gh`, never the network). Every scenario runs at
+ * 1440 × 900 and 390 × 844 and asserts no sideways page scroll.
  */
 import { test, expect, type Page } from '@playwright/test'
 import type { RunGithub, RunGithubActions } from '../../contracts/projects/github.ts'
@@ -17,14 +19,21 @@ import { CONTROLS_TOKEN } from './fixtures/controls.ts'
 import { runDetails, runInputs, PROJECT } from './fixtures.ts'
 import { runGithubActionsByRun, runGithubByRun } from './fixtures/index.ts'
 import {
-  GITHUB_ACTIONS, GITHUB_BRANCH, GITHUB_PRIVATE_NOT_PUSHED, GITHUB_READ_AT, GITHUB_RUN, GITHUB_SITUATIONS, GITHUB_WORKFLOW_ID, UNPUBLISHED, uxRunGithub,
+  GITHUB_ACTIONS, GITHUB_BRANCH, GITHUB_PRIVATE_NOT_PUSHED, GITHUB_READ_AT, GITHUB_RUN, GITHUB_SITUATIONS, GITHUB_WORKFLOW_ID, PUBLISH_AUTHOR, PUBLISH_BRANCHES,
+  PUBLISH_PR, PUBLISH_PR_TITLE, PUBLISH_PROJECT, PUBLISH_REPO, PUBLISH_RUNS, PUBLISH_WORKFLOW_ID, PUSH_FIRST, UNPUBLISHED, uxRunGithub,
 } from './fixtures/ux-run-github.ts'
 import { installControlMocks, type ControlMock } from './mock.ts'
-import { attach, expectNoExecutionControls, installHooks, phase, runViewLink } from './support.ts'
+import { attach, expectNoExecutionControls, fetchFromPage, installHooks, phase, runViewLink } from './support.ts'
 
 installHooks()
 
-test.skip(phase !== 'worker', 'the GitHub view\'s fixtures are worker-phase mocks; the candidate server reads its own git and gh')
+/** `github-real-*` read the real server (candidate phase); every other scenario reads the worker-phase fixtures. */
+const REAL = /\[scenario:github-real-/
+test.beforeEach(({ page: _page }, testInfo) => {
+  void _page
+  if (REAL.test(testInfo.title)) test.skip(phase !== 'candidate', 'the publish project and its git repository exist in the candidate phase only')
+  else test.skip(phase !== 'worker', 'the GitHub view\'s fixtures are worker-phase mocks; the candidate server reads its own git and gh')
+})
 
 const pageUrl = githubPathname(PROJECT.project_id, GITHUB_WORKFLOW_ID, GITHUB_RUN)
 const DEFAULT_READ = uxRunGithub.payloads!.runGithub![GITHUB_RUN]!
@@ -289,7 +298,7 @@ test(`[scenario:github-actions-offered] Offered actions in contract order: a 44 
   expect((await push.getByTestId('gh-action-button').boundingBox())!.height).toBeGreaterThanOrEqual(44)
   await expect(push.getByTestId('gh-action-note')).toHaveText('3 commits become public on kleros/vea')
   await expect(rows.nth(1).getByTestId('gh-action-button')).toHaveCount(0)
-  await expect(rows.nth(1).getByTestId('gh-action-note')).toHaveText('Not offered: The branch is not on GitHub yet')
+  await expect(rows.nth(1).getByTestId('gh-action-note')).toHaveText(`Not offered: ${PUSH_FIRST}`)
   // The banner's single next action is the offered push.
   await expect(page.getByTestId('gh-banner-action')).toHaveText('Push branch')
   await page.getByTestId('gh-banner-action').click()
@@ -508,4 +517,87 @@ test(`[scenario:github-action-stale] A branch that moved after the dialog opened
   await confirm(page).click()
   await expect(dialog(page).getByTestId('gh-dialog-outcome')).toHaveAttribute('data-state', 'succeeded')
   expect(mock.githubPosts.at(-1)!.body.state_token).toBe('gh-moved-0000000000')
+})
+
+// ---- Candidate phase: the real server's git and GitHub reads of the publish project ------------------------------------
+
+const realUrl = (runId: string) => githubPathname(PUBLISH_PROJECT.project_id, PUBLISH_WORKFLOW_ID, runId)
+
+/** Opens the GitHub view of a publish run on the real server and returns the read it served (through the page). */
+async function openReal(page: Page, runId: string): Promise<RunGithub> {
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.goto(realUrl(runId))
+  await expect(page.getByTestId('gh-view')).toBeVisible()
+  await expect(page.getByTestId('gh-banner')).toBeVisible()
+  const response = await fetchFromPage(page, `/api/dispatch/projects/${PUBLISH_PROJECT.project_id}/workflows/${PUBLISH_WORKFLOW_ID}/runs/${runId}/github`)
+  expect(response.status, runId).toBe(200)
+  const read = JSON.parse(response.text) as RunGithub
+  // The read is the server's own: the seeded repository's GitHub remote and the GitHub fixture (never real gh), local git facts.
+  expect(read.repo).toMatchObject({ status: 'github', owner_name: PUBLISH_REPO, remote: 'origin', default_branch: 'main' })
+  expect(read.github).toMatchObject({ status: 'read', reason: null, read_at: '2026-10-16T10:00:00.000Z', visibility: 'PUBLIC', viewer_permission: 'WRITE' })
+  expect(read.branch.local_sha).toMatch(/^[0-9a-f]{40}$/)
+  expect(read.branch.contains_integrated).toBe(true)
+  expect(response.text).not.toMatch(/\/home\/|\/tmp\//)
+  return read
+}
+
+test(`[scenario:github-real-not-pushed] The real server reads a run branch with three commits on neither GitHub nor origin/main: not pushed, the commits with their author, public, controls off (${phase})`, async ({ page }, testInfo) => {
+  const read = await openReal(page, PUBLISH_RUNS.unpushed)
+  expect(read.branch).toMatchObject({ name: PUBLISH_BRANCHES.unpushed, push_state: 'not_pushed', tracking_sha: null, github_sha: null, ahead_of_default: 3, behind_default: 0 })
+  expect(read.branch.unpublished).toHaveLength(3)
+  expect(read.branch.integrated_commit).toBe(read.branch.local_sha)
+  await expect(page.getByTestId('gh-banner')).toHaveAttribute('data-state', 'not-pushed')
+  await expect(page.getByTestId('gh-banner-sentence')).toHaveText(`Not on GitHub yet: 3 commits would become public on ${PUBLISH_REPO}.`)
+  await expect(runViewLink(page, 'github').getByTestId('run-view-suffix')).toHaveText('not pushed')
+  await expect(page.getByTestId('gh-push-state')).toHaveText('not pushed')
+  const commits = page.getByTestId('gh-branch-card').getByTestId('gh-commit-row')
+  await expect(commits).toHaveCount(3)
+  await expect(page.getByTestId('gh-branch-card').getByTestId('gh-commit-author')).toHaveText([PUBLISH_AUTHOR, PUBLISH_AUTHOR, PUBLISH_AUTHOR])
+  await expect(page.getByTestId('gh-branch-card')).toContainText(`Workflow ${PUBLISH_RUNS.unpushed}: integrate candidate`)
+  await expect(page.getByTestId('gh-visibility-chip')).toHaveText('public')
+  await expect(page.getByTestId('gh-no-pr-card')).toContainText('There is no pull request whose head is this branch.')
+  // This server has no run controls: nothing is published from the page.
+  await expect(page.getByTestId('gh-actions')).toHaveAttribute('data-state', 'controls-off')
+  await expectNoExecutionControls(page)
+  await attach(page, testInfo, 'github-real-not-pushed')
+  await phone(page)
+})
+
+test(`[scenario:github-real-draft] The real server reads a pushed run branch and the GitHub fixture's draft pull request: the draft banner, its checks and requested reviewers, up to date (${phase})`, async ({ page }, testInfo) => {
+  const read = await openReal(page, PUBLISH_RUNS.pushed)
+  expect(read.branch).toMatchObject({ name: PUBLISH_BRANCHES.pushed, push_state: 'up_to_date', ahead_of_remote: 0, behind_remote: 0, unpublished: [] })
+  expect(read.branch.tracking_sha).toBe(read.branch.local_sha)
+  expect(read.branch.github_sha).toBe(read.branch.local_sha)
+  expect(read.pr).toMatchObject({ number: PUBLISH_PR, draft: true, state: 'OPEN', head_ref: PUBLISH_BRANCHES.pushed, head_sha: read.branch.local_sha })
+  await expect(page.getByTestId('gh-banner')).toHaveAttribute('data-state', 'draft')
+  await expect(page.getByTestId('gh-banner-sentence')).toHaveText(`Draft #${PUBLISH_PR} is open; checks: 2 passing, 1 pending. A draft notifies no reviewer until you mark it ready.`)
+  await expect(runViewLink(page, 'github').getByTestId('run-view-suffix')).toHaveText(`#${PUBLISH_PR} draft`)
+  await expect(page.getByTestId('gh-pr-card')).toBeVisible()
+  await expect(page.getByTestId('gh-pr-link')).toContainText(`#${PUBLISH_PR} ${PUBLISH_PR_TITLE} ↗`)
+  await expect(page.getByTestId('gh-checks-line')).toHaveText('0 failing · 1 pending · 2 passing · 0 skipped')
+  await expect(page.getByTestId('gh-pr-requested')).toContainText('team acme/maintainers')
+  await expect(page.getByTestId('gh-pr-requested')).toContainText('octocat')
+  await expect(page.getByTestId('gh-no-pr-card')).toHaveCount(0)
+  await expectNoExecutionControls(page)
+  await attach(page, testInfo, 'github-real-draft')
+  await phone(page)
+})
+
+test(`[scenario:github-real-commands] The commands to run by hand name the real branch, head and pull request: a plain push of the local head, never forced; the reviewers command for #7 once a reviewer is named (${phase})`, async ({ page }, testInfo) => {
+  const unpushed = await openReal(page, PUBLISH_RUNS.unpushed)
+  const push = page.getByTestId('gh-commands').locator('[data-command="push"]').getByTestId('gh-command-text')
+  await expect(push).toContainText(`push origin ${unpushed.branch.local_sha}:refs/heads/${PUBLISH_BRANCHES.unpushed}`)
+  await expect(push).not.toContainText('--force')
+  for (const command of await page.getByTestId('gh-command-text').allInnerTexts()) {
+    expect(command).not.toMatch(/<(?:title|body|reviewers?|branch|sha)>/)
+    expect(command).not.toMatch(/\/home\/|\/tmp\//)
+  }
+  await openReal(page, PUBLISH_RUNS.pushed)
+  const commands = page.getByTestId('gh-commands')
+  const reviewers = commands.locator('[data-command="add-reviewers"]')
+  await expect(reviewers.getByTestId('gh-command-copy')).toBeDisabled()
+  await commands.getByTestId('gh-reviewers-field').fill('octocat, acme/maintainers')
+  await expect(reviewers.getByTestId('gh-command-text')).toHaveText(`gh pr edit ${PUBLISH_PR} --repo ${PUBLISH_REPO} --add-reviewer octocat,acme/maintainers`)
+  await attach(page, testInfo, 'github-real-commands')
+  await phone(page)
 })
