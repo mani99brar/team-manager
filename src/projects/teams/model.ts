@@ -450,7 +450,8 @@ export type RosterFilter = { state: AgentState | null; phase: number | null; q: 
 export const NO_FILTER: RosterFilter = { state: null, phase: null, q: '', outside: false, role: null }
 
 /** The roster filter the URL holds for a workflow: the query's state, phase and search apply where it names this workflow (or none). */
-export function filterFor(query: { session: string | null; workflow: string | null; state: AgentState | null; phase: number | null; q: string }, session: Pick<TeamSession, 'key'>, workflow: Pick<TeamWorkflow, 'run_id'>, outside: boolean, role: string | null = null): RosterFilter {
+export function filterFor(query: { session: string | null; workflow: string | null; state: AgentState | null; phase: number | null; q: string }, session: Pick<TeamSession, 'key'>, workflow: Pick<TeamWorkflow, 'run_id'>, outside: boolean, role: string | null = null, wide = false): RosterFilter {
+  if (wide) return { ...NO_FILTER, q: query.q, outside, role }
   const applies = (query.workflow === null || query.workflow === workflow.run_id) && (query.session === null || query.session === session.key)
   return applies ? { state: query.state, phase: query.phase, q: query.q, outside, role } : { ...NO_FILTER, outside, role }
 }
@@ -867,9 +868,68 @@ export const extrasKey = (sessionKey: string, runId: string): string => `${sessi
  * The query an open lands on (3.8): the target's session, workflow and agent; the state, phase and search carry over only when
  * the query already named that workflow or named none (a view-wide search), else they reset so the opened agent is in the roster.
  */
-export function openQuery<Q extends { session: string | null; workflow: string | null; agent: number | null; state: AgentState | null; phase: number | null; q: string }>(query: Q, sessionKey: string, runId: string, index: number): Q {
-  const same = query.workflow === null || (query.workflow === runId && query.session === sessionKey)
+export function openQuery<Q extends { session: string | null; workflow: string | null; agent: number | null; state: AgentState | null; phase: number | null; q: string }>(query: Q, sessionKey: string, runId: string, index: number, wide = false): Q {
+  const same = wide || query.workflow === null || (query.workflow === runId && query.session === sessionKey)
   return { ...query, session: sessionKey, workflow: runId, agent: index, ...(same ? {} : { state: null, phase: null, q: '' }) }
+}
+
+/**
+ * The view-wide search kept while a drawer is open (3.5): opening an agent from a view-wide search must name the agent's session
+ * and workflow in the URL, so the view remembers (`mark`) the history entry and the search text it opened from. The search stays
+ * view-wide while that entry is the current one (`key`), the text is unchanged, no state or phase filter is set and an agent is
+ * selected; a card filter, a new search or closing the drawer ends it.
+ */
+export type WideMark = { key: string; q: string }
+export function wideSearch(query: { workflow: string | null; agent: number | null; state: AgentState | null; phase: number | null; q: string }, mark: WideMark | null, key: string | null): boolean {
+  return mark !== null && key !== null && mark.key === key && query.q.trim() !== '' && query.q === mark.q && query.workflow !== null && query.agent !== null && query.state === null && query.phase === null
+}
+
+/** The view-wide search text (3.5): the query's search when it names no workflow, or while a drawer opened from it is open (`wide`). */
+export function viewSearchOf(query: { workflow: string | null; q: string }, wide: boolean): string {
+  return query.workflow === null || wide ? query.q : ''
+}
+
+/**
+ * How the Team view writes an agent open into the history (3.8): with no drawer open it pushes one entry (Back closes the
+ * drawer); with one open it replaces the entry, so one Close always closes the drawer.
+ */
+export function openMode(query: { agent: number | null }): 'push' | 'replace' {
+  return query.agent === null ? 'push' : 'replace'
+}
+
+/**
+ * How Close (or Escape) leaves the drawer (3.8): back, only when the current history entry (`key`) is the drawer entry the view
+ * pushed from a drawer-less entry (`drawerKey`); otherwise (a deep link, a reload, an entry reached some other way) it replaces
+ * the entry without the agent, so Back after Close always leaves the Team view as it did before the drawer.
+ */
+export function closeMode(key: string | null, drawerKey: string | null): 'back' | 'replace' {
+  return key !== null && key === drawerKey ? 'back' : 'replace'
+}
+
+/**
+ * The selection Close lands on (3.8): the current one without the agent; a view-wide search names no session or workflow again.
+ */
+export function closedQuery<Q extends { session: string | null; workflow: string | null; agent: number | null; state: AgentState | null; phase: number | null; q: string }>(query: Q, wide: boolean): Q {
+  return wide ? { ...query, session: null, workflow: null, agent: null } : { ...query, agent: null }
+}
+
+/**
+ * Whether a workflow card starts open at mount (3.3): the latest card and every running, failed or interrupted one, a card the
+ * selection names (a deep link to one of its agents or its filters), or one holding a match of the view-wide search.
+ */
+export function cardOpensAtMount(workflow: TeamWorkflow, latest: boolean, query: { session: string | null; workflow: string | null }, sessionKey: string, viewQ: string): boolean {
+  if (cardStartsOpen(workflow, latest)) return true
+  if (query.workflow === workflow.run_id && query.session === sessionKey) return true
+  return viewQ.trim() !== '' && workflowMatches(workflow, viewQ.trim())
+}
+
+/**
+ * Whether a session's "Show n earlier workflows" disclosure opens (3.3): the selection names one of the workflows it holds, or a
+ * view-wide search matches one of them; read at mount (a deep link, a reload) and on every change of either.
+ */
+export function earlierWanted(earlier: readonly TeamWorkflow[], query: { session: string | null; workflow: string | null }, sessionKey: string, viewQ: string): boolean {
+  if (query.session === sessionKey && query.workflow !== null && earlier.some(workflow => workflow.run_id === query.workflow)) return true
+  return viewQ.trim() !== '' && earlier.some(workflow => workflowMatches(workflow, viewQ.trim()))
 }
 
 /**

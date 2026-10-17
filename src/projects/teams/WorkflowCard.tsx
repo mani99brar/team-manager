@@ -5,7 +5,7 @@ import { Time } from '../Time.tsx'
 import { toneClass, workflowTone } from '../tone.ts'
 import { useTeam, usePhone } from './context.ts'
 import {
-  cardFilterQuery, cardStartsOpen, filterFor, foldedFacts, idPart, logSummary, recordSource, RUNNING_CAPTION, workflowFacts, workflowMatches, workflowName, workflowStatusLine,
+  cardFilterQuery, cardOpensAtMount, filterFor, foldedFacts, idPart, logSummary, recordSource, RUNNING_CAPTION, workflowFacts, viewSearchOf, workflowMatches, workflowName, workflowStatusLine,
   type RosterFilter,
 } from './model.ts'
 import { PhaseStrip } from './PhaseStrip.tsx'
@@ -47,22 +47,24 @@ function Description({ text }: { text: string }) {
  * to one 44 px head row (chevron, name, pill, "n agents · ran X"). A view-wide search opens every card holding a match.
  */
 export function WorkflowCard({ session, workflow, latest, owned, onOpen }: { session: TeamSession; workflow: TeamWorkflow; latest: boolean; owned: readonly string[] | null; onOpen: (agent: TeamAgent) => void }) {
-  const { clock, frozenAt, teams, query, onQuery, idPrefix, extras, onExtras } = useTeam()
+  const { clock, frozenAt, teams, query, wide = false, onQuery, idPrefix, extras, onExtras } = useTeam()
   const phone = usePhone()
-  const [open, setOpen] = useState(() => cardStartsOpen(workflow, latest))
-  // A view-wide search (no workflow named) opens the card while one of its agents matches; it opens once per new search text, so
-  // the operator can still fold it.
-  const viewQ = query.workflow === null ? query.q.trim() : ''
-  const [seenQ, setSeenQ] = useState(viewQ)
-  if (seenQ !== viewQ) {
-    setSeenQ(viewQ)
-    if (viewQ !== '' && !open && workflowMatches(workflow, viewQ)) setOpen(true)
+  // A view-wide search (no workflow named) opens the card while one of its agents matches, and a selection naming the card opens
+  // it: at mount (a deep link, a reload) and then once per new search text or selection, so the operator can still fold it.
+  const viewQ = viewSearchOf(query, wide).trim()
+  const [open, setOpen] = useState(() => cardOpensAtMount(workflow, latest, query, session.key, viewQ))
+  const cue = `${query.session}|${query.workflow}|${viewQ}`
+  const [seen, setSeen] = useState(cue)
+  if (seen !== cue) {
+    setSeen(cue)
+    const named = query.session === session.key && query.workflow === workflow.run_id
+    if (!open && (named || (viewQ !== '' && workflowMatches(workflow, viewQ)))) setOpen(true)
   }
   // The outside toggle and the role chip are the view's (`extras`), so the drawer's Previous and Next walk the same roster.
   const { outside, role } = extras(session.key, workflow.run_id)
   const { tone, word } = workflowTone(workflow.status)
   const base = `${idPrefix}-${idPart(session.key)}-${idPart(workflow.run_id)}`
-  const filter = filterFor(query, session, workflow, outside, role)
+  const filter = filterFor(query, session, workflow, outside, role, wide)
   const statusLine = workflowStatusLine(workflow)
   const facts = workflowFacts(workflow, clock, frozenAt)
   const setFilter = (change: Partial<RosterFilter>) => {

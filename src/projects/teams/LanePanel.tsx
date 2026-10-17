@@ -9,7 +9,7 @@ import { STATUS_LABEL } from '../status.ts'
 import { stateTone, toneClass } from '../tone.ts'
 import { CopyButton } from './CopyButton.tsx'
 import { leadRunning, useTeam } from './context.ts'
-import { attentionLine, earlierLine, earlierWorkflows, idPart, laneNoSessionSentence, ownedPathsOf, sessionSentence, workflowMatches, type LaneGroup, type ToneLine } from './model.ts'
+import { attentionLine, earlierLine, earlierWanted, earlierWorkflows, idPart, laneNoSessionSentence, ownedPathsOf, sessionSentence, viewSearchOf, type LaneGroup, type ToneLine } from './model.ts'
 import { WorkflowCard } from './WorkflowCard.tsx'
 
 /** The note control's id (controls 1.2.0). */
@@ -86,13 +86,14 @@ function useAttention(sessions: readonly TeamSession[]): ToneLine | null {
  * names one of the workflows it holds.
  */
 function SessionWorkflows({ session, owned, onOpen }: { session: TeamSession; owned: readonly string[] | null; onOpen: (session: TeamSession, workflow: string, agent: TeamAgent) => void }) {
-  const { query, idPrefix } = useTeam()
+  const { query, wide = false, idPrefix } = useTeam()
   const earlier = earlierWorkflows(session.workflows)
   const tucked = new Set(earlier.map(workflow => workflow.run_id))
-  const [expanded, setExpanded] = useState(false)
-  // Opens once for each new selection or search that names a tucked workflow, so the operator can still fold it again.
-  const viewQ = query.workflow === null ? query.q.trim() : ''
-  const wanted = (query.session === session.key && query.workflow !== null && tucked.has(query.workflow)) || (viewQ !== '' && earlier.some(workflow => workflowMatches(workflow, viewQ)))
+  const viewQ = viewSearchOf(query, wide).trim()
+  const wanted = earlierWanted(earlier, query, session.key, viewQ)
+  // Open at mount when the URL already names a tucked workflow or the search matches one (a deep link, a reload), then once for
+  // each new selection or search that does, so the operator can still fold it again.
+  const [expanded, setExpanded] = useState(() => wanted)
   const cue = `${query.session}|${query.workflow}|${viewQ}`
   const [seen, setSeen] = useState(cue)
   if (seen !== cue) {
