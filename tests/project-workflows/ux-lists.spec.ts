@@ -68,6 +68,10 @@ test(`[scenario:runs-home] Runs home lists Needs you, Running and Recent across 
   }
 
   // Recent: finished in the last seven days, newest first, with the finish time and the duration from the served activity.
+  // Other fixture modules add runs dated after LISTS_NOW (the run-teams fixtures of 2026-10), which Recent also lists and puts
+  // first; open the rows behind "Show older" so this workflow's own rows are counted wherever the cap of ten falls.
+  const older = recent.getByRole('button', { name: /^Show older/ })
+  if (await older.count()) await older.click()
   expect(await ownIds(recent)).toEqual([RUN_LISTS_FAILED, RUN_LISTS_FAILED_EARLIER])
   const failed = row(recent, RUN_LISTS_FAILED)
   await expect(failed).toHaveAttribute('data-status', 'failed')
