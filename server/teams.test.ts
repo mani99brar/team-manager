@@ -324,26 +324,29 @@ test('teams: more than 50 edited files list the first 50 and count the rest', as
   })
 })
 
-test('teams: a transcript cwd other than the recorded worktree makes its files relative; outside files stay distinct and counted', async () => {
+test('teams: a transcript cwd is never a base; only files under the recorded worktree are relative, outside files stay distinct and counted', async () => {
   await withEnv(async env => {
     const folder = await env.folder()
+    // The line's cwd is a scratch copy of the repository: its files must not pass as worktree-relative paths.
     const cwd = join(env.root, 'scratch-copy')
     const withCwd = (line: string) => JSON.stringify({ ...JSON.parse(line) as Record<string, unknown>, cwd })
-    const inside = Array.from({ length: 4 }, (_, n) => ({ name: 'Write', input: { file_path: join(cwd, 'src', `f${n}.ts`) } }))
+    const copies = Array.from({ length: 2 }, (_, n) => ({ name: 'Write', input: { file_path: join(cwd, 'src', 'projects', `f${n}.ts`) } }))
+    const inWorktree = { name: 'Write', input: { file_path: join(env.worktree, 'src', 'w.ts') } }
     const outside = [
       { name: 'Edit', input: { file_path: join(env.root, 'elsewhere', 'a.ts') } },
-      { name: 'Edit', input: { file_path: join(env.root, 'other', 'b.ts') } },
       // A basename clash: two raw paths serve the same string, and the second is counted, not lost.
       { name: 'Edit', input: { file_path: join(env.root, 'third', 'a.ts') } },
+      // A relative path has no known base: it is marked too, never served as if it were worktree-relative.
+      { name: 'Edit', input: { file_path: 'src/projects/rel.ts' } },
     ]
-    await writeLive(folder, 'wf_00000007-cwd', [{ id: agentId(1), label: 'impl', phase: 'Build', lines: [withCwd(assistantLine(T0, [...inside, ...outside]))] }])
+    await writeLive(folder, 'wf_00000007-cwd', [{ id: agentId(1), label: 'impl', phase: 'Build', lines: [withCwd(assistantLine(T0, [...copies, inWorktree, ...outside]))] }])
     const agent = only(await read(env, [workerRow()]))[0]!.agents[0]!
-    assert.deepEqual(agent.files_edited, ['src/f0.ts', 'src/f1.ts', 'src/f2.ts', 'src/f3.ts', '<path>/a.ts', '<path>/b.ts'])
-    assert.equal(agent.files_edited.length + agent.files_edited_more, 7)
-    // Without any recorded worktree the cwd is still the last base.
+    assert.deepEqual(agent.files_edited, ['<path>/f0.ts', '<path>/f1.ts', 'src/w.ts', '<path>/a.ts', '<path>/rel.ts'])
+    assert.equal(agent.files_edited.length + agent.files_edited_more, 6)
+    // Without any recorded worktree no file is relative, whatever the line's cwd.
     const unknown = only(await read(env, [workerRow()], { worktree: null }))[0]!.agents[0]!
-    assert.equal(unknown.files_edited.filter(file => file.startsWith('src/')).length, 4)
-    assert.equal(unknown.files_edited.length + unknown.files_edited_more, 7)
+    assert.ok(unknown.files_edited.every(file => file.startsWith('<path>/')), JSON.stringify(unknown.files_edited))
+    assert.equal(unknown.files_edited.length + unknown.files_edited_more, 6)
     const text = JSON.stringify([agent, unknown])
     assert.ok(!text.includes('/home/'), text)
     assert.ok(!text.includes('/tmp/'), text)

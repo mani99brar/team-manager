@@ -7,7 +7,7 @@ import { summaryInput as viewerInput } from '../../src/projects/github/model.ts'
 
 // One run seen by the server (the draft PR body's defaults) and by the viewer (Copy run summary): the same headline, spend and text.
 const summary = { run_id: 'run-001', workflow_id: 'feature-implementation', status: 'succeeded', activity: { headline: 'Succeeded · fast-forwarded to 6b6d894 · no push performed' } }
-const inputs = { feature: 'Relayer revert shapes', source_branch: 'feature/x/run-001', base_commit: '34ef69ccf67f6deaf6e7d42e647e0dfcc9f52760', workers: [{ node_id: 'ui', completion: { summary: 'Did the work in /home/agentops/dev/x with TOKEN=abc123secret' } }] }
+const inputs = { feature: 'Relayer revert shapes', source_branch: 'feature/x/run-001', base_commit: '34ef69ccf67f6deaf6e7d42e647e0dfcc9f52760', workers: [{ node_id: 'ui', completion: { summary: 'Did the work in /home/agentops/dev/x with TOKEN=abc123secret, Password=hunter2-correct and bearer abcdefghijklmnopqrstuvwxyz' } }] }
 
 test('run summary parity: the draft PR body and Copy run summary say the same thing for the same run', () => {
   const loaded = { detail: { summary }, review: null, claudeUsd: 99, inputs } as unknown as Parameters<typeof serverInput>[0]
@@ -26,6 +26,7 @@ test('run summary parity: the draft PR body and Copy run summary say the same th
   assert.equal(viewerText, serverText)
   assert.ok(!serverText.includes('/home/'), 'paths are redacted')
   assert.ok(!serverText.includes('abc123secret'), 'credentials are redacted')
+  assert.ok(!serverText.includes('hunter2-correct') && !serverText.includes('abcdefghijklmnopqrstuvwxyz'), 'credentials in any case are redacted')
   assert.equal((serverText.match(/[Ss]ucceeded/g) ?? []).length, 1, 'the status is said once')
 })
 

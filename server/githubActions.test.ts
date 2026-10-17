@@ -209,7 +209,7 @@ async function rig(options: { actions?: boolean; source?: FakeSource | null; con
     app.inject({ method: 'POST', url: url(run, `/${action}`), headers: headers(extra.headers), payload: JSON.stringify({ request_id: extra.request_id ?? crypto.randomUUID(), state_token: extra.token ?? 'stale', params }) })
   const act = async (run: string, action: GithubActionId, params: Record<string, unknown> = {}, extra: { request_id?: string } = {}) => post(run, action, params, { ...extra, token: (await view(run)).state_token })
   const close = async () => { await app.close(); await rm(root, { recursive: true, force: true }) }
-  return { root, home, python, runsRoot, repository, source, spawner, app, url, headers, view, post, act, close, stateDir: join(root, 'state') }
+  return { root, home, python, runsRoot, repository, source, spawner, store, app, url, headers, view, post, act, close, stateDir: join(root, 'state') }
 }
 
 async function withRig(options: Parameters<typeof rig>[0], body: (r: Awaited<ReturnType<typeof rig>>) => Promise<void>) {
@@ -536,6 +536,37 @@ test('the default PR body says when a lane worked as a team (worker session reco
   assert.deepEqual(input.lanes.find(lane => lane.lane === 'ui')?.team, { workflows: 2, agents: 8, failed: 1 })
   assert.equal(input.lanes.find(lane => lane.lane === 'server')?.team, null)
   assert.equal(summaryInput(loaded, 'feature-implementation', null).lanes[0].team, null, 'without a team read every lane is single-session')
+})
+
+test('[F2.1] the draft PR body states the team and the metered spend whenever open_pr can be offered: no PR, or only a CLOSED or MERGED earlier one', async () => {
+  const { teams } = await import('../contracts/projects/teamExamples.ts')
+  await withRig({}, async r => {
+    // The team and sessions reads are faked on the store; their calls are counted so an OPEN pull request is seen to skip them.
+    let reads = 0
+    const teamsOf = { ...structuredClone(teams), run_id: 'done' }
+    Object.assign(r.store, {
+      teams: async () => { reads += 1; return teamsOf },
+      sessions: async () => { reads += 1; return { totals: { metered_usd: 12.34 } } },
+    })
+    const pushed = readOf('pushed')
+    for (const state of [null, 'CLOSED', 'MERGED'] as const) {
+      const read = structuredClone(readOf('draft'))
+      read.branch = structuredClone(pushed.branch)
+      if (state === null) read.pr = null
+      else read.pr!.state = state
+      r.source!.read_ = read
+      reads = 0
+      const open = actionOf(await r.view(), 'open_pr')
+      assert.equal(open.available, true, `${state}: ${open.reason ?? ''}`)
+      assert.equal(reads, 2, `${state}: both reads ran`)
+      assert.match(open.defaults.body!, /\*\*Claude spend:\*\* \$12\.34/, `${state ?? 'no PR'}: ${open.defaults.body}`)
+      assert.match(open.defaults.body!, /Worked as a team: \d+ agents in \d+ workflows?/, `${state ?? 'no PR'}: ${open.defaults.body}`)
+    }
+    r.source!.read_ = readOf('draft')
+    reads = 0
+    assert.equal(actionOf(await r.view(), 'open_pr').available, false)
+    assert.equal(reads, 0, 'an OPEN pull request skips both reads')
+  })
 })
 
 // ---- Review-swarm regressions (F3.1-F3.9, F7.3) -------------------------------------------------------------------------------
