@@ -799,6 +799,8 @@ function isReadOnlyGit(args: readonly string[]): boolean {
       return rest.includes('--is-ancestor')
     case 'remote':
       return rest[0] === 'get-url'
+    case 'config':
+      return rest.length === 2 && rest[0] === '--get' && positionals.length === 1 // reading one key; a write passes a value
     default:
       return false
   }
@@ -810,16 +812,19 @@ test('run-teams: every git argv the run branch reader issues is read-only (the s
   const integrated = (commit(clone, 'run change'), git(clone, 'rev-parse', 'HEAD').trim())
   git(clone, 'push', 'origin', 'feature/w/run-001')
   commit(clone, 'unpushed')
+  git(clone, 'remote', 'set-url', 'origin', 'https://github.com/acme/widgets.git')
   const seen: string[][] = []
   const recording: GitRunner = async (repo, args) => { seen.push([...args]); return runner(repo, args) }
   const facts = await readRunBranch(recording, clone, 'feature/w/run-001', 'main', integrated)
-  await readRunRepo(recording, clone)
+  assert.equal((await readRunRepo(recording, clone)).ownerName, 'acme/widgets')
   assert.equal(facts.push_state, 'local_ahead')
-  // Every verb/option shape the run reader uses: rev-parse --verify --quiet <ref>^{commit}, rev-list --left-right --count,
-  // rev-list --count <ref> --not <refs>, log --format -n <ref> --not <refs>, merge-base --is-ancestor, symbolic-ref
-  // --quiet --short, rev-parse --path-format=absolute --git-common-dir and remote get-url.
+  // Every verb/option shape the run reader uses: rev-parse --verify --quiet <ref>^{commit}, rev-list --left-right --count
+  // <sha>...<sha>, rev-list --count <sha> --not <shas>, log --format -n <sha> --not <shas>, merge-base --is-ancestor,
+  // symbolic-ref --quiet --short, rev-parse --path-format=absolute --git-common-dir, config --get remote.origin.url and
+  // remote get-url [--push] --all origin.
   const verbs = new Set(seen.map(args => args[0]))
-  assert.deepEqual([...verbs].sort(), ['log', 'merge-base', 'remote', 'rev-list', 'rev-parse', 'symbolic-ref'])
+  assert.deepEqual([...verbs].sort(), ['config', 'log', 'merge-base', 'remote', 'rev-list', 'rev-parse', 'symbolic-ref'])
+  assert.equal(isReadOnlyGit(['config', 'remote.origin.url', 'https://x']), false, 'config with a value writes')
   for (const args of seen) assert.ok(isReadOnlyGit(args), `writing argv reached git: ${args.join(' ')}`)
   for (const args of seen) {
     for (const arg of args.slice(1)) if (arg.includes('run-001')) assert.match(arg, /^refs\/(heads|remotes\/origin)\/feature\/w\/run-001(\^\{commit\})?(\.\.\.refs\/remotes\/origin\/(main|feature\/w\/run-001))?$/)

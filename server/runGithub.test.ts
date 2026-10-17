@@ -21,6 +21,9 @@ import { runGithubSchema } from '../contracts/projects/github.ts'
  */
 
 const ROOT = mkdtempSync(join(tmpdir(), 'run-github-test-'))
+// The reader's real git runner inherits process.env: keep the operator's ~/.gitconfig (insteadOf rules) out of every read.
+process.env.GIT_CONFIG_GLOBAL = '/dev/null'
+process.env.GIT_CONFIG_NOSYSTEM = '1'
 after(() => rmSync(ROOT, { recursive: true, force: true }))
 
 const GIT_ENV = {
@@ -586,4 +589,210 @@ test('route: runner mode answers pending without a gh call; a missing repository
   assert.equal(gone.github.reason, GH_REASONS.gitNotRead)
   assert.equal(gone.branch.push_state, 'unknown')
   assert.equal(existsSync(join(ROOT, 'no-such-repo')), false)
+})
+
+// ---- Review fixes (swarm backend-verify-175144: F4.1-F4.6, F2.1, F2.2) ----------------------------------------------------
+
+const TIMED_OUT = { code: -1, stdout: '', stderr: '', timedOut: true, enoent: false }
+/** The real runner, except that a command whose argv matches `when` times out. */
+function timingOut(when: (args: readonly string[]) => boolean): GitRunner {
+  return async (repo, args) => when(args) ? TIMED_OUT : runner(repo, args)
+}
+
+test('F4.1: a timed-out or failed rev-parse is unknown, never no_local_branch or not_pushed; a failed origin read is unavailable, never no_remote', async () => {
+  const { clone } = originAndClone()
+  git(clone, 'checkout', '-q', '-b', BRANCH)
+  commit(clone, 'one')
+  git(clone, 'push', '-q', 'origin', BRANCH)
+  commit(clone, 'two')
+
+  const localFails = await readRunBranch(timingOut(args => args.includes(`refs/heads/${BRANCH}^{commit}`)), clone, BRANCH, 'main', null)
+  assert.equal(localFails.push_state, 'unknown', 'a timed-out local head read is not no_local_branch')
+  assert.equal(localFails.local_sha, null)
+  assert.deepEqual(localFails.unpublished, [])
+
+  const trackingFails = await readRunBranch(timingOut(args => args.includes(`refs/remotes/origin/${BRANCH}^{commit}`)), clone, BRANCH, 'main', null)
+  assert.equal(trackingFails.push_state, 'unknown', 'a timed-out tracking read is not not_pushed')
+  assert.equal(trackingFails.tracking_sha, null)
+  assert.deepEqual(trackingFails.unpublished, [], 'no preview without the tracking exclusion')
+
+  const exit128: GitRunner = async (repo, args) => args.includes(`refs/heads/${BRANCH}^{commit}`) ? { code: 128, stdout: '', stderr: 'fatal', timedOut: false, enoent: false } : runner(repo, args)
+  assert.equal((await readRunBranch(exit128, clone, BRANCH, 'main', null)).push_state, 'unknown', 'only exit 1 means absent')
+
+  const remoteFails = await readRunRepo(timingOut(args => args[0] === 'config' || args[0] === 'remote'), clone)
+  assert.equal(remoteFails.status, 'unavailable')
+  assert.equal(remoteFails.reason, RUN_GIT_REASONS.gitTimedOut)
+
+  const previewFails = await readRunBranch(timingOut(args => args[0] === 'log'), clone, BRANCH, 'main', null)
+  assert.equal(previewFails.push_state, 'unknown', 'a push is never offered on a preview that could not be read')
+})
+
+test('F4.4: with no tracking ref and no remote default ref, nothing is listed as unpublished and the push state is unknown', async () => {
+  const { clone } = originAndClone()
+  git(clone, 'checkout', '-q', '-b', BRANCH)
+  commit(clone, 'run change')
+  git(clone, 'update-ref', '-d', 'refs/remotes/origin/main')
+  const facts = await readRunBranch(runner, clone, BRANCH, 'main', null)
+  assert.deepEqual(facts.unpublished, [], 'the whole history is not a push preview')
+  assert.equal(facts.unpublished_more, 0)
+  assert.equal(facts.push_state, 'unknown')
+  const noDefault = await readRunBranch(runner, clone, BRANCH, null, null)
+  assert.deepEqual(noDefault.unpublished, [])
+  assert.equal(noDefault.push_state, 'unknown')
+})
+
+test('F4.5: counts and the preview are pinned to the captured local sha even when the branch moves mid-read', async () => {
+  const { clone } = originAndClone()
+  git(clone, 'checkout', '-q', '-b', BRANCH)
+  const first = commit(clone, 'first')
+  git(clone, 'checkout', '-q', 'main')
+  const later = git(clone, 'commit-tree', '-p', first, '-m', 'moved in', `${first}^{tree}`)
+  const seen: string[][] = []
+  let moved = false
+  const moving: GitRunner = async (repo, args) => {
+    seen.push([...args])
+    const result = await runner(repo, args)
+    if (!moved && args.includes(`refs/heads/${BRANCH}^{commit}`)) { moved = true; git(clone, 'update-ref', `refs/heads/${BRANCH}`, later) }
+    return result
+  }
+  const facts = await readRunBranch(moving, clone, BRANCH, 'main', first)
+  assert.equal(facts.local_sha, first)
+  assert.deepEqual(facts.unpublished.map(c => c.sha), [first], 'the preview is the history of the reported sha')
+  assert.equal(facts.ahead_of_default, 1)
+  const after1 = seen.filter(args => ['rev-list', 'log', 'merge-base'].includes(args[0]))
+  assert.ok(after1.length >= 3)
+  assert.ok(after1.every(args => !args.some(arg => arg.includes('refs/'))), 'no count or log re-resolves a mutable ref')
+})
+
+test('F4.6: owner/name is remote.origin.url as the controller reads it; a pushurl, insteadOf or pushInsteadOf elsewhere is unavailable', async () => {
+  const { clone } = originAndClone()
+  git(clone, 'remote', 'set-url', 'origin', 'https://github.com/acme/widgets.git')
+  assert.equal((await readRunRepo(runner, clone)).ownerName, 'acme/widgets')
+
+  git(clone, 'config', 'remote.origin.pushurl', 'git@github.com:Acme/Widgets.git')
+  assert.equal((await readRunRepo(runner, clone)).ownerName, 'acme/widgets', 'the same repository in another URL form and case')
+  git(clone, 'config', 'remote.origin.pushurl', 'https://github.com/evil/fork.git')
+  let read = await readRunRepo(runner, clone)
+  assert.deepEqual([read.status, read.reason, read.ownerName], ['unavailable', RUN_GIT_REASONS.originMismatch, null])
+  git(clone, 'config', '--unset', 'remote.origin.pushurl')
+
+  git(clone, 'config', 'url.https://github.com/evil/.pushInsteadOf', 'https://github.com/acme/')
+  read = await readRunRepo(runner, clone)
+  assert.equal(read.reason, RUN_GIT_REASONS.originMismatch, 'pushInsteadOf sends the push elsewhere')
+  git(clone, 'config', '--remove-section', 'url.https://github.com/evil/')
+
+  git(clone, 'config', 'url.https://github.com/other/.insteadOf', 'https://github.com/acme/')
+  read = await readRunRepo(runner, clone)
+  assert.equal(read.reason, RUN_GIT_REASONS.originMismatch, 'insteadOf: git pushes to other/widgets while gh --repo would use acme/widgets')
+  git(clone, 'config', '--remove-section', 'url.https://github.com/other/')
+
+  git(clone, 'config', '--add', 'remote.origin.url', 'https://github.com/second/widgets.git')
+  read = await readRunRepo(runner, clone)
+  assert.equal(read.reason, RUN_GIT_REASONS.originMismatch, 'two origin URLs push to two repositories')
+})
+
+test('F4.2/F4.3: the served default branch is GitHub\'s once read (not the local main guess, and filled when there is no local guess)', async () => {
+  // F4.2: GitHub's default is dev; the clone also has main (origin/HEAD and a local main).
+  const { clone } = originAndClone()
+  git(clone, 'checkout', '-q', '-b', 'dev')
+  commit(clone, 'on dev')
+  git(clone, 'push', '-q', 'origin', 'dev')
+  git(clone, 'checkout', '-q', '-b', BRANCH)
+  commit(clone, 'run change')
+  git(clone, 'checkout', '-q', 'main')
+  git(clone, 'remote', 'set-url', 'origin', 'https://github.com/acme/widgets.git')
+  const runsRoot = join(fresh('runs-def'), 'w')
+  mkdirSync(runsRoot, { recursive: true })
+  writeRun(runsRoot, 'run-001', BRANCH, null)
+
+  // F4.3: no origin/HEAD, no main or master; GitHub says trunk.
+  const solo = fresh('solo-def')
+  git(solo, 'init', '-q', '-b', 'trunk', '.')
+  commit(solo, 'c')
+  git(solo, 'remote', 'add', 'origin', 'https://github.com/acme/solo.git')
+  git(solo, 'update-ref', 'refs/remotes/origin/trunk', 'HEAD')
+  git(solo, 'checkout', '-q', '-b', BRANCH)
+  commit(solo, 'run change')
+  const soloRuns = join(fresh('runs-solo'), 'w')
+  mkdirSync(soloRuns, { recursive: true })
+  writeRun(soloRuns, 'run-001', BRANCH, null)
+
+  const github = new GithubReader({ mode: 'fixture', now, fixture: { viewer_login: 'mani99brar', repos: {}, branches: {
+    [`acme/widgets#${BRANCH}`]: { ...FIXTURE_READ, default_branch: 'dev' },
+    [`acme/solo#${BRANCH}`]: { ...FIXTURE_READ, default_branch: 'trunk' },
+  } } })
+  const app = createApp([], {
+    projects: registry([{ project_id: 'proj', repository: clone, runs_root: runsRoot }, { project_id: 'solo', repository: solo, runs_root: soloRuns }]),
+    dispatch: { gitRunner: runner, now, github },
+  })
+  after(() => app.close())
+  await app.ready()
+  const body = await app.runGithub.read('proj', 'w', 'run-001')
+  assert.equal(body.github.status, 'read')
+  assert.equal(body.repo.default_branch, 'dev', 'GitHub\'s defaultBranchRef, not the local main guess')
+  assert.deepEqual([body.branch.ahead_of_default, body.branch.behind_default], [1, 0], 'counted against origin/dev (against main it is 2 ahead)')
+  const soloBody = await app.runGithub.read('solo', 'w', 'run-001')
+  assert.equal(soloBody.repo.default_branch, 'trunk', 'filled from GitHub when there is no local guess')
+  assert.equal(soloBody.branch.ahead_of_default, 1)
+})
+
+test('F2.1: checks beyond the first hundred: total is totalCount and a failing rollup with no failing check on the page counts one', () => {
+  const passing = Array.from({ length: 100 }, (_, i) => ({ __typename: 'CheckRun', name: `ok ${String(i).padStart(3, '0')}`, status: 'COMPLETED', conclusion: 'SUCCESS', detailsUrl: null }))
+  const truncated = (state: string) => prNode(7, { commits: { nodes: [{ commit: { oid: 'a'.repeat(40), statusCheckRollup: { state, contexts: { totalCount: 150, nodes: passing } } } }] } })
+  const failing = parseBranches(response([{ oid: 'a'.repeat(40), prs: [truncated('FAILURE')] }]), [BRANCH]).reads[0].pr!.checks!
+  assert.equal(failing.total, 150)
+  assert.equal(failing.failing, 1, 'the failure beyond the page is not failing: 0')
+  assert.equal(failing.items.length, 100)
+  const pendingChecks = parseBranches(response([{ oid: 'a'.repeat(40), prs: [truncated('PENDING')] }]), [BRANCH]).reads[0].pr!.checks!
+  assert.equal(pendingChecks.pending, 1)
+  assert.equal(pendingChecks.failing, 0)
+  const whole = prNode(8, { commits: { nodes: [{ commit: { oid: 'a'.repeat(40), statusCheckRollup: { state: 'SUCCESS', contexts: { totalCount: 100, nodes: passing } } } }] } })
+  assert.equal(parseBranches(response([{ oid: 'a'.repeat(40), prs: [whole] }]), [BRANCH]).reads[0].pr!.checks!.total, 100)
+  assert.ok(branchQuery(1).includes('contexts(first: 100) { totalCount nodes {'), 'the branch query asks for totalCount')
+})
+
+test('F2.2: a markDue while a branch read is in flight survives that read: the next tick reads again', async () => {
+  let release: () => void = () => {}
+  const calls: string[][] = []
+  const reader = new GithubReader({
+    mode: 'runner', now,
+    runner: async argv => {
+      calls.push([...argv])
+      if (calls.length === 1) await new Promise<void>(resolve => { release = resolve })
+      return ok(response([{ oid: 'a'.repeat(40), prs: [] }]))
+    },
+  })
+  reader.branchState('acme/widgets', BRANCH)
+  const cycle = reader.cycleBranches()
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(calls.length, 1)
+  reader.markDue(`acme/widgets#${BRANCH}`)
+  release()
+  await cycle
+  assert.equal(reader.branchState('acme/widgets', BRANCH).state.status, 'read', 'the in-flight data is still stored')
+  await reader.cycleBranches()
+  assert.equal(calls.length, 2, 'the mark made mid-read forces a reread at the next tick')
+  await reader.cycleBranches()
+  assert.equal(calls.length, 2, 'and only once')
+})
+
+test('F2.2: RunBranchReader.invalidate during an in-flight local read keeps that read out of the cache', async () => {
+  const { clone } = originAndClone()
+  git(clone, 'checkout', '-q', '-b', BRANCH)
+  commit(clone, 'one')
+  let calls = 0
+  let reader: RunBranchReader | null = null
+  const counting: GitRunner = async (repo, args) => {
+    calls += 1
+    if (calls === 1) reader!.invalidate(clone, BRANCH)
+    return runner(repo, args)
+  }
+  reader = new RunBranchReader(counting, now)
+  await reader.read(clone, BRANCH, null)
+  const first = calls
+  await reader.read(clone, BRANCH, null)
+  assert.ok(calls > first, 'the read that straddled the invalidate was not cached')
+  const second = calls
+  await reader.read(clone, BRANCH, null)
+  assert.equal(calls, second, 'a read after the invalidate is cached as usual')
 })
