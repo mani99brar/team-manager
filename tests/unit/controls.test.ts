@@ -8,8 +8,8 @@ import { afterEach, describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { ControlError, controlPaths, postCleanPreview, postControl } from '../../src/projects/controls/client.ts'
 import {
-  answerCheck, askCheck, buildParams, canOpen, controlRows, currentCheck, describeFailure, dialogValid, headlineOf, initialValues, matchStep, newRequestId, paramProblem, pinToken, reasonOf, recordLine,
-  relaunchConfirmable, shownRecord, stepControl,
+  answerCheck, askCheck, buildParams, canOpen, controlRows, currentCheck, describeFailure, dialogValid, headlineOf, initialValues, matchStep, newRequestId, NOTE_CONFIRM, NOTE_FIELD_HELPER,
+  NOTE_FIELD_LABEL, NOTE_UNDELIVERABLE, noteOutcome, noteTitle, paramProblem, pinToken, reasonOf, recordLine, relaunchConfirmable, shownRecord, stepControl,
 } from '../../src/projects/controls/model.ts'
 import { waitingQuestions } from '../../src/projects/controls/questions.ts'
 import { CONTROL_ORDER, type Control, type ControlId, type ControlRecord, type RunControls } from '../../src/projects/controls/types.ts'
@@ -291,5 +291,27 @@ describe('the relaunch dry run (1.1.0)', () => {
     assert.equal(controlPaths.relaunchPreview(SCOPE), '/api/run-controls/alpha-project/controls/controls-stopped/relaunch-preview')
     assert.equal(CONTROL_ORDER.length, 15)
     assert.deepEqual(CONTROL_ORDER.slice(12), ['retry_all', 'relaunch', 'note'])
+  })
+})
+
+describe('the note control (docs/PRD_RUN_TEAMS.md 7)', () => {
+  const note = (patch: Partial<ControlRecord>) => record({ control: 'note', params: { lane: 'ui', text: 'Use the shared tone map.' }, status: 'succeeded', exit_code: 0, ended_at: '2026-03-02T09:00:02Z', ...patch })
+  test('the dialog copy: title with the lane, the field label and helper, and the button', () => {
+    assert.equal(noteTitle('Send a note to the lead', 'ui'), 'Send a note to the lead of ui')
+    assert.equal(noteTitle('Send a note to the lead', ''), 'Send a note to the lead', 'before a lane is chosen the server\'s label stands')
+    assert.equal(NOTE_FIELD_LABEL, 'Your note')
+    assert.equal(NOTE_FIELD_HELPER, 'Plain text, up to 4,000 characters. The lead reads it as an operator note, which may amend its task.')
+    assert.equal(NOTE_CONFIRM, 'Send note')
+  })
+  test('the outcomes, read from workflow note\'s own lines', () => {
+    assert.deepEqual(noteOutcome(note({ output_tail: ["Note N-1 typed into ui's pane and recorded in ~/runs/r/ui.notes.json."] })), { tone: 'ok', text: "Typed into ui's pane." })
+    assert.deepEqual(noteOutcome(note({ status: 'failed', exit_code: 1, output_tail: ['Blocked: note N-2 to ui is recorded undeliverable and was not typed (pane_busy). Look at the pane, then send it again as a new note.'] })), { tone: 'warn', text: NOTE_UNDELIVERABLE })
+    assert.equal(NOTE_UNDELIVERABLE, 'Not delivered: the pane was busy, not attached, or the lane was not working or idle. Nothing was typed; look at the pane, then send it again.')
+    assert.deepEqual(noteOutcome(note({ status: 'failed', exit_code: 1, output_tail: ["Blocked: note N-3 to ui was typed but Enter did not submit it; the text is still in ui's input line. Submit or clear it in the pane; do not send it again."] })),
+      { tone: 'warn', text: "The note is still in ui's input line: submit or clear it in the pane, and do not send it again." })
+    // A refusal before the note was recorded, a running record and another control keep the record's own line.
+    assert.equal(noteOutcome(note({ status: 'failed', exit_code: 1, output_tail: ['Blocked: A note to ui is refused (frozen); nothing was recorded or typed'] })), null)
+    assert.equal(noteOutcome(note({ status: 'running', exit_code: null, ended_at: null })), null)
+    assert.equal(noteOutcome(record({ control: 'answer', status: 'succeeded' })), null)
   })
 })

@@ -134,3 +134,8 @@
 @media (prefers-reduced-motion: no-preference) {
   .gh-banner { transition: background-color 160ms ease-out; }
 }
+
+/* A publish whose outcome is unknown (a timed-out push or pull request create): its own warn sentence, like a finding line. */
+.gh-unknown { display: flex; gap: 6px; align-items: baseline; margin: 4px 0 0; padding: 6px 10px; border-radius: 8px; background: var(--warn-soft); color: var(--warn); font-size: 14px; font-weight: 700; line-height: 1.45; overflow-wrap: anywhere; }
+.gh-unknown > span { flex: 1 1 0; min-width: 0; }
+.gh-unknown .gh-glyph { flex: none; align-self: center; }

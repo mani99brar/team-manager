@@ -30,7 +30,8 @@ const SHEET_AGENTS = 3
 /**
  * The step sheet's Team section (docs/PRD_RUN_TEAMS.md 5), before Events: the lane's attention line, one line per workflow
  * (name, pill, "{a} agents · {k} running · for 12m"), the latest workflow's phases as wrapping chips, up to three running agents
- * (label · phase · last tool), Open in Team view › and, when offered and paired, Send a note to the lead. A records-`none`
+ * (label · phase · last tool), Open in Team view › and, when offered and paired, Send a note to the lead, then the Lead commands
+ * disclosure (7: each lead's resume command with Copy and Show command). A records-`none`
  * worker shows the rule 9 or 10 sentence, an unreadable session its reason.
  */
 export function SheetTeamSection({ teams, sessionsOfNode, shared }: { teams: Teams; sessionsOfNode: readonly TeamSession[]; shared: Shared }) {
@@ -78,6 +79,7 @@ export function SheetTeamSection({ teams, sessionsOfNode, shared }: { teams: Tea
         {first && <AppLink href={shared.teamHref({ session: first.key })} onNavigate={shared.onNavigate} className="team-link" data-testid="sheet-team-link">Open in Team view ›</AppLink>}
         {lane !== null && first?.role === 'worker' && <NoteButton scope={shared.scope} lane={lane} />}
       </div>
+      <LeadCommands sessions={sessionsOfNode} rows={shared.sessions} />
     </section>
   )
 }
@@ -118,7 +120,7 @@ export function NodeTeamSection({ teams, onRetry, nodeId, shared }: { teams: Res
         <LaneBody sessions={sessions} attention onOpen={open} />
         <div className="team-sheet-links">
           {sessions[0]?.role === 'worker' && sessions[0].lane !== null && <NoteButton scope={shared.scope} lane={sessions[0].lane} />}
-          <LeadCommands sessions={sessions} />
+          <LeadCommands sessions={sessions} rows={shared.sessions} />
         </div>
         {sessions[0] && <AppLink href={shared.teamHref({ session: sessions[0].key })} onNavigate={shared.onNavigate} className="team-link" data-testid="node-team-link">Open in Team view ›</AppLink>}
         <DrawerHost opener={opener} />

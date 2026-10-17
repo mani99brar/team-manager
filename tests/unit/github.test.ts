@@ -11,7 +11,7 @@ import { runSummaryMarkdown, runSummaryTitle } from '../../contracts/projects/su
 import { runGithub as exampleRunGithub, runGithubActions as exampleActions, teams as exampleTeams } from '../../contracts/projects/teamExamples.ts'
 import {
   buildGithubParams, confirmLabel, dialogTitle, factsLine, fieldsProblem, initialDialogValues, outcomeSentence, panelState, PANEL_COPY, previewHeading,
-  recentRecords, toggleReviewer, typedConfirmation, typedMatches, visibilityBlock,
+  recentRecords, recordShown, recordTone, toggleReviewer, typedConfirmation, typedMatches, UNKNOWN_SENTENCE, unknownLine, visibilityBlock,
 } from '../../src/projects/github/actions.ts'
 import {
   githubSituation, githubSuffix, handCommands, heredocDelimiter, parseReviewers, pushPill, redactPaths, shellPath, shellQuote, SITUATION_IDS, spokenSuffix,
@@ -287,4 +287,26 @@ test('outcome sentences', () => {
   assert.equal(outcomeSentence({ ...record, status: 'succeeded' }), 'Done. GitHub is read again within two minutes.')
   assert.equal(outcomeSentence(record), 'The command failed (exit 1).')
   assert.equal(outcomeSentence(GITHUB_ACTIONS.records.records[1]!), 'The controller refused it: Blocked: the run branch moved since the offer (6b6d894 is not 1a2b3c4).')
+})
+
+test('outcome: a timed-out publish (exit 3, an `Unknown:` line) says its outcome is unknown in the warn tone, never "The command failed"', () => {
+  const failed = GITHUB_ACTIONS.records.records[0]!
+  const controllerUnknown = { ...failed, status: 'failed' as const, exit_code: 3, output_tail: ['To github.com:kleros/vea.git', 'Unknown: git push timed out after 120 s; it may have been published; check GitHub'] }
+  assert.equal(unknownLine(controllerUnknown), 'Unknown: git push timed out after 120 s; it may have been published; check GitHub')
+  assert.equal(outcomeSentence(controllerUnknown), UNKNOWN_SENTENCE)
+  assert.equal(UNKNOWN_SENTENCE, 'The outcome is unknown: it may have been published. Check GitHub before you try again.')
+  assert.deepEqual(recordShown(controllerUnknown), { tone: 'warn', word: 'unknown' })
+  // The server's 6-minute stop: no exit code, its own `Unknown:` note as the last line.
+  const serverStop = { ...failed, status: 'failed' as const, exit_code: null, output_tail: ['Unknown: the command ran longer than 6 minutes and was stopped; it may have been published; check GitHub.'] }
+  assert.equal(outcomeSentence(serverStop), UNKNOWN_SENTENCE)
+  assert.deepEqual(recordShown(serverStop), { tone: 'warn', word: 'unknown' })
+  // A plain failure stays a failure; an `Unknown:` line only counts on a failed record.
+  assert.equal(unknownLine(failed), null)
+  assert.deepEqual(recordShown(failed), recordTone('failed'))
+  assert.equal(outcomeSentence(failed), 'The command failed (exit 1).')
+  const succeeded = { ...controllerUnknown, status: 'succeeded' as const, exit_code: 0 }
+  assert.equal(unknownLine(succeeded), null)
+  assert.equal(outcomeSentence(succeeded), 'Done. GitHub is read again within two minutes.')
+  // A line that merely mentions the word is not the controller's verdict.
+  assert.equal(unknownLine({ ...failed, output_tail: ['Failed: gh said Unknown: flag'] }), null)
 })

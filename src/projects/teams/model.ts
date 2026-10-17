@@ -409,15 +409,15 @@ export function rosterGroups(workflow: Pick<TeamWorkflow, 'phases' | 'agents'>, 
   })
 }
 
-/** The roster's filter: one state (null for All), a phase index, the search text and the outside-paths toggle. */
-export type RosterFilter = { state: AgentState | null; phase: number | null; q: string; outside: boolean }
+/** The roster's filter: one state (null for All), a phase index, the search text, the outside-paths toggle and one role (P2 item 15). */
+export type RosterFilter = { state: AgentState | null; phase: number | null; q: string; outside: boolean; role: string | null }
 
-export const NO_FILTER: RosterFilter = { state: null, phase: null, q: '', outside: false }
+export const NO_FILTER: RosterFilter = { state: null, phase: null, q: '', outside: false, role: null }
 
 /** The roster filter the URL holds for a workflow: the query's state, phase and search apply where it names this workflow (or none). */
-export function filterFor(query: { session: string | null; workflow: string | null; state: AgentState | null; phase: number | null; q: string }, session: Pick<TeamSession, 'key'>, workflow: Pick<TeamWorkflow, 'run_id'>, outside: boolean): RosterFilter {
+export function filterFor(query: { session: string | null; workflow: string | null; state: AgentState | null; phase: number | null; q: string }, session: Pick<TeamSession, 'key'>, workflow: Pick<TeamWorkflow, 'run_id'>, outside: boolean, role: string | null = null): RosterFilter {
   const applies = (query.workflow === null || query.workflow === workflow.run_id) && (query.session === null || query.session === session.key)
-  return applies ? { state: query.state, phase: query.phase, q: query.q, outside } : { ...NO_FILTER, outside }
+  return applies ? { state: query.state, phase: query.phase, q: query.q, outside, role } : { ...NO_FILTER, outside, role }
 }
 
 /** An id-safe form of a session key or workflow id. */
@@ -427,13 +427,14 @@ export const idPart = (text: string): string => text.replace(/[^A-Za-z0-9_-]/g, 
 export const agentKey = (sessionKey: string, workflowId: string, index: number): string => `${sessionKey}|${workflowId}|${index}`
 
 /** Whether a filter narrows the roster. */
-export const filterActive = (filter: RosterFilter): boolean => filter.state !== null || filter.phase !== null || filter.q.trim() !== '' || filter.outside
+export const filterActive = (filter: RosterFilter): boolean => filter.state !== null || filter.phase !== null || filter.q.trim() !== '' || filter.outside || filter.role !== null
 
 /** Whether an agent matches the filter: its state, its phase, the outside toggle and the search over label, role, `#index`, agent id and edited path. */
 export function agentMatches(agent: TeamAgent, filter: RosterFilter, owned: readonly string[] | null): boolean {
   if (filter.state !== null && agent.state !== filter.state) return false
   if (filter.phase !== null && agent.phase_index !== filter.phase) return false
   if (filter.outside && outsideFiles(agent, owned).length === 0) return false
+  if (filter.role !== null && agent.role !== filter.role) return false
   const q = filter.q.trim().toLowerCase()
   if (q === '') return true
   const hay = [agent.label, agent.role ?? '', `#${agent.index}`, agent.agent_id ?? '', ...agent.files_edited].map(text => text.toLowerCase())
@@ -451,6 +452,42 @@ export function stateChoices(agents: readonly TeamAgent[]): { state: AgentState 
   const counts = countAgents(agents)
   const order: [AgentState, string][] = [['running', 'Running'], ['failed', 'Failed'], ['interrupted', 'Interrupted'], ['queued', 'Queued'], ['done', 'Done']]
   return [{ state: null, label: 'All', count: agents.length }, ...order.filter(([state]) => counts[state] > 0).map(([state, label]) => ({ state, label, count: counts[state] }))]
+}
+
+/** The role filter (11 P2 item 15) appears when a workflow's agents carry this many distinct roles or more. */
+export const ROLES_FROM = 3
+
+/**
+ * The role chips (P2 item 15): one per distinct `agent.role`, in the order roles first appear in `index` order (so the chips
+ * never move when the page polls), with their agent counts; none when fewer than three roles are recorded. Agents without a
+ * role are only counted under All.
+ */
+export function roleChoices(agents: readonly Pick<TeamAgent, 'role' | 'index'>[]): { role: string; count: number }[] {
+  const counts = new Map<string, number>()
+  for (const agent of [...agents].sort((a, b) => a.index - b.index)) {
+    if (agent.role === null) continue
+    counts.set(agent.role, (counts.get(agent.role) ?? 0) + 1)
+  }
+  return counts.size < ROLES_FROM ? [] : [...counts].map(([role, count]) => ({ role, count }))
+}
+
+/** The duration bar's full width (P2 item 14): 48 × 6 px. */
+export const BAR_WIDTH = 48
+
+/** The longest recorded `duration_ms` of a workflow's agents, the duration bars' full scale; null when none is recorded. */
+export function longestDuration(agents: readonly Pick<TeamAgent, 'duration_ms'>[]): number | null {
+  const recorded = agents.map(agent => agent.duration_ms).filter((ms): ms is number => ms !== null)
+  return recorded.length === 0 ? null : Math.max(...recorded)
+}
+
+/**
+ * An agent's inline duration bar (P2 item 14): its `duration_ms` over the workflow's longest, as a fraction from 0 to 1. Null
+ * (no bar) when its duration is not recorded; a running agent's growing span is not drawn, so the scale never moves under
+ * the pointer. There is no time axis.
+ */
+export function durationFraction(agent: Pick<TeamAgent, 'duration_ms'>, longest: number | null): number | null {
+  if (agent.duration_ms === null || longest === null) return null
+  return longest <= 0 ? 0 : Math.min(1, Math.max(0, agent.duration_ms / longest))
 }
 
 /** The scope line while a filter narrows the roster: "Showing 5 of 61 agents". */

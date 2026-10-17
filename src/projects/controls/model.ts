@@ -8,6 +8,37 @@ export type DialogPreset = { lane?: string; phase?: string }
 
 export const REASON_LABEL: Record<string, string> = { text: 'Your answer', reason: 'Reason' }
 
+// ---- The note control (docs/PRD_RUN_TEAMS.md "Steering", section 7) ------------------------------------------------------
+
+/** The note dialog's field label and helper (7). */
+export const NOTE_FIELD_LABEL = 'Your note'
+export const NOTE_FIELD_HELPER = 'Plain text, up to 4,000 characters. The lead reads it as an operator note, which may amend its task.'
+export const NOTE_CONFIRM = 'Send note'
+export const NOTE_UNDELIVERABLE = 'Not delivered: the pane was busy, not attached, or the lane was not working or idle. Nothing was typed; look at the pane, then send it again.'
+
+/** The note dialog's title: "Send a note to the lead of {lane}" once a lane is chosen, the server's label before. */
+export function noteTitle(label: string, lane: string): string {
+  return lane === '' ? label : `Send a note to the lead of ${lane}`
+}
+
+/**
+ * What a finished note record means (7 "Outcomes"), read from `workflow note`'s own output (workflow/notes.py `note_main`):
+ * succeeded is "Typed into {lane}'s pane."; the `Blocked:` line of a note typed but left in the input line
+ * (`enter_not_submitted`) and of one recorded `undeliverable` get their sentences. Anything else (a refusal before the note
+ * was recorded, a running record, another control) is null, and the record's own line is shown instead.
+ */
+export function noteOutcome(record: ControlRecord): { tone: 'ok' | 'warn'; text: string } | null {
+  if (record.control !== 'note') return null
+  const lane = typeof record.params.lane === 'string' && record.params.lane !== '' ? record.params.lane : 'the lane'
+  if (record.status === 'succeeded') return { tone: 'ok', text: `Typed into ${lane}'s pane.` }
+  if (record.status !== 'failed') return null
+  if (record.output_tail.some(line => /was typed but Enter did not submit it/.test(line))) {
+    return { tone: 'warn', text: `The note is still in ${lane}'s input line: submit or clear it in the pane, and do not send it again.` }
+  }
+  if (record.output_tail.some(line => /is recorded undeliverable and was not typed/.test(line))) return { tone: 'warn', text: NOTE_UNDELIVERABLE }
+  return null
+}
+
 /** A fresh id for one dialog: the server runs a repeated `request_id` once, so a double click or a retried fetch cannot act twice. */
 export function newRequestId(): string {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID()

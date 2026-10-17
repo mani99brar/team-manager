@@ -6,8 +6,8 @@ import { toneClass } from '../tone.ts'
 import { formatSpan } from '../time.ts'
 import { useTeam } from './context.ts'
 import {
-  agentKey, agentMatches, agentName, agentPhase, agentRanText, agentState, FILTERS_FROM, filesCount, filterActive, idPart, moreAgentsLine, outsideFiles, quietMinutes,
-  ROW_LIMIT, rosterGroups, scopeLine, stateChoices, toolSummary, workflowName, type RosterFilter, type RosterGroup,
+  agentKey, agentMatches, agentName, agentPhase, agentRanText, agentState, BAR_WIDTH, durationFraction, FILTERS_FROM, filesCount, filterActive, idPart, longestDuration,
+  moreAgentsLine, outsideFiles, quietMinutes, roleChoices, ROW_LIMIT, rosterGroups, scopeLine, stateChoices, toolSummary, workflowName, type RosterFilter, type RosterGroup,
 } from './model.ts'
 
 const NR = <span className="team-nr">not recorded</span>
@@ -44,6 +44,18 @@ export function Roster({ session, workflow, owned, filter, onFilter, onOpen, pho
   const isOpen = (group: RosterGroup) => active || (toggled[groupKey(group)] ?? group.startsOpen)
   const shownRows = (group: RosterGroup) => (more[groupKey(group)] ? group.agents : group.agents.slice(0, ROW_LIMIT))
   const name = workflowName(workflow)
+  const roles = roleChoices(workflow.agents)
+  // The Ran cell's inline bar (P2 item 14): duration over the workflow's longest, in the state's tone; absent when not recorded.
+  const longest = longestDuration(workflow.agents)
+  const bar = (agent: TeamAgent, tone: string) => {
+    const fraction = durationFraction(agent, longest)
+    if (fraction === null) return null
+    return (
+      <span className={`team-bar ${tone}`} data-testid="team-duration-bar" data-fraction={fraction.toFixed(3)} aria-hidden="true">
+        <span className="team-bar-fill" style={{ width: `${Math.round(fraction * BAR_WIDTH)}px` }} />
+      </span>
+    )
+  }
 
   const row = (agent: TeamAgent) => {
     const outside = outsideFiles(agent, owned).length
@@ -63,6 +75,7 @@ export function Roster({ session, workflow, owned, filter, onFilter, onOpen, pho
               <span className="team-agent-label">{agent.label}</span> <span className="team-index">#{agent.index}</span>
               <span className="team-word">{word}</span>
               {ran && <span className="team-num">{ran}</span>}
+              {bar(agent, toneClass(tone))}
               {quiet !== null && <span className="team-quiet" data-testid="team-quiet">quiet {quiet}m</span>}
             </span>
             <span className="team-card-line team-dim">
@@ -85,7 +98,7 @@ export function Roster({ session, workflow, owned, filter, onFilter, onOpen, pho
         </td>
         <td>{agent.model ?? NR}</td>
         <td className="team-num">{agent.started_at ? <Time iso={agent.started_at} /> : NR}</td>
-        <td className="team-num">{ran ?? NR}{quiet !== null && <span className="team-quiet" data-testid="team-quiet"> quiet {quiet}m</span>}</td>
+        <td className="team-num team-cell-ran">{ran ?? NR}{bar(agent, toneClass(tone))}{quiet !== null && <span className="team-quiet" data-testid="team-quiet"> quiet {quiet}m</span>}</td>
         <td className="team-num">{agent.tool_calls ?? NR}</td>
         <td className="team-cell-tool">{tool ? <span className="team-mono-line">{tool}</span> : NR}</td>
         <td className="team-num">{files}{outside > 0 && <span className="team-outside-chip" data-testid="team-outside-chip"><Glyph tone="fail" className="team-glyph" />{outside} outside</span>}</td>
@@ -130,6 +143,15 @@ export function Roster({ session, workflow, owned, filter, onFilter, onOpen, pho
             </select>
           )}
           <input className="team-search" type="search" aria-label="Find an agent" placeholder="Find an agent" value={filter.q} onChange={event => onFilter({ q: event.target.value })} />
+        </div>
+      )}
+      {roles.length > 0 && (
+        <div className="team-roles" role="group" aria-label={`Agents of ${name} by role`} data-testid="team-role-filter">
+          {roles.map(choice => (
+            <button key={choice.role} type="button" className="team-radio" aria-pressed={filter.role === choice.role} data-role={choice.role} data-team-select="" onClick={() => onFilter({ role: filter.role === choice.role ? null : choice.role })}>
+              {choice.role} {choice.count}
+            </button>
+          ))}
         </div>
       )}
       {active && <p className="team-scope" data-testid="team-scope" role="status">{scopeLine(matching.length, workflow.agents.length)}</p>}

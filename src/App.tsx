@@ -188,6 +188,17 @@ function App() {
     window.history.replaceState({ mdManager: key }, '', window.location.pathname + search)
     setProjectsSearch(search)
   }, [])
+  /**
+   * A Projects page's own selection that Back should undo (the Team view's open agent): pushes a new entry for the same
+   * pathname with the new search. A write for another pathname than the current one is refused, as for replaceListSearch.
+   * Back restores the previous entry's search through popstate.
+   */
+  const pushListSearch = useCallback((pathname: string, search: string) => {
+    if (!keepsListSearch(pathname)) return
+    if (canonicalPathname(window.location.pathname) !== canonicalPathname(pathname)) return
+    writeHistory({ search }, window.location.pathname, false, search)
+    setProjectsSearch(search)
+  }, [writeHistory])
   // The list's opened folds as it reports them, saved with its scroll position into its entry when the operator leaves it.
   const listFolds = useRef<Record<string, boolean>>({})
   const [listRestore, setListRestore] = useState<{ key: string; memory: ListMemory } | null>(null)
@@ -776,7 +787,7 @@ function App() {
 
       {inProjects && (
         <ProjectsView route={projectsRoute} refreshToken={projectsRefresh} onRefreshingChange={setProjectsRefreshing} onNavigate={navigatePathname} onAnnounce={announce}
-          search={projectsSearch} onSearch={replaceListSearch} restore={listRestore} onFolds={onListFolds} onFlush={onListFlush} />
+          search={projectsSearch} onSearch={replaceListSearch} onPushSearch={pushListSearch} restore={listRestore} onFolds={onListFolds} onFlush={onListFlush} />
       )}
 
       {!inProjects && <div className="navigation">

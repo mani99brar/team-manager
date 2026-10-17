@@ -1,4 +1,4 @@
-import { useCallback, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from 'react'
 import type { Now, RunAttention, Timeline } from '../../../contracts/projects/triage.ts'
 import type { PanelResults, ReviewResult, RunDetail, RunInputs, Sessions, WorkflowEvent } from '../api.ts'
 import type { Teams } from '../../../contracts/projects/teams.ts'
@@ -46,6 +46,11 @@ type Props = {
   teams?: Teams | null
   /** The Team view's link with a selection (the dock's Working now row opens `/team?state=running`). */
   teamHref?: (query: Partial<TeamQuery>) => string
+  /**
+   * Told which step's sheet is open (null when none, and when the page leaves the Run view), so the run page polls the teams
+   * every 5 s while a worker's sheet is open (docs/PRD_RUN_TEAMS.md 2 "Polling").
+   */
+  onSheetNode?: (nodeId: string | null) => void
 }
 
 /**
@@ -54,7 +59,7 @@ type Props = {
  * stage's edge and from there its full page. The page keeps one selected step in its own state (the URL stays the run's), so
  * Back leaves the run, not the sheet.
  */
-export function SignalRun({ detail, rows, timeline, events, inputs, review, attention, now, clock, reviewRound, sessions, panels = null, nodeHref, onNavigate, sheetExtras, teams = null, teamHref }: Props) {
+export function SignalRun({ detail, rows, timeline, events, inputs, review, attention, now, clock, reviewRound, sessions, panels = null, nodeHref, onNavigate, sheetExtras, teams = null, teamHref, onSheetNode }: Props) {
   const stage = useRef<StageHandle>(null)
   const frame = useRef<HTMLDivElement>(null)
   const [selected, setSelected] = useState<string | null>(null)
@@ -73,6 +78,11 @@ export function SignalRun({ detail, rows, timeline, events, inputs, review, atte
   const nowId = nowNodeId(now, attention, nodes)
   // A step that leaves the picture (a re-export) has no sheet; the selection is simply not found.
   const selectedNode = selected === null ? null : nodes.find(node => node.id === selected) ?? null
+  const sheetNodeId = selectedNode?.id ?? null
+  useEffect(() => {
+    onSheetNode?.(sheetNodeId)
+  }, [onSheetNode, sheetNodeId])
+  useEffect(() => () => onSheetNode?.(null), [onSheetNode])
 
   // The frame takes the window below the identity line, less the cue under the stage when it renders, so the graph is the page
   // and nothing but the Sessions table needs a scroll; measured on mount, on resize and when the cue comes or goes.
