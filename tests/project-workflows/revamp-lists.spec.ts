@@ -1560,7 +1560,8 @@ test(`[scenario:project-collapsed] The project page folds its features into date
   // No GitHub remote: the GitHub column is one line, and the chart takes the width a 380 px column would hold.
   const github = page.getByTestId('dispatch-github')
   // Measured once the overview read settled (until then the column holds its reading state); the bound is unchanged.
-  await expect.poll(async () => (await github.boundingBox())!.height, { timeout: 30_000 }).toBeLessThanOrEqual(48)
+  // A column not laid out yet (no box) keeps polling instead of failing on its first read.
+  await expect.poll(async () => (await github.boundingBox())?.height ?? Number.POSITIVE_INFINITY, { timeout: 30_000 }).toBeLessThanOrEqual(48)
   const chart = (await page.getByTestId('dispatch-chart').boundingBox())!.width
   const body = (await page.locator('.dispatch-project-body').boundingBox())!.width
   expect(chart, 'the chart is wider than beside a 380 px column').toBeGreaterThan(body - 380 - 16)
