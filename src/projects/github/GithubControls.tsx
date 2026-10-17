@@ -13,8 +13,8 @@ import { ControlError, readToken } from '../controls/client.ts'
 import { describeFailure, newRequestId } from '../controls/model.ts'
 import { setMenu, unpairBrowser } from '../controls/store.ts'
 import {
-  actionNote, buildGithubParams, COMMAND_NOTE, confirmLabel, dialogTitle, factsLine, fieldsProblem, hasReviewer, initialDialogValues, outcomeSentence,
-  PR_BODY_CAPTION, previewHeading, recordTone, STALE_SENTENCE, toggleReviewer, typedConfirmation, typedMatches, visibilityBlock, type DialogValues,
+  actionNote, buildGithubParams, COMMAND_NOTE, confirmLabel, dialogTitle, factsLine, fieldsProblem, hasReviewer, initialDialogValues, outcomeSentence, recordShown, unknownLine,
+  PR_BODY_CAPTION, previewHeading, STALE_SENTENCE, toggleReviewer, typedConfirmation, typedMatches, visibilityBlock, type DialogValues,
 } from './actions.ts'
 import { parseReviewers, short, unpublishedCount } from './model.ts'
 import { CopyButton, Pill } from './parts.tsx'
@@ -247,9 +247,12 @@ function DialogBody({ scope, id, onClose }: { scope: RunScope; id: GithubActionI
       )}
       {!action.available && <p className="ctl-error" role="alert" data-testid="gh-dialog-unavailable">Not offered: {action.reason}</p>}
       {record && (
-        <div className="gh-outcome" data-testid="gh-dialog-outcome" data-state={record.status} role="status">
-          <Pill tone={recordTone(record.status).tone} word={recordTone(record.status).word} />
-          <p>{outcomeSentence(record)}</p>
+        <div className="gh-outcome" data-testid="gh-dialog-outcome" data-state={record.status} data-outcome={unknownLine(record) !== null ? 'unknown' : record.status} role="status">
+          <Pill tone={recordShown(record).tone} word={recordShown(record).word} />
+          <p className={unknownLine(record) !== null ? 'gh-unknown' : undefined} data-testid="gh-dialog-outcome-sentence">
+            {unknownLine(record) !== null && <Glyph tone="warn" className="gh-glyph" />}<span>{outcomeSentence(record)}</span>
+          </p>
+          {unknownLine(record) !== null && <p className="gh-muted" data-testid="gh-dialog-unknown-line">{unknownLine(record)}</p>}
           {record.status === 'succeeded' && record.url && <a href={record.url} target="_blank" rel="noopener" data-testid="gh-dialog-url">{record.url} ↗</a>}
           {record.status === 'failed' && record.output_tail.length > 0 && <pre className="gh-output">{record.output_tail.join('\n')}</pre>}
         </div>

@@ -21,13 +21,16 @@ export function WorkflowCard({ session, workflow, latest, owned, onOpen }: { ses
   const [open, setOpen] = useState(() => cardStartsOpen(workflow, latest))
   const [more, setMore] = useState(false)
   const [outside, setOutside] = useState(false)
+  // The role filter (P2 item 15) is the card's own, like the outside toggle: the URL keeps state, phase and search only.
+  const [role, setRole] = useState<string | null>(null)
   const { tone, word } = workflowTone(workflow.status)
   const base = `${idPrefix}-${idPart(session.key)}-${idPart(workflow.run_id)}`
-  const filter = filterFor(query, session, workflow, outside)
+  const filter = filterFor(query, session, workflow, outside, role)
   const statusLine = workflowStatusLine(workflow)
   const facts = workflowFacts(workflow, clock)
   const setFilter = (change: Partial<RosterFilter>) => {
     if (change.outside !== undefined) setOutside(change.outside)
+    if (change.role !== undefined) setRole(change.role)
     const next = { ...filter, ...change }
     if (change.state === undefined && change.phase === undefined && change.q === undefined) return
     onQuery({ ...query, session: session.key, workflow: workflow.run_id, state: next.state, phase: next.phase, q: next.q }, 'replace')

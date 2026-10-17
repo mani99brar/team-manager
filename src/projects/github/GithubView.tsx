@@ -11,7 +11,7 @@ import { withoutGlyph } from '../steps.ts'
 import { formatAgo, formatClock, formatSpan, type Zone } from '../time.ts'
 import { useResource, type Resource, type ResourceMeta } from '../useResource.ts'
 import { useRunResults } from '../useRunData.ts'
-import { actionNote, PANEL_COPY, panelState, recentRecords, recordLabel, recordTone } from './actions.ts'
+import { actionNote, PANEL_COPY, panelState, recentRecords, recordLabel, recordShown, UNKNOWN_SENTENCE, unknownLine } from './actions.ts'
 import {
   BRANCH_FRESHNESS, checkRowTone, checksLine, COMMANDS_CAPTION, CONNECTION_NOTE, connectionLine, conversationLine, defaultBranchLine, earlierPrsLine, freshness,
   githubSituation, handCommands, headCommitNote, integratedLine, mergeWord, NO_CHECKOUT_NOTE, NO_PR_TEXT, parseReviewers, prStatePill, pushPill, reviewDecisionWord,
@@ -316,15 +316,17 @@ function ActionsPanel({ scope, state, controls, now, order }: { scope: RunScope;
           <h4 className="gh-sub-h">Recent GitHub actions</h4>
           <ul className="gh-rows">
             {records.map(record => {
-              const tone = recordTone(record.status)
+              const tone = recordShown(record)
+              const unknown = unknownLine(record)
               return (
-                <li key={record.record_id} className="gh-record" data-testid="gh-action-record" data-state={record.status}>
+                <li key={record.record_id} className="gh-record" data-testid="gh-action-record" data-state={record.status} data-outcome={unknown !== null ? 'unknown' : record.status}>
                   <span className="gh-record-line">
                     <span>{recordLabel(record, state.data)}</span>
                     <Pill tone={tone.tone} word={tone.word} />
                     <span className="gh-muted">{formatAgo(record.started_at, now)}</span>
                     {record.url && <a className="gh-link" href={record.url} target="_blank" rel="noopener">{record.url.replace(/^https:\/\/github\.com\//, '')} ↗</a>}
                   </span>
+                  {unknown !== null && <p className="gh-unknown" data-testid="gh-record-unknown"><Glyph tone="warn" className="gh-glyph" /><span>{UNKNOWN_SENTENCE}</span></p>}
                   {(record.status === 'failed' || record.status === 'refused') && record.output_tail.length > 0 && (
                     <details className="gh-output-fold"><summary>Output</summary><pre className="gh-output">{record.output_tail.join('\n')}</pre></details>
                   )}

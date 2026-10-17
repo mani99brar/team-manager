@@ -7,7 +7,7 @@
  */
 import { test, expect, type Locator, type Page } from '@playwright/test'
 import { TEAMS_NOW, TEAMS_RUNS, UX_TEAMS_WORKFLOW_ID } from './fixtures/ux-teams.ts'
-import { attach, EXECUTION_WORDS, executionControlCount, graphNode, installHooks, liveDock, nodeDetail, openStepSheet, phase, runUrl, runViewLink, stepSheet } from './support.ts'
+import { attach, expectNoExecutionControls, graphNode, installHooks, liveDock, nodeDetail, openStepSheet, phase, runUrl, runViewLink, stepSheet } from './support.ts'
 
 installHooks()
 test.skip(phase !== 'worker', 'the teams fixtures are worker-phase mocks; the teams reader is not in this tree')
@@ -36,17 +36,6 @@ const workflowCard = (scope: Page | Locator, id: string) => scope.locator(`[data
 const agentRows = (scope: Page | Locator) => scope.getByTestId('team-agent-row')
 const agentButton = (scope: Page | Locator, index: number) => scope.locator(`[data-testid="team-agent-row"][data-index="${index}"]`).getByRole('button').first()
 const drawer = (page: Page) => page.getByTestId('team-agent-drawer')
-
-/**
- * `expectNoExecutionControls` for the Team view: the same controls and words, leaving out the buttons that only select an agent
- * or a workflow (`data-team-select`), whose text is agent data (a label, a phase, the last tool's name such as `Edit`), as the
- * shared helper leaves out the stage's step cards.
- */
-async function expectNoTeamExecutionControls(page: Page) {
-  const controls = page.getByTestId('projects-workspace').locator('button:not([data-graph-node]):not([data-go]):not([data-testid="live-dock-bar"]):not([data-team-select]), input, select, textarea, [role="menuitem"]')
-  await expect.poll(() => executionControlCount(controls.filter({ hasText: EXECUTION_WORDS }))).toBe(0)
-  await expect(page.locator('form')).toHaveCount(0)
-}
 
 test(`[scenario:team-view-not-loaded] A teams payload outside the contract shows "Team records were not loaded" with Read again, and nothing of the view (${phase})`, async ({ page }, testInfo) => {
   await open(page, teamPage(TEAMS_RUNS.malformed))
@@ -86,7 +75,7 @@ test(`[scenario:team-view-running] Two lanes each run a live workflow: the head 
   await expect(lanePanel(page, 'ui').getByTestId('team-attention')).toHaveAttribute('data-tone', 'run')
   await expect(runViewLink(page, 'team').getByTestId('run-view-suffix')).toHaveText('8 running')
   await expect(teamView(page)).not.toContainText('%')
-  await expectNoTeamExecutionControls(page)
+  await expectNoExecutionControls(page)
   await attach(page, testInfo, 'team-view-running')
   await expectPhoneFits(page)
 })
@@ -482,5 +471,63 @@ test(`[scenario:node-team-section] The worker's page lists Team after Files in i
   await expect(nodeDetail(page)).toBeVisible()
   await expect(page.getByTestId('team-section')).toHaveCount(0)
   await open(page, nodePage(TEAMS_RUNS.base, 'launch_ui'))
+  await expectPhoneFits(page)
+})
+
+test(`[scenario:team-duration-bars] Each roster row's Ran cell carries a 48 × 6 px bar proportional to its duration over the workflow's longest, in the state's tone; no bar without a recorded duration, and no time axis (${phase})`, async ({ page }, testInfo) => {
+  await open(page, teamPage(TEAMS_RUNS.base))
+  const finished = workflowCard(page, 'wf_1a2b3c4d-5e6')
+  await finished.getByRole('button', { name: 'build-run-teams' }).click()
+  const barOf = (index: number) => finished.locator(`[data-testid="team-agent-row"][data-index="${index}"] [data-testid="team-duration-bar"]`)
+  await expect(finished.getByTestId('team-duration-bar')).toHaveCount(6)
+  // impl #3 ran longest (24m10s): its bar is full; review:gpt #5 ran 1m10s of it.
+  await expect(barOf(3)).toHaveAttribute('data-fraction', '1.000')
+  await expect(barOf(5)).toHaveAttribute('data-fraction', (70_000 / 1_450_000).toFixed(3))
+  const track = (await barOf(3).boundingBox())!
+  expect(Math.round(track.width)).toBe(48)
+  expect(Math.round(track.height)).toBe(6)
+  expect(Math.round((await barOf(3).locator('.team-bar-fill').boundingBox())!.width)).toBe(48)
+  expect(Math.round((await barOf(5).locator('.team-bar-fill').boundingBox())!.width)).toBe(2)
+  // The bar takes the row's state tone: failed review:gpt #5 is fail, done impl #3 ok.
+  await expect(barOf(5)).toHaveClass(/tone-fail/)
+  await expect(barOf(3)).toHaveClass(/tone-ok/)
+  // A live workflow's agents without a recorded duration draw no bar; nothing on the page is a percentage.
+  await open(page, teamPage(TEAMS_RUNS.live))
+  const live = workflowCard(page, 'wf_11aa22bb-001')
+  await expect(live.locator('[data-testid="team-agent-row"][data-index="2"] [data-testid="team-duration-bar"]')).toHaveCount(0)
+  await expect(live.locator('[data-testid="team-agent-row"][data-index="1"] [data-testid="team-duration-bar"]')).toHaveCount(1)
+  await expect(teamView(page)).not.toContainText('%')
+  await attach(page, testInfo, 'team-duration-bars')
+  await expectPhoneFits(page)
+  await expect(live.locator('[data-testid="team-agent-row"][data-index="1"] [data-testid="team-duration-bar"]')).toBeVisible()
+})
+
+test(`[scenario:team-role-filter] A workflow whose agents carry three roles or more gets role chips with counts; a chip narrows the roster to its role with the scope line, and pressing it again clears it; fewer roles show no chips (${phase})`, async ({ page }, testInfo) => {
+  await open(page, teamPage(TEAMS_RUNS.base))
+  const finished = workflowCard(page, 'wf_1a2b3c4d-5e6')
+  await finished.getByRole('button', { name: 'build-run-teams' }).click()
+  const roles = finished.getByTestId('team-role-filter')
+  await expect(roles).toHaveAttribute('role', 'group')
+  await expect(roles.getByRole('button')).toHaveText(['map 2', 'impl 2', 'review 2'])
+  // The two-agent fix workflow has one role: no chips.
+  await expect(workflowCard(page, 'wf_7f8e9d0c-b1a').getByTestId('team-role-filter')).toHaveCount(0)
+  const url = page.url()
+  const review = roles.getByRole('button', { name: 'review 2' })
+  await review.click()
+  await expect(review).toHaveAttribute('aria-pressed', 'true')
+  await expect(finished.getByTestId('team-scope')).toHaveText('Showing 2 of 6 agents')
+  await expect(agentRows(finished)).toHaveCount(2)
+  await expect(agentRows(finished).nth(0)).toHaveAttribute('data-index', '5')
+  await expect(agentRows(finished).nth(1)).toHaveAttribute('data-index', '6')
+  expect(page.url()).toBe(url)
+  await attach(page, testInfo, 'team-role-filter')
+  await review.click()
+  await expect(review).toHaveAttribute('aria-pressed', 'false')
+  await expect(finished.getByTestId('team-scope')).toHaveCount(0)
+  await expect(agentRows(finished)).toHaveCount(6)
+  // The large sweep lists six roles in first-seen order.
+  await open(page, teamPage(TEAMS_RUNS.large))
+  await expect(workflowCard(page, 'wf_55ee66ff-003').getByTestId('team-role-filter').getByRole('button')).toHaveText(['understand 60', 'plan 40', 'implement 120', 'review 100', 'fix 70', 'check 10'])
+  await expectNoExecutionControls(page)
   await expectPhoneFits(page)
 })

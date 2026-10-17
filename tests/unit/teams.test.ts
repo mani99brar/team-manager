@@ -11,7 +11,8 @@ import { readFileSync } from 'node:fs'
 import { teams as example } from '../../contracts/projects/teamExamples.ts'
 import { validateTeams, type TeamAgent, type Teams } from '../../contracts/projects/teams.ts'
 import {
-  agentMatches, agentName, attentionLine, attentionRules, cardStartsOpen, countsText, dockTeamLine, filteredAgents, FILTERS_FROM, headSentence, idleLine, isComparablePath,
+  agentMatches, agentName, attentionLine, attentionRules, BAR_WIDTH, cardStartsOpen, countsText, dockTeamLine, durationFraction, filterActive, filteredAgents, filterFor, FILTERS_FROM,
+  headSentence, idleLine, isComparablePath, longestDuration, roleChoices, ROLES_FROM,
   isOutside, laneGroups, NO_FILTER, noResultText, outsideCopy, outsideFiles, ownedPathsOf, phaseSegments, quietMinutes, recordSource, ROW_LIMIT, rosterGroups, scopeLine,
   sessionOutsideFiles, sessionSentence, sessionTeamFacts, sheetShowsTeam, sheetWorkflowLine, stageTeam, stageTeamName, stateChoices, teamChanges, teamSectionEntry,
   teamSessionsOf, teamSuffix, workflowFacts, workflowStatusLine, workingFoldLine, workingRows, workingTitle, type AttentionContext, type LaneWorker,
@@ -334,5 +335,45 @@ describe('the announcer (10)', () => {
     live.status = 'completed'
     ;(live.agents[1] as TeamAgent).state = 'failed'
     assert.deepEqual(teamChanges(example, next), ['Workflow fix-review-findings in ui completed', 'fix:finding-2 #2 failed in Fix'])
+  })
+})
+
+describe('P2: inline duration bars and the role filter (docs/PRD_RUN_TEAMS.md 11 items 14 and 15)', () => {
+  const base = baseTeams('r').sessions[0]!.workflows[0]!
+  test('a bar is the duration over the workflow\'s longest; absent when the duration is not recorded; never past full', () => {
+    assert.equal(BAR_WIDTH, 48)
+    assert.equal(longestDuration(base.agents), 1_450_000)
+    const byIndex = (index: number) => base.agents.find(agent => agent.index === index)!
+    assert.equal(durationFraction(byIndex(3), 1_450_000), 1, 'the longest agent fills the bar')
+    assert.equal(durationFraction(byIndex(5), 1_450_000), 70_000 / 1_450_000)
+    const unrecorded = teamAgent(9, { label: 'impl:x', state: 'running', duration_ms: null })
+    assert.equal(durationFraction(unrecorded, 1_450_000), null, 'no bar without a recorded duration')
+    assert.equal(longestDuration([unrecorded]), null)
+    assert.equal(durationFraction(byIndex(3), null), null)
+    assert.equal(durationFraction(teamAgent(10, { label: 'a', state: 'done', duration_ms: 0 }), 0), 0, 'a zero scale draws an empty bar, not NaN')
+    assert.equal(durationFraction(teamAgent(11, { label: 'a', state: 'done', duration_ms: 2_000_000 }), 1_450_000), 1)
+  })
+  test('role chips: one per role in first-seen index order with counts, only from three roles; agents without a role are not a chip', () => {
+    assert.equal(ROLES_FROM, 3)
+    assert.deepEqual(roleChoices(base.agents), [{ role: 'map', count: 2 }, { role: 'impl', count: 2 }, { role: 'review', count: 2 }])
+    assert.deepEqual(roleChoices(baseTeams('r').sessions[0]!.workflows[1]!.agents), [], 'one role: no chips')
+    const two = [teamAgent(1, { label: 'a:x', state: 'done' }), teamAgent(2, { label: 'b:x', state: 'done' }), teamAgent(3, { label: 'plain', state: 'done' })]
+    assert.equal(two[2]!.role, null)
+    assert.deepEqual(roleChoices(two), [], 'two roles and a role-less agent: no chips')
+    // Order follows index, whatever order the payload lists them in.
+    assert.deepEqual(roleChoices([teamAgent(5, { label: 'c:x', state: 'done' }), teamAgent(1, { label: 'a:x', state: 'done' }), teamAgent(3, { label: 'b:x', state: 'done' })]).map(choice => choice.role), ['a', 'b', 'c'])
+  })
+  test('the role filter narrows the roster, counts as active, and composes with the other filters', () => {
+    const query = { session: null, workflow: null, state: null, phase: null, q: '' }
+    const filter = filterFor(query, { key: 'worker:ui' }, base, false, 'review')
+    assert.equal(filter.role, 'review')
+    assert.equal(filterActive(filter), true)
+    assert.equal(filterActive(filterFor(query, { key: 'worker:ui' }, base, false)), false, 'no role by default')
+    assert.deepEqual(filteredAgents(base, filter, null).map(agent => agent.index), [5, 6])
+    assert.deepEqual(filteredAgents(base, { ...filter, state: 'failed' }, null).map(agent => agent.index), [5])
+    assert.equal(agentMatches(base.agents[0]!, { ...NO_FILTER, role: 'review' }, null), false)
+    // Another workflow's URL filter does not apply, but the card's own role still does.
+    assert.equal(filterFor({ ...query, workflow: 'wf_other', state: 'failed' }, { key: 'worker:ui' }, base, false, 'map').state, null)
+    assert.equal(filterFor({ ...query, workflow: 'wf_other' }, { key: 'worker:ui' }, base, false, 'map').role, 'map')
   })
 })

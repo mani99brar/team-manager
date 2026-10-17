@@ -1,7 +1,8 @@
 import { useState } from 'react'
 import type { TeamAgent, TeamSession } from '../../../contracts/projects/teams.ts'
-import type { RunScope } from '../api.ts'
+import type { RunScope, Sessions } from '../api.ts'
 import { openDialog, useRunControls } from '../controls/store.ts'
+import type { ControlId } from '../controls/types.ts'
 import { AppLink } from '../panels.tsx'
 import { Glyph } from '../signal/Glyph.tsx'
 import { STATUS_LABEL } from '../status.ts'
@@ -11,29 +12,26 @@ import { leadRunning, useTeam } from './context.ts'
 import { attentionLine, idPart, ownedPathsOf, sessionSentence, type LaneGroup, type ToneLine } from './model.ts'
 import { WorkflowCard } from './WorkflowCard.tsx'
 
-/** The note control's id: appended to the controls contract by the GitHub-actions lane (controls 1.2.0). */
-const NOTE_CONTROL = 'note'
+/** The note control's id (controls 1.2.0). */
+const NOTE_CONTROL: ControlId = 'note'
 const LEAD_CAPTION = 'A team workflow resumes only inside the session that ran it; resuming the lead does not restart a killed or interrupted workflow by itself.'
 
 /**
  * "Send a note to the lead" (docs/PRD_RUN_TEAMS.md 7): present only when the paired browser's controls offer the `note` control
- * for this lane; it opens the Controls dialog with the lane preset. Until the controls contract carries `note` (the
- * GitHub-actions lane appends it), no served control has that id and the button stays absent.
- * TODO(integrator): once `note` is in CONTROL_IDS, confirm the dialog's copy (section 7) is the GitHub-actions lane's.
+ * for this lane; it opens the Controls dialog for `note` with the lane preset (the dialog's title, field and outcomes are 7's).
  */
 export function NoteButton({ scope, lane }: { scope: RunScope; lane: string }) {
   const controls = useRunControls(scope)
   if (controls.mode !== 'on' || !controls.paired) return null
-  const control = controls.data?.controls.find(entry => (entry.id as string) === NOTE_CONTROL) ?? null
+  const control = controls.data?.controls.find(entry => entry.id === NOTE_CONTROL) ?? null
   if (control === null || !control.available) return null
   const lanes = control.params.find(spec => spec.name === 'lane')
   if (lanes && lanes.kind === 'choice' && !(lanes.choices as readonly string[]).includes(lane)) return null
-  return <button type="button" className="team-button" data-testid="control-note" onClick={() => openDialog(scope, control.id, { lane })}>Send a note to the lead</button>
+  return <button type="button" className="team-button" data-testid="control-note" data-lane={lane} onClick={() => openDialog(scope, control.id, { lane })}>Send a note to the lead</button>
 }
 
 /** One lead's resume command: the sessions payload's composed command when it has one, else `claude --resume {session_id}`. */
-function LeadCommand({ session }: { session: TeamSession }) {
-  const { sessions } = useTeam()
+function LeadCommand({ session, sessions }: { session: TeamSession; sessions: Sessions | null }) {
   const [shown, setShown] = useState(false)
   const row = sessions?.sessions.find(entry => entry.key === session.key) ?? null
   const command = row?.resume?.command ?? `claude --resume ${session.session_id}`
@@ -51,13 +49,16 @@ function LeadCommand({ session }: { session: TeamSession }) {
   )
 }
 
-/** The lane head's Lead commands disclosure (7): each lead's resume command with Copy and Show command, and the caption. */
-export function LeadCommands({ sessions }: { sessions: readonly TeamSession[] }) {
+/**
+ * The Lead commands disclosure (7) on the Team lane head, the node page and the step sheet's Team section: each lead's resume
+ * command with Copy and Show command, and the caption. `rows` is the run's sessions payload, whose composed command wins.
+ */
+export function LeadCommands({ sessions, rows }: { sessions: readonly TeamSession[]; rows: Sessions | null }) {
   if (sessions.length === 0) return null
   return (
     <details className="team-lead-commands" data-testid="team-lead-commands">
       <summary>Lead commands</summary>
-      {sessions.map(session => <LeadCommand key={session.key} session={session} />)}
+      {sessions.map(session => <LeadCommand key={session.key} session={session} sessions={rows} />)}
       <p className="team-caption">{LEAD_CAPTION}</p>
     </details>
   )
@@ -132,7 +133,7 @@ export function LanePanel({ group, onOpen }: { group: LaneGroup; onOpen: (sessio
         <div className="team-lane-actions">
           <NoteButton scope={context.scope} lane={group.lane} />
           {group.launchNodeId !== null && <AppLink href={context.nodeHref(group.launchNodeId)} onNavigate={context.onNavigate} className="team-button team-link">Open worker page ›</AppLink>}
-          <LeadCommands sessions={group.sessions} />
+          <LeadCommands sessions={group.sessions} rows={context.sessions} />
         </div>
       </div>
       {line && <AttentionLine line={line} />}

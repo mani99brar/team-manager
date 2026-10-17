@@ -105,8 +105,10 @@ export async function openTask(page: Page) {
 /** No view action may launch, approve, retry, delete or edit a run: no such real controls exist (graph nodes are read-only selectors). */
 export async function expectNoExecutionControls(page: Page) {
   // The stage's step cards, the dock's event rows and the dock bar are buttons that only select a step; their text names steps
-  // ("Launch UI worker", "Integrate candidate"), so they are left out of the wording check.
-  const controls = workspace(page).locator('button:not([data-graph-node]):not([data-go]):not([data-testid="live-dock-bar"]), input, select, textarea, [role="menuitem"]')
+  // ("Launch UI worker", "Integrate candidate"), so they are left out of the wording check. The Team view's buttons that only
+  // select an agent, a phase or a workflow (`data-team-select`) carry agent data (a phase's "not started", a tool name such as
+  // Edit) and are left out the same way (docs/PRD_RUN_TEAMS.md 3.4).
+  const controls = workspace(page).locator('button:not([data-graph-node]):not([data-go]):not([data-testid="live-dock-bar"]):not([data-team-select]), input, select, textarea, [role="menuitem"]')
   // The filter bar's "Cancelled" status toggle and its "Stopped at" phase select name a status and the phases; exactly those
   // two elements are exempt, and only while their text is exactly that.
   await expect.poll(() => executionControlCount(controls.filter({ hasText: EXECUTION_WORDS }))).toBe(0)

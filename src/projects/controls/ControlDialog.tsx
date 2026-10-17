@@ -1,16 +1,16 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import { postCleanPreview, postControl, postRelaunchPreview, readToken } from './client.ts'
 import {
-  answerCheck, askCheck, buildParams, currentCheck, describeFailure, dialogValid, initialValues, newRequestId, pinToken, paramProblem, reasonOf, relaunchConfirmable, typedConfirm,
-  type DialogPreset, type DialogValues, type RelaunchCheck,
+  answerCheck, askCheck, buildParams, currentCheck, describeFailure, dialogValid, headlineOf, initialValues, newRequestId, NOTE_CONFIRM, NOTE_FIELD_HELPER, NOTE_FIELD_LABEL,
+  noteOutcome, noteTitle, pinToken, paramProblem, reasonOf, relaunchConfirmable, typedConfirm, type DialogPreset, type DialogValues, type RelaunchCheck,
 } from './model.ts'
 import { adoptRecord, closeDialog, refreshControls, unpairBrowser, useRunControls } from './store.ts'
 import type { WaitingQuestion } from './questions.ts'
-import type { CleanPreview, Control, ControlId, ControlScope, ParamSpec } from './types.ts'
+import type { CleanPreview, Control, ControlId, ControlRecord, ControlScope, ParamSpec } from './types.ts'
 
 const FALLBACK_FOCUS = '[data-testid="controls-button"]'
 
-function Field({ spec, values, set, runId }: { spec: ParamSpec; values: DialogValues; set: (change: Partial<DialogValues>) => void; runId: string }) {
+function Field({ control, spec, values, set, runId }: { control: ControlId; spec: ParamSpec; values: DialogValues; set: (change: Partial<DialogValues>) => void; runId: string }) {
   const id = useId()
   const problem = paramProblem(spec, values, runId)
   switch (spec.kind) {
@@ -40,10 +40,13 @@ function Field({ spec, values, set, runId }: { spec: ParamSpec; values: DialogVa
       )
     case 'text': {
       const value = values[spec.name]
+      // The note's text has its own label and helper (docs/PRD_RUN_TEAMS.md 7); every other text field is today's.
+      const note = control === 'note' && spec.name === 'text'
       return (
         <label className="ctl-field" htmlFor={id}>
-          <span>{spec.name === 'text' ? 'Your answer' : 'Reason'}</span>
-          <textarea id={id} data-testid={`param-${spec.name}`} rows={3} value={value} maxLength={spec.max_length} onChange={event => set(spec.name === 'text' ? { text: event.target.value } : { reason: event.target.value })} />
+          <span>{note ? NOTE_FIELD_LABEL : spec.name === 'text' ? 'Your answer' : 'Reason'}</span>
+          {note && <span className="ctl-hint" id={`${id}-helper`} data-testid="param-text-helper">{NOTE_FIELD_HELPER}</span>}
+          <textarea id={id} data-testid={`param-${spec.name}`} rows={note ? 5 : 3} value={value} maxLength={spec.max_length} aria-describedby={note ? `${id}-helper` : undefined} onChange={event => set(spec.name === 'text' ? { text: event.target.value } : { reason: event.target.value })} />
           <span className="ctl-hint">{value.length}/{spec.max_length}{value.trim().length < spec.min_length && problem ? ` · ${problem}` : ''}</span>
         </label>
       )
@@ -79,6 +82,10 @@ function Body({ scope, id, preset, questions, onClose }: { scope: ControlScope; 
   const clean = id === 'clean'
   const relaunch = id === 'relaunch'
   const [check, setCheck] = useState<RelaunchCheck | null>(null)
+  // The note's finished record stays in its dialog (docs/PRD_RUN_TEAMS.md 7 "Outcomes"): it is opened from the Team view and
+  // the node page too, where no dock shows the record afterwards.
+  const note = id === 'note'
+  const [finished, setFinished] = useState<ControlRecord | null>(null)
   // Relaunch's dry run for the lane and token chosen now: a new choice asks again, and only the answer to the current one counts.
   if (relaunch && token !== null && values.lane !== '' && currentCheck(check, values.lane, token) === null) setCheck(askCheck(check, values.lane, token))
   const askedFor = useRef<RelaunchCheck | null>(null)
@@ -120,7 +127,7 @@ function Body({ scope, id, preset, questions, onClose }: { scope: ControlScope; 
   const valid = dialogValid(control, values, scope.runId)
   const previewReady = (!clean || (typeof preview === 'object' && preview.exitCode === 0)) && (!relaunch || relaunchConfirmable(check, values.lane, token))
   const shownCheck = relaunch ? currentCheck(check, values.lane, token) : null
-  const canConfirm = valid && !sending && unavailable === null && previewReady && token !== null
+  const canConfirm = valid && !sending && unavailable === null && previewReady && token !== null && finished === null
 
   const confirm = async () => {
     if (inFlight.current || !canConfirm || token === null) return
@@ -132,7 +139,8 @@ function Body({ scope, id, preset, questions, onClose }: { scope: ControlScope; 
     try {
       const { record } = await postControl(scope, secret, id, { request_id: requestId, run_state_token: token, params: buildParams(control, values) })
       adoptRecord(scope, record)
-      onClose()
+      if (note && record.status !== 'running') setFinished(record)
+      else onClose()
     } catch (error) {
       const outcome = describeFailure(error)
       setAlert(outcome.message)
@@ -156,7 +164,7 @@ function Body({ scope, id, preset, questions, onClose }: { scope: ControlScope; 
 
   return (
     <>
-      <h2 className="ctl-title" id="ctl-dialog-title">{control.label}</h2>
+      <h2 className="ctl-title" id="ctl-dialog-title">{note ? noteTitle(control.label, values.lane) : control.label}</h2>
       <p className="ctl-lead" data-testid="dialog-effect"><strong>What it does.</strong> {control.effect}</p>
       {control.not_effect !== null && <p className="ctl-lead" data-testid="dialog-not-effect"><strong>What it does not do.</strong> {control.not_effect}</p>}
       <div className="ctl-cmd">
@@ -195,17 +203,34 @@ function Body({ scope, id, preset, questions, onClose }: { scope: ControlScope; 
       )}
       {control.params.length > 0 && (
         <div className="ctl-fields">
-          {control.params.map(spec => <Field key={spec.name} spec={spec} values={values} set={change => setValues(previous => ({ ...previous, ...change }))} runId={scope.runId} />)}
+          {control.params.map(spec => <Field key={spec.name} control={id} spec={spec} values={values} set={change => setValues(previous => ({ ...previous, ...change }))} runId={scope.runId} />)}
         </div>
       )}
-      {unavailable !== null && <p className="ctl-error" role="alert" data-testid="dialog-unavailable">{unavailable}</p>}
+      {finished === null && unavailable !== null && <p className="ctl-error" role="alert" data-testid="dialog-unavailable">{unavailable}</p>}
+      {finished !== null && (() => {
+        const outcome = noteOutcome(finished)
+        const headline = headlineOf(finished)
+        return (
+          <div className={`ctl-outcome is-${finished.status}`} data-testid="dialog-outcome" data-state={finished.status} data-tone={outcome?.tone ?? (finished.status === 'succeeded' ? 'ok' : 'fail')} role="status">
+            <p data-testid="dialog-outcome-sentence">{outcome?.text ?? headline ?? `The command ${finished.status}.`}</p>
+            {finished.output_tail.length > 0 && (
+              <details className="ctl-log">
+                <summary>Output</summary>
+                <pre>{finished.output_tail.join('\n')}</pre>
+              </details>
+            )}
+          </div>
+        )
+      })()}
       {alert !== null && <p className="ctl-error" role="alert" data-testid="dialog-alert">{alert}</p>}
       <div className="ctl-actions">
-        <button type="button" className="button button-small" data-testid="dialog-cancel" onClick={onClose}>Cancel</button>
-        <button
-          type="button" className={`button button-small ctl-primary${typedConfirm(control) ? ' is-destructive' : ''}`} data-testid="dialog-confirm"
-          disabled={!canConfirm} aria-busy={sending} onClick={() => void confirm()}
-        >{sending ? 'Sending…' : 'Confirm'}</button>
+        <button type="button" className="button button-small" data-testid="dialog-cancel" onClick={onClose}>{finished === null ? 'Cancel' : 'Close'}</button>
+        {finished === null && (
+          <button
+            type="button" className={`button button-small ctl-primary${typedConfirm(control) ? ' is-destructive' : ''}`} data-testid="dialog-confirm"
+            disabled={!canConfirm} aria-busy={sending} onClick={() => void confirm()}
+          >{sending ? 'Sending…' : note ? NOTE_CONFIRM : 'Confirm'}</button>
+        )}
       </div>
     </>
   )

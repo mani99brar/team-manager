@@ -9,6 +9,8 @@ import { NodeDetail } from './NodeDetail.tsx'
 import { reviewerLead } from './node/model.ts'
 import { isProjectedSessionNode, stageCardOf } from './sessions/model.ts'
 import { AttackPassBody } from './node/AttackSections.tsx'
+import { ControlDialogHost } from './controls/ControlDialog.tsx'
+import { waitingQuestions } from './controls/questions.ts'
 import { AppLink, ErrorPanel } from './panels.tsx'
 import { ProviderPanelBody } from './providerPanel.tsx'
 import { EMPTY_TEAM_QUERY, runPathname, teamHref as teamViewHref, type RunTab, type TeamQuery, type TeamQueryMode } from './routes.ts'
@@ -124,11 +126,14 @@ export function RunView({ scope, detail, current, selectedNodeId, selectedAttemp
   const { state: sessions } = useResource(`sessions:${runKey}`, loadSessions, refreshToken, pollToken)
   const sessionsData = sessions.status === 'ready' ? sessions.data : null
   // The agent teams of the run's Claude sessions (docs/PRD_RUN_TEAMS.md 2 "Polling"): every 5 s while the run is live and
-  // the Team view or a worker's page is open, every 15 s otherwise, and no more once the run finished and no team workflow
+  // the Team view, a worker's page or a worker's step sheet is open, every 15 s otherwise, and no more once the run finished and no team workflow
   // runs. A 404 NOT_FOUND (a server that predates teams) loads as null, "not served".
   const loadTeams = useCallback((signal: AbortSignal) => orNotRecorded(fetchTeams(scope, signal), NOT_RECORDED.teams), [scope])
   const [teamsWorkflowRunning, setTeamsWorkflowRunning] = useState(false)
-  const teamsWatched = tab === 'team' || selectedDefinition?.kind === 'worker'
+  // The step whose sheet the Run view has open (SignalRun tells it): a worker's sheet shows its Team section, so it polls fast too.
+  const [sheetNode, setSheetNode] = useState<string | null>(null)
+  const sheetWorker = tab === 'run' && selectedNodeId === null && sheetNode !== null && definition.nodes.some(node => node.node_id === sheetNode && node.kind === 'worker')
+  const teamsWatched = tab === 'team' || selectedDefinition?.kind === 'worker' || sheetWorker
   const teamsPoll = usePoll(live || teamsWorkflowRunning, live && teamsWatched ? TEAMS_FAST_MS : TEAMS_SLOW_MS)
   const { state: teams, reload: reloadTeams, meta: teamsMeta } = useResource(`teams:${runKey}`, loadTeams, refreshToken, teamsPoll)
   const teamsData = teams.status === 'ready' ? teams.data : null
@@ -159,6 +164,8 @@ export function RunView({ scope, detail, current, selectedNodeId, selectedAttemp
   const settled = run !== null && (inputs.status === 'ready' || inputs.status === 'error') && (reviewPath === null || review.status === 'ready' || review.status === 'error') && pending === 0
   const now = useMemo(() => (settled && run ? deriveNow(run) : null), [settled, run])
   const attention = useMemo(() => (run ? deriveAttention(run) : null), [run])
+  // The questions the Answer dialog quotes when it opens away from the Run view's dock (the dock reads the live Now as well).
+  const offViewQuestions = useMemo(() => waitingQuestions(now, inputsData), [now, inputsData])
   // buildTimeline keeps its own cache (PRD 5.1), which deriveNow and laneLines share; the memo only spares the clock ticks
   // its key check. The Steps rows are read on every tick, since a running step's duration grows with the clock.
   const timeline = useMemo(() => (run ? buildTimeline(run) : null), [run])
@@ -337,6 +344,7 @@ export function RunView({ scope, detail, current, selectedNodeId, selectedAttemp
             sheetExtras={sheetExtras}
             teams={teamsData}
             teamHref={teamHref}
+            onSheetNode={setSheetNode}
           />
           {sessionsData && (
             <>
@@ -406,7 +414,7 @@ export function RunView({ scope, detail, current, selectedNodeId, selectedAttemp
           <GlyphDefs />
           <div className="run-views">
             {viewTitle('Assignment')}
-            <AssignmentPanel scope={scope} inputs={inputs} review={reviewData} onRetry={reloadInputs} onNavigate={onNavigate} panelId="run-panel-assignment" tabId="run-view-title" />
+            <AssignmentPanel scope={scope} inputs={inputs} review={reviewData} onRetry={reloadInputs} onNavigate={onNavigate} panelId="run-panel-assignment" labelledBy="run-view-title" />
           </div>
         </>
       )}
@@ -464,6 +472,10 @@ export function RunView({ scope, detail, current, selectedNodeId, selectedAttemp
           </div>
         </>
       )}
+
+      {/* The Run view's dock holds the Controls dialog; the other views and the node pages hold it here, so the Controls menu,
+          the lane head's and the node page's "Send a note to the lead" (docs/PRD_RUN_TEAMS.md 7) open the same dialog. */}
+      {(selectedNodeId !== null || tab !== 'run') && <ControlDialogHost scope={scope} questions={offViewQuestions} />}
     </div>
   )
 }

@@ -14,8 +14,10 @@ type Props = {
   review: ReviewResult | null
   onRetry: () => void
   onNavigate: (pathname: string) => void
+  /** The section's own id. */
   panelId: string
-  tabId: string
+  /** The id of the heading that names the section (the view's hidden `h2#run-view-title`). */
+  labelledBy: string
 }
 
 const workerSectionId = (lane: string) => `assignment-worker-${lane}`
@@ -72,7 +74,7 @@ export const INPUTS_NONE_SENTENCE = 'Inputs not recorded for this run (the expor
 export const DECISIONS_NONE_SENTENCE = 'No decisions.md was recorded for this run (its feature predates the guardrails, or the export predates decisions).'
 
 /** The Assignment tab: what the run was asked to do, pinned from its own files, with the feature's decisions and each worker's task rendered as inert Markdown. */
-export function AssignmentPanel({ scope, inputs, review, onRetry, onNavigate, panelId, tabId }: Props) {
+export function AssignmentPanel({ scope, inputs, review, onRetry, onNavigate, panelId, labelledBy }: Props) {
   let content: React.ReactNode
   if (inputs.status === 'loading' || inputs.status === 'idle') content = <LoadingPanel>Loading the run inputs…</LoadingPanel>
   else if (inputs.status === 'error') content = <ErrorPanel error={inputs.error} what="The run inputs" onRetry={onRetry} />
@@ -180,7 +182,7 @@ export function AssignmentPanel({ scope, inputs, review, onRetry, onNavigate, pa
     )
   }
   return (
-    <section role="tabpanel" id={panelId} aria-labelledby={tabId} className="assignment" data-testid="assignment">
+    <section id={panelId} aria-labelledby={labelledBy} className="assignment" data-testid="assignment">
       <h3>Assignment</h3>
       <p className="projects-muted">What this run was asked to do, pinned from its own plan, policy and receipts. Nothing here can be changed from the viewer.</p>
       {content}

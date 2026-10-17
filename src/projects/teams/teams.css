@@ -130,6 +130,16 @@
 .team-radio[aria-checked="true"], .team-radio[aria-pressed="true"] { outline: 2px solid var(--accent); outline-offset: 1px; font-weight: 700; }
 .team-select, .team-search { min-height: 44px; padding: 0 10px; box-sizing: border-box; font: inherit; font-size: var(--type-floor); color: var(--fg); background: var(--surface); border: 1px solid var(--border-strong); border-radius: 8px; max-width: 100%; }
 .team-search { flex: 1 1 200px; min-width: 0; }
+/* The role filter (P2 item 15): chips from the agents' roles, one pressed at a time. */
+.team-roles { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+/* The inline duration bar (P2 item 14): 48 × 6 px in the Ran cell, filled in the state's tone; no axis. */
+.team-bar { display: inline-block; vertical-align: middle; width: 48px; height: 6px; margin-left: 6px; border-radius: 999px; background: var(--border); overflow: hidden; flex: none; }
+.team-bar-fill { display: block; height: 100%; background: var(--idle); border-radius: 999px; }
+.team-bar.tone-ok .team-bar-fill { background: var(--ok); }
+.team-bar.tone-run .team-bar-fill { background: var(--run); }
+.team-bar.tone-warn .team-bar-fill { background: var(--warn); }
+.team-bar.tone-fail .team-bar-fill { background: var(--fail); }
+.team-bar.tone-pause .team-bar-fill { background: var(--pause); }
 .team-scope { margin: 0; color: var(--muted); font-variant-numeric: tabular-nums; }
 .team-table-scroll { overflow-x: auto; min-width: 0; }
 .team-roster { width: 100%; border-collapse: collapse; font-size: var(--type-floor); }

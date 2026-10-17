@@ -1,4 +1,4 @@
-import { headlineOf, recordLine, shownRecord } from './model.ts'
+import { headlineOf, noteOutcome, recordLine, shownRecord } from './model.ts'
 import { useRunControls } from './store.ts'
 import type { ControlScope } from './types.ts'
 
@@ -8,7 +8,8 @@ export function ControlsRow({ scope, clock }: { scope: ControlScope; clock: numb
   const record = state.mode === 'on' && state.paired ? shownRecord(state.data?.records ?? [], state.mine) : null
   if (record === null) return null
   const label = state.data?.controls.find(control => control.id === record.control)?.label ?? record.control
-  const headline = headlineOf(record)
+  // A note's outcome reads as its sentence (docs/PRD_RUN_TEAMS.md 7); every other record leads with the controller's line.
+  const headline = noteOutcome(record)?.text ?? headlineOf(record)
   return (
     <div className="lv-sec ctl-row" data-testid="controls-row" data-status={record.status} data-control={record.control}>
       <p className="lv-h">Controls</p>

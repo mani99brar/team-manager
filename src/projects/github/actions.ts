@@ -39,6 +39,21 @@ const RECORD_TONE: Record<GithubActionRecord['status'], Tone> = { running: 'run'
 /** A record's status: running run, succeeded ok, failed fail, refused warn, lost idle; the word is the contract's own. */
 export const recordTone = (status: GithubActionRecord['status']): { tone: Tone; word: string } => ({ tone: RECORD_TONE[status], word: status })
 
+/**
+ * The controller's `Unknown: ...` line of a failed record: a push or a pull request create that timed out and may have reached
+ * GitHub (workflow/github.py exits 3; the server's 6-minute stop adds the same kind of line). The contract has no `unknown`
+ * status, so such a record is `failed` with this line in its output; null for every other record.
+ */
+export function unknownLine(record: GithubActionRecord): string | null {
+  if (record.status !== 'failed') return null
+  return record.output_tail.find(line => line.startsWith('Unknown:')) ?? null
+}
+
+/** A record as the page shows it: an unknown outcome reads `unknown` in the warn tone, never as a plain failure. */
+export function recordShown(record: GithubActionRecord): { tone: Tone; word: string } {
+  return unknownLine(record) !== null ? { tone: 'warn', word: 'unknown' } : recordTone(record.status)
+}
+
 /** The label of the action a record ran, as the server names it. */
 export function recordLabel(record: GithubActionRecord, actions: RunGithubActions | null): string {
   return actions?.actions.find(action => action.id === record.action)?.label ?? record.action.replace(/_/g, ' ')
@@ -55,8 +70,11 @@ export function recentRecords(actions: RunGithubActions | null, mine: GithubActi
 
 export const STALE_SENTENCE = 'The branch or the pull request changed since this dialog opened. Close it and open it again to see the new facts.'
 
-/** What the dialog says once the controller answered with a record. */
+export const UNKNOWN_SENTENCE = 'The outcome is unknown: it may have been published. Check GitHub before you try again.'
+
+/** What the dialog says once the controller answered with a record; a timed-out publish says its outcome is unknown. */
 export function outcomeSentence(record: GithubActionRecord): string {
+  if (unknownLine(record) !== null) return UNKNOWN_SENTENCE
   switch (record.status) {
     case 'running': return 'The controller is running it; this takes up to a minute.'
     case 'succeeded': return 'Done. GitHub is read again within two minutes.'
