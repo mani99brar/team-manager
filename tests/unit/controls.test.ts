@@ -8,7 +8,7 @@ import { afterEach, describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { ControlError, controlPaths, postCleanPreview, postControl } from '../../src/projects/controls/client.ts'
 import {
-  answerCheck, answerLost, askCheck, attemptFingerprint, buildParams, heldAfterFailure, nextAttempt, canOpen, controlRows, currentCheck, describeFailure, dialogValid, headlineOf, initialValues, matchStep, newRequestId, NOTE_CONFIRM, NOTE_FIELD_HELPER,
+  answerCheck, answerLost, askCheck, attemptFingerprint, buildParams, confirmOff, heldAfterFailure, nextAttempt, canOpen, controlRows, currentCheck, describeFailure, dialogValid, headlineOf, initialValues, matchStep, newRequestId, NOTE_CONFIRM, NOTE_FIELD_HELPER,
   NOTE_FIELD_LABEL, NOTE_UNDELIVERABLE, noteOutcome, noteTitle, paramProblem, pinToken, reasonOf, recordLine, relaunchConfirmable, shownRecord, stepControl,
 } from '../../src/projects/controls/model.ts'
 import { waitingQuestions } from '../../src/projects/controls/questions.ts'
@@ -354,5 +354,14 @@ describe('the request_id rule of both dialogs (final review F5.2, F5.3)', () => 
       // An edit after it still starts a new request.
       assert.notEqual(nextAttempt(heldAfterFailure(first, error), attemptFingerprint('rs-1', { text: 'edited' })).id, first.id)
     }
+  })
+})
+
+describe('final review F3.1: a pressed Confirm keeps the focus', () => {
+  test('natively disabled before it is pressed; aria-disabled (still focusable) while sending and after an answer', () => {
+    assert.deepEqual(confirmOff(true, false), { disabled: false })
+    assert.deepEqual(confirmOff(true, true), { disabled: false })
+    assert.deepEqual(confirmOff(false, false), { disabled: true }, 'nothing pressed yet: a plain disabled button')
+    assert.deepEqual(confirmOff(false, true), { disabled: false, 'aria-disabled': true }, 'sending or after a failed send: focus stays')
   })
 })

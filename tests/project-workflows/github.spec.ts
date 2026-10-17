@@ -12,6 +12,7 @@
 import { test, expect, type Page } from '@playwright/test'
 import type { RunGithub, RunGithubActions } from '../../contracts/projects/github.ts'
 import { runSummaryMarkdown } from '../../contracts/projects/summary.ts'
+import { SENDING_HINT } from '../../src/projects/controls/model.ts'
 import { githubPathname } from '../../src/projects/routes.ts'
 import { noPrCard, redactSummaryText, summaryInput, type SituationId } from '../../src/projects/github/model.ts'
 import { TOKEN_KEY } from '../../src/projects/controls/types.ts'
@@ -642,6 +643,9 @@ test(`[scenario:github-action-stale] A branch that moved after the dialog opened
   await confirm(page).click()
   await expect(dialog(page).getByTestId('gh-dialog-alert')).toHaveText('The branch or the pull request changed since this dialog opened. Close it and open it again to see the new facts.')
   await expect(confirm(page)).toBeDisabled()
+  // F3.1: after the failed send the focus is still on Confirm (aria-disabled now), inside the dialog.
+  await expect(confirm(page)).toHaveAttribute('aria-disabled', 'true')
+  await expect(confirm(page)).toBeFocused()
   await expect(dialog(page).getByTestId('gh-dialog-cancel')).toHaveText('Close')
   expect(mock.githubPosts[0]!.body.state_token).toBe(GITHUB_ACTIONS.pushPublic.state_token)
   // G1: the 409 sentence sits in the pinned footer, on screen beside Close.
@@ -732,7 +736,17 @@ test(`[scenario:github-action-unknown] A push whose outcome is unknown (exit 3, 
   // G9: while it is sent, Cancel is off and neither Escape nor the backdrop closes the dialog.
   await expect(confirm(page)).toHaveAttribute('aria-busy', 'true')
   await expect(box.getByTestId('gh-dialog-cancel')).toBeDisabled()
+  await expect(box.getByTestId('gh-dialog-cancel')).toHaveAttribute('aria-disabled', 'true')
+  await expect(box.getByTestId('gh-dialog-cancel')).toHaveAccessibleDescription(SENDING_HINT)
+  // F3.1: Confirm is aria-disabled, not disabled, so the focus stays on it inside the dialog; a close tried is said politely.
+  await expect(confirm(page)).toHaveAttribute('aria-disabled', 'true')
+  await expect(confirm(page)).not.toHaveAttribute('disabled')
+  await expect(confirm(page)).toBeFocused()
+  const status = box.getByRole('status').and(box.getByTestId('gh-dialog-status'))
+  await expect(status).toHaveText('')
   await page.keyboard.press('Escape')
+  await expect(status).toHaveText(SENDING_HINT)
+  await expect(confirm(page)).toBeFocused()
   await page.mouse.click(4, 4)
   await expect(box).toBeVisible()
   release()

@@ -345,15 +345,25 @@ test(`[regression:controls-dialog-in-flight] While a Confirm is being sent nothi
   await expect(dialog(page)).toBeVisible()
   await confirmButton(page).click()
   await expect(confirmButton(page)).toHaveAttribute('aria-busy', 'true')
+  // F3.1: Confirm is aria-disabled, not disabled, so it keeps the focus inside the dialog while it sends.
+  await expect(confirmButton(page)).toHaveAttribute('aria-disabled', 'true')
+  await expect(confirmButton(page)).not.toHaveAttribute('disabled')
+  await expect(confirmButton(page)).toBeFocused()
+  const status = dialog(page).getByRole('status').and(page.getByTestId('dialog-status'))
+  await expect(status).toHaveText('')
   const cancel = page.getByTestId('dialog-cancel')
   await expect(cancel).toHaveAttribute('aria-disabled', 'true')
   await expect(page.getByTestId('dialog-sending-hint')).toHaveText(SENDING_HINT)
   await expect(cancel).toHaveAccessibleDescription(SENDING_HINT)
+  // A click on the busy Confirm sends nothing more.
+  await confirmButton(page).click({ force: true })
+  await page.keyboard.press('Escape')
+  await expect(dialog(page)).toBeVisible()
+  await expect(status).toHaveText(SENDING_HINT)
+  await expect(confirmButton(page)).toBeFocused()
   await cancel.click({ force: true })
   await expect(dialog(page)).toBeVisible()
   await page.mouse.click(4, 4)
-  await expect(dialog(page)).toBeVisible()
-  await page.keyboard.press('Escape')
   await expect(dialog(page)).toBeVisible()
   // A close the cancel event cannot stop (a second Escape, a back gesture) opens the dialog again while it sends.
   await dialog(page).evaluate(element => (element as unknown as { close(): void }).close())
@@ -372,6 +382,29 @@ test(`[regression:controls-dialog-in-flight] While a Confirm is being sent nothi
   await expect(dialog(page)).toHaveCount(0)
   await page.getByTestId('run-command').click()
   await expect(dialog(page)).toBeVisible()
+})
+
+test(`[regression:controls-dialog-focus-after-failure] After a send that fails (the answer lost), the focus is still on Confirm inside the dialog and the live region is quiet (F3.1) (${phase})`, async ({ page }) => {
+  const requests = watch(page)
+  await open(page, RUN_STOPPED)
+  let release: () => void = () => undefined
+  const held = new Promise<void>(resolve => { release = resolve })
+  await page.route('**/api/run-controls/*/*/*/restart', async route => {
+    await held
+    await route.abort('connectionreset')
+  })
+  await page.getByTestId('run-command').click()
+  await expect(dialog(page)).toBeVisible()
+  await confirmButton(page).focus()
+  await page.keyboard.press('Enter')
+  await expect(confirmButton(page)).toHaveAttribute('aria-busy', 'true')
+  await expect(confirmButton(page)).toBeFocused()
+  release()
+  await expect(dialog(page).getByTestId('dialog-alert')).toBeVisible()
+  await expect(confirmButton(page)).not.toHaveAttribute('aria-busy', 'true')
+  await expect(confirmButton(page)).toBeFocused()
+  await expect(dialog(page).getByTestId('dialog-status')).toHaveText('')
+  expect(posts(requests, '/restart')).toHaveLength(1)
 })
 
 test(`[scenario:controls-phone] At 390 px the Controls list is a bottom sheet and the dialog fits with its command wrapped, nothing scrolls sideways (${phase})`, async ({ page }, testInfo) => {

@@ -785,6 +785,40 @@ test(`[regression:team-drawer-replace-close] A view-wide search or another card'
   await expect(page).not.toHaveURL(/\/team(\?|$)/)
 })
 
+test(`[regression:team-drawer-fast-search] Typing quickly in the view-wide search while a pushed drawer is open keeps every character and leaves no drawer entry behind (F4.1) (${phase})`, async ({ page }) => {
+  await open(page, runPage(TEAMS_RUNS.base))
+  await runViewLink(page, 'team').click()
+  await expect(teamView(page)).toHaveAttribute('data-state', 'ready')
+  const finished = workflowCard(page, 'wf_1a2b3c4d-5e6')
+  await finished.getByRole('button', { name: 'build-run-teams' }).click()
+  const before = await (page.evaluate('history.length') as Promise<number>)
+  await agentButton(finished, 5).click()
+  await expect(drawer(page)).toHaveAttribute('data-index', '5')
+  // Keystrokes with no pause between them: the first starts the Back off the drawer entry, the rest arrive before it lands
+  // (popstate is a later task, so each keystroke is typed onto the value the field shows at that moment, in one task).
+  const field = page.getByTestId('team-view-search')
+  await field.focus()
+  await field.evaluate((element, text) => {
+    // The spec's TypeScript has no DOM library: the page's input class and events are reached through the window.
+    type Input = { value: string; dispatchEvent(event: unknown): boolean }
+    const page = globalThis as unknown as { HTMLInputElement: { prototype: object }; Event: new (type: string, init: { bubbles: boolean }) => unknown }
+    const setValue = Object.getOwnPropertyDescriptor(page.HTMLInputElement.prototype, 'value')!.set!
+    const input = element as unknown as Input
+    for (const character of text) {
+      setValue.call(input, input.value + character)
+      input.dispatchEvent(new page.Event('input', { bubbles: true }))
+    }
+  }, 'review')
+  await expect(field).toHaveValue('review')
+  await expect(field).toBeFocused()
+  await expect(drawer(page)).toHaveCount(0)
+  await expect(page).toHaveURL(/[?&]q=review(&|$)/)
+  await expect(page).not.toHaveURL(/agent=/)
+  await expect.poll(() => page.evaluate('history.length') as Promise<number>).toBe(before + 1)
+  await page.goBack()
+  await expect(page).not.toHaveURL(/\/team(\?|$)/)
+})
+
 test(`[scenario:team-deep-link-earlier] A link that selects an agent of an older tucked workflow, or a reload with a search, opens the earlier-workflows disclosure and the card at load (${phase})`, async ({ page }, testInfo) => {
   const base = fixtureTeams(TEAMS_RUNS.base)
   const [finished, live] = base.sessions[0]!.workflows

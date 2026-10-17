@@ -197,6 +197,16 @@ export function answerLost(error: unknown): boolean {
 /** Said beside the dialog's Cancel while a Confirm is being sent (final review F4.1): closing then would lose the request's answer. */
 export const SENDING_HINT = 'Sending: the dialog stays open until the server answers.'
 
+/**
+ * How a dialog's Confirm is turned off (final review F3.1): natively `disabled` until it has been pressed, then `aria-disabled`
+ * (`keepFocus`: while it is sent and after an answer, failed or not) so the focus it holds stays on it inside the dialog instead
+ * of falling to the page; its click handler ignores a press then, as it does for any Confirm that cannot confirm.
+ */
+export function confirmOff(canConfirm: boolean, keepFocus: boolean): { disabled: boolean; 'aria-disabled'?: true } {
+  if (canConfirm) return { disabled: false }
+  return keepFocus ? { disabled: false, 'aria-disabled': true } : { disabled: true }
+}
+
 /** The attempt held after a failure: kept only when its answer was lost, so only a retry with unchanged values reuses it. */
 export const heldAfterFailure = (attempt: RequestAttempt, error: unknown): RequestAttempt | null => (answerLost(error) ? attempt : null)
 
