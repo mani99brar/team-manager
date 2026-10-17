@@ -50,3 +50,13 @@ test('token shapes still go, and an assignment around an already redacted token 
   assert.equal(redactCredentials(`token: ghp_${'a'.repeat(36)}`), 'token: <redacted>')
   assert.equal(redactCredentials(`Authorization: Bearer ${'c'.repeat(30)}`), 'Authorization: <redacted>')
 })
+
+test('redaction stays linear on adversarial input (a bounded name pattern; the unbounded one took 8 s on 140 KB)', async () => {
+  const { redactText } = await import('../../contracts/projects/redact.ts')
+  for (const text of ['access_'.repeat(20000) + 'token', 'ACCESS_'.repeat(20000) + 'TOKEN', 'a.'.repeat(50000) + 'token', 'Access-'.repeat(20000) + 'Key', 'SECRET'.repeat(20000), 'password' + ' '.repeat(50000) + 'x']) {
+    const started = performance.now()
+    redactText(text)
+    assert.ok(performance.now() - started < 500, `redactText took ${Math.round(performance.now() - started)} ms on ${text.slice(0, 16)}… (${text.length} chars)`)
+  }
+  assert.equal(redactText('aws_secret_access_key = "AKIAabcdefghij"'), 'aws_secret_access_key = <redacted>')
+})

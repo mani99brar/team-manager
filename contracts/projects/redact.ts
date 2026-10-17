@@ -49,14 +49,16 @@ const TOKEN_PATTERNS: readonly RegExp[] = [
  */
 const CREDENTIAL_ASSIGNMENT = new RegExp(
   '(?<![A-Za-z0-9])('
-  + '(?:[A-Za-z0-9]+[_.-])*'
-  + '(?:[A-Za-z0-9]*(?:token|secret|password|passwd)|pwd|auth|(?:api|access|private)[_.-]?key|client[_.-]?secret)'
+  // Bounded (at most four prefix segments of at most 32 characters, a name part of at most 32): an unbounded `(?:x+[_.-])*x*`
+  // splits a long `access_access_…` run every way at every start, which took 8 s on 140 KB (learnings/redaction-regex-backtracking.md).
+  + '(?:[A-Za-z0-9]{1,32}[_.-]){0,4}'
+  + '(?:[A-Za-z0-9]{0,32}(?:token|secret|password|passwd)|pwd|auth|(?:api|access|private)[_.-]?key|client[_.-]?secret)'
   + '["\']?[ \\t]*[=:][ \\t]*)'
   + '(?:"[^"\\n]*"|\'[^\'\\n]*\'|(?!<redacted>)[^\\s"\']{5,}[^\\s"\';,.)\\]])',
   'gi',
 )
 /** An upper-case environment assignment of a `…TOKEN`, `…KEY`, `…PASSWORD` or `…SECRET…` name: the name is kept, the (quoted or bare) value is not. */
-const SECRET_ASSIGNMENT = /\b((?:[A-Z][A-Z0-9_]*)?(?:SECRET[A-Z0-9_]*|TOKEN|KEY|PASSWORD|PASSWD))=(?:"[^"\n]*"|'[^'\n]*'|(?!<redacted>)[^\s"']+)/g
+const SECRET_ASSIGNMENT = /\b((?:[A-Z][A-Z0-9_]{0,63})?(?:SECRET[A-Z0-9_]{0,63}|TOKEN|KEY|PASSWORD|PASSWD))=(?:"[^"\n]*"|'[^'\n]*'|(?!<redacted>)[^\s"']+)/g
 export function redactCredentials(text: string): string {
   const tokensGone = TOKEN_PATTERNS.reduce((acc, pattern) => acc.replace(pattern, '<redacted>'), text.replace(PEM_BLOCK, '<redacted>'))
   return tokensGone.replace(CREDENTIAL_ASSIGNMENT, '$1<redacted>').replace(SECRET_ASSIGNMENT, '$1=<redacted>')
