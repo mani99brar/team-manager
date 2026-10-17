@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { chmod, mkdir, mkdtemp, rm, symlink, utimes, writeFile } from 'node:fs/promises'
+import fs, { chmod, mkdir, mkdtemp, rm, symlink, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -7,7 +7,7 @@ import type { SessionRow } from '../contracts/projects/sessions.ts'
 import { validateTeams, type TeamWorkflow, type Teams } from '../contracts/projects/teams.ts'
 import { createApp } from './app.ts'
 import { parseProjectsConfig } from './projectsConfig.ts'
-import { TeamReader, UNREADABLE_REASON, claudeHomeOf, parseScriptMeta, providersOfCommand, teamSessionRows } from './teams.ts'
+import { MAX_WORKFLOWS, TeamReader, UNREADABLE_REASON, claudeHomeOf, parseScriptMeta, providersOfCommand, teamSessionRows } from './teams.ts'
 
 /**
  * The team reader and the teams route (docs/PRD_RUN_TEAMS.md "Team reader"): finished and live Workflow-tool records, agent
@@ -457,6 +457,195 @@ test('teams: the Claude home is MD_MANAGER_CLAUDE_HOME, else CLAUDE_CONFIG_DIR, 
   assert.equal(claudeHomeOf({ MD_MANAGER_CLAUDE_HOME: '/t/a', CLAUDE_CONFIG_DIR: '/t/b' }, '/h'), '/t/a')
   assert.equal(claudeHomeOf({ CLAUDE_CONFIG_DIR: '/t/b' }, '/h'), '/t/b')
   assert.equal(claudeHomeOf({}, '/h'), '/h/.claude')
+})
+
+// ---- Review findings (F5.1-F5.9) ----------------------------------------------------------------------------------
+
+/** A summary whose phases can only come from a script: no `phases`, no `workflow_phase` entries. */
+function scriptOnlySummary(runId: string, scriptPath: string) {
+  return summary(runId, { phases: [], scriptPath, workflowProgress: [progressAgent(1)] })
+}
+
+test('teams: a summary scriptPath is never followed (another session, a symlinked folder); only the session\'s own script is read (F5.1, F5.2)', async () => {
+  await withEnv(async env => {
+    const folder = await env.folder()
+    // Another session's script under the projects root.
+    const otherScripts = join(await env.folder(SID.repair), 'workflows', 'scripts')
+    await mkdir(otherScripts, { recursive: true })
+    await writeFile(join(otherScripts, 'other-wf_99999999-999.js'), "export const meta = { name: 'other', phases: [{ title: 'OtherPhase' }] }")
+    // A slug folder that is a symlink to a folder outside the Claude home.
+    const outside = join(env.root, 'outside')
+    await mkdir(outside, { recursive: true })
+    await writeFile(join(outside, 'leak.js'), "export const meta = { name: 'leak', phases: [{ title: 'LeakedPhase' }] }")
+    await symlink(outside, join(env.projects, '-linked-slug'))
+    await writeFinal(folder, 'wf_00000011-aaa', scriptOnlySummary('wf_00000011-aaa', join(otherScripts, 'other-wf_99999999-999.js')))
+    await writeFinal(folder, 'wf_00000012-bbb', scriptOnlySummary('wf_00000012-bbb', join(env.projects, '-linked-slug', 'leak.js')))
+    // The session's own script is read for the third.
+    await mkdir(join(folder, 'workflows', 'scripts'), { recursive: true })
+    await writeFile(join(folder, 'workflows', 'scripts', 'own-wf_00000013-ccc.js'), "export const meta = { name: 'own', phases: [{ title: 'OwnPhase' }] }")
+    await writeFinal(folder, 'wf_00000013-ccc', scriptOnlySummary('wf_00000013-ccc', '/anything.js'))
+    const teams = await read(env, [workerRow()])
+    const byId = new Map(only(teams).map(workflow => [workflow.run_id, workflow]))
+    assert.deepEqual(byId.get('wf_00000011-aaa')!.phases, [])
+    assert.deepEqual(byId.get('wf_00000012-bbb')!.phases, [])
+    assert.deepEqual(byId.get('wf_00000013-ccc')!.phases.map(phase => phase.title), ['OwnPhase'])
+    const body = JSON.stringify(teams)
+    assert.ok(!body.includes('OtherPhase') && !body.includes('LeakedPhase'), body)
+  })
+})
+
+test('teams: models, tool names, labels, names and descriptions are redacted or shape-checked; blank ones are null (F5.3)', async () => {
+  await withEnv(async env => {
+    const folder = await env.folder()
+    const key = `ghp_${'A'.repeat(36)}`
+    await writeFinal(folder, 'wf_00000021-aaa', summary('wf_00000021-aaa', {
+      defaultModel: '/home/agentops/secret-model', workflowName: '   ', summary: '',
+      workflowProgress: [progressAgent(1, { model: key, lastToolName: '/home/agentops/tool', label: '', phaseTitle: '  ' }), progressAgent(2, { model: 'claude-opus-5-5[1m]', lastToolName: 'mcp__docs__read' })],
+    }))
+    const line = JSON.stringify({
+      type: 'assistant', timestamp: new Date(T0).toISOString(),
+      message: { model: '/home/u/model', usage: { input_tokens: 1 }, content: [{ type: 'tool_use', id: 't', name: `sk-${'x'.repeat(40)}`, input: {} }] },
+    })
+    await writeLive(folder, 'wf_00000022-bbb', [{ id: agentId(1), label: 'impl', phase: 'Build', lines: [line], meta: { model: `/home/agentops/${key}` } }])
+    const teams = await read(env, [workerRow()])
+    const [final, live] = only(teams)
+    assert.equal(final!.default_model, null)
+    assert.equal(final!.name, null)
+    assert.equal(final!.description, null)
+    assert.deepEqual(final!.agents.map(agent => [agent.label, agent.model, agent.last_tool]), [['agent 1', null, null], ['impl:part-2', 'claude-opus-5-5[1m]', 'mcp__docs__read']])
+    assert.equal(final!.agents[0]!.phase, 'Implement', 'a blank phase title falls back to the phase list')
+    assert.equal(live!.agents[0]!.model, null)
+    assert.equal(live!.agents[0]!.last_tool, null)
+    const body = JSON.stringify(teams)
+    for (const needle of ['/home/', 'ghp_', 'sk-x']) assert.ok(!body.includes(needle), `${needle} leaked: ${body}`)
+  })
+})
+
+test('teams: a tool_use block with an empty name is not a tool call and never fails the payload (F5.5)', async () => {
+  await withEnv(async env => {
+    const folder = await env.folder()
+    await writeLive(folder, 'wf_00000031-aaa', [{ id: agentId(1), label: 'impl', phase: 'Build', lines: [assistantLine(T0, [{ name: 'Read', input: {} }, { name: '', input: {} }])] }])
+    const agent = only(await read(env, [workerRow()]))[0]!.agents[0]!
+    assert.equal(agent.last_tool, 'Read')
+    assert.equal(agent.tool_calls, 1)
+  })
+})
+
+test('teams: a summary that exists but cannot be parsed makes the session unreadable unless a live record stands in (F5.6)', async () => {
+  await withEnv(async env => {
+    const broken = await env.folder()
+    await mkdir(join(broken, 'workflows'), { recursive: true })
+    await writeFile(join(broken, 'workflows', 'wf_00000041-aaa.json'), '{"runId": "wf_00000041-aaa", "workflowProg')
+    const shapeless = await env.folder(SID.repair)
+    await writeFinal(shapeless, 'wf_00000042-bbb', { runId: 'wf_00000042-bbb', status: 'completed' })
+    const fallback = await env.folder(SID.challenge)
+    await mkdir(join(fallback, 'workflows'), { recursive: true })
+    await writeFile(join(fallback, 'workflows', 'wf_00000043-ccc.json'), 'not json')
+    await writeLive(fallback, 'wf_00000043-ccc', [{ id: agentId(1), label: 'impl', phase: 'Build', lines: [assistantLine(T0, [])] }])
+    const teams = await read(env, [workerRow(), row('repair:1', 'repair', SID.repair), row('challenge:1', 'challenge', SID.challenge)])
+    assert.deepEqual(teams.sessions.map(session => [session.key, session.records, session.reason]), [
+      ['worker:server', 'unreadable', UNREADABLE_REASON],
+      ['repair:1', 'unreadable', UNREADABLE_REASON],
+      ['challenge:1', 'found', null],
+    ])
+    assert.equal(teams.sessions[2]!.workflows[0]!.record, 'live')
+  })
+})
+
+/** Counts the opens and lstats of files naming one of `ids` while `run` runs. */
+async function countTouches(ids: readonly string[], run: () => Promise<void>): Promise<number> {
+  const open = fs.open
+  const lstat = fs.lstat
+  let touches = 0
+  const hit = (path: unknown) => { if (typeof path === 'string' && ids.some(id => path.includes(id))) touches += 1 }
+  fs.open = ((path: Parameters<typeof open>[0], ...rest: unknown[]) => { hit(path); return (open as (...args: unknown[]) => unknown)(path, ...rest) }) as typeof open
+  fs.lstat = ((path: Parameters<typeof lstat>[0], ...rest: unknown[]) => { hit(path); return (lstat as (...args: unknown[]) => unknown)(path, ...rest) }) as typeof lstat
+  try {
+    await run()
+  } finally {
+    fs.open = open
+    fs.lstat = lstat
+  }
+  return touches
+}
+
+test('teams: the 400-agent cap is applied before any agent meta or transcript is read, final and live (F5.7)', async () => {
+  await withEnv(async env => {
+    const folder = await env.folder()
+    const beyond = Array.from({ length: 50 }, (_, n) => agentId(401 + n))
+    await writeFinal(folder, 'wf_00000051-aaa', summary('wf_00000051-aaa', { agentCount: 450, workflowProgress: Array.from({ length: 450 }, (_, n) => progressAgent(n + 1)) }))
+    await writeLive(folder, 'wf_00000051-aaa', [])
+    const liveDir = join(folder, 'subagents', 'workflows', 'wf_00000052-bbb')
+    await mkdir(liveDir, { recursive: true })
+    await writeFile(join(liveDir, 'journal.jsonl'), Array.from({ length: 450 }, (_, n) => json({ type: 'started', agentId: agentId(n + 1), label: `impl:${n + 1}`, phase: 'Build' })).join(''))
+    let teams: Teams | null = null
+    const touches = await countTouches(beyond, async () => { teams = await read(env, [workerRow()]) })
+    assert.equal(touches, 0, 'no file of an agent past the cap is opened or statted')
+    const [final, live] = only(teams!)
+    assert.deepEqual([final!.agents.length, final!.agents_more, final!.agent_count], [400, 50, 450])
+    assert.deepEqual([live!.agents.length, live!.agents_more, live!.agent_count], [400, 50, 450])
+  })
+})
+
+test(`teams: at most ${MAX_WORKFLOWS} workflows per session are listed, the newest by record time (F5.7)`, async () => {
+  await withEnv(async env => {
+    const folder = await env.folder()
+    const ids = Array.from({ length: MAX_WORKFLOWS + 5 }, (_, n) => `wf_${(n + 1).toString(16).padStart(8, '0')}-aaa`)
+    for (const [n, id] of ids.entries()) {
+      await writeFinal(folder, id, summary(id, { startTime: T0 + n * 1000, workflowProgress: [] }))
+      const when = new Date(Date.now() - (ids.length - n) * 60_000)
+      await utimes(join(folder, 'workflows', `${id}.json`), when, when)
+    }
+    const listed = only(await read(env, [workerRow()])).map(workflow => workflow.run_id)
+    assert.deepEqual(listed, ids.slice(5))
+  })
+})
+
+test('teams: a transcript is read on from its last complete line within a per-request byte budget (F5.8)', async () => {
+  await withEnv(async env => {
+    const folder = await env.folder()
+    const first = assistantLine(T0, [{ name: 'Read', input: {} }])
+    const second = assistantLine(T0 + 1000, [{ name: 'Write', input: { file_path: join(env.worktree, 'w.ts') } }])
+    const dir = await writeLive(folder, 'wf_00000061-aaa', [{ id: agentId(1), label: 'impl', phase: 'Build', lines: [first, second] }])
+    const transcript = join(dir, `agent-${agentId(1)}.jsonl`)
+    const reader = new TeamReader({ claudeHome: env.claudeHome, readBudgetBytes: Math.max(Buffer.byteLength(first), Buffer.byteLength(second)) + 1 })
+    const agentOf = async () => validateTeams(await reader.read({ runId: 'run-001', rows: [workerRow()], worktrees: new Map([['worker:server', env.worktree]]) })).sessions[0]!.workflows[0]!.agents[0]!
+    // The first request's budget runs out inside the second line: a cut first read serves nothing, never a partial count.
+    const cut = await agentOf()
+    assert.equal(cut.tool_calls, null)
+    // The next request reads on from that line (the budget covers the rest) and serves the whole file.
+    const whole = await agentOf()
+    assert.deepEqual([whole.tool_calls, whole.last_tool, whole.files_edited], [2, 'Write', ['w.ts']])
+    // A grown file is read on from where it stopped: the bytes already consumed are not read again (a same-length change of
+    // the first line, past its head, is not seen), only the new line is.
+    const pad = (line: string, length: number) => line + ' '.repeat(length - line.length)
+    const changedFirst = pad(assistantLine(T0, []), Buffer.byteLength(first))
+    assert.equal(changedFirst.slice(0, 256), first.slice(0, 256))
+    const third = assistantLine(T0 + 2000, [{ name: 'Grep', input: {} }])
+    await writeFile(transcript, [changedFirst, second, third].join('\n') + '\n')
+    const grown = new TeamReader({ claudeHome: env.claudeHome })
+    // A fresh reader reads from byte 0 (two tools); the reader with the cached offset counts three.
+    assert.equal(validateTeams(await grown.read({ runId: 'run-001', rows: [workerRow()], worktrees: new Map() })).sessions[0]!.workflows[0]!.agents[0]!.tool_calls, 2)
+    assert.deepEqual([(await agentOf()).tool_calls, (await agentOf()).last_tool], [3, 'Grep'])
+    // A rewritten (shorter, new head) file is read again from byte 0.
+    await writeFile(transcript, assistantLine(T0 + 5000, [{ name: 'Bash', input: { command: 'ls' } }]) + '\n')
+    assert.deepEqual([(await agentOf()).tool_calls, (await agentOf()).last_tool], [1, 'Bash'])
+  })
+})
+
+test('teams: the script meta parser stops at a nesting depth; a deeply nested script never fails the route (F5.9)', async () => {
+  const deep = `${'['.repeat(60_000)}${']'.repeat(60_000)}`
+  assert.deepEqual(parseScriptMeta(`export const meta = { name: 'n', extra: ${deep}, phases: [{ title: 'P' }] }`), { name: 'n', description: null, phases: [{ title: 'P', detail: null }] })
+  assert.deepEqual(parseScriptMeta(`export const meta = { name: 'm', phases: ${deep} }`), { name: 'm', description: null, phases: [] })
+  await withEnv(async env => {
+    const folder = await env.folder()
+    await writeLive(folder, 'wf_00000071-aaa', [{ id: agentId(1), label: 'impl', phase: 'Build', lines: [assistantLine(T0, [])] }])
+    await mkdir(join(folder, 'workflows', 'scripts'), { recursive: true })
+    await writeFile(join(folder, 'workflows', 'scripts', 'deep-wf_00000071-aaa.js'), `export const meta = { name: 'deep', phases: [{ title: 'Plan', x: ${deep} }] }`)
+    const [workflow] = only(await read(env, [workerRow()]))
+    assert.equal(workflow!.name, 'deep')
+    assert.deepEqual(workflow!.phases.map(phase => phase.title), ['Plan', 'Build'])
+  })
 })
 
 // ---- The route ----------------------------------------------------------------------------------------------------
