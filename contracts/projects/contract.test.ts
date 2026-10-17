@@ -941,7 +941,7 @@ test('run controls 1.2.0: fifteen ids, the first fourteen in their 1.1.0 order, 
   assert.equal(steering.note.available, true)
   assert.equal(steering.note.command, '$PY -m workflow note "$RUN" <lane> --by operator -- "<text>"')
   assert.deepEqual(steering.note.params.map(param => param.name), ['lane', 'text'])
-  assert.match(steering.note.not_effect ?? '', /does not interrupt a running tool call/)
+  assert.match(steering.note.not_effect ?? '', /its agents never see the note/)
   const byId = Object.fromEntries(controls.controls.map(control => [control.id, control]))
   assert.equal(byId.retry_all.command, '$PY -m workflow retry "$RUN" --phase worker --all-failed --by operator')
   assert.match(byId.retry_all.effect, /Restart supervisor/)

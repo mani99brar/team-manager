@@ -1484,6 +1484,9 @@ test('[note] offered for a working lane with a pane while the supervisor runs; o
     assert.deepEqual(note.params, [{ name: 'lane', kind: 'choice', choices: ['ui'], required: true }, { name: 'text', kind: 'text', min_length: 1, max_length: 4000, required: true }])
     assert.equal(note.command, '$PY -m workflow note "$RUN" <lane> --by operator -- "<text>"')
     assert.equal(note.label, 'Send a note to the lead')
+    // PRD_RUN_TEAMS section 7, word for word.
+    assert.equal(note.effect, 'Types your note into the lane\'s lead session pane as an operator note and records it in the lane\'s notes.')
+    assert.equal(note.not_effect, 'A running team workflow takes no input: its agents never see the note, and the lead reads it when its current turn ends. It stops and restarts nothing.')
     const text = '--help: also cover the empty state\nsecond line'
     r.spawner.auto.code = 0
     const response = await r.post('n1', 'note', { lane: 'ui', text }, { token: controls.run_state_token })

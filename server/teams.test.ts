@@ -296,7 +296,8 @@ test('teams: providers come from Bash commands (pi --model, muse exec, agy); edi
     const [workflow] = only(teams)
     const [server, iso] = workflow!.agents
     assert.deepEqual(server!.providers, ['openai-codex/gpt-6-astra', 'muse/wonder-2'])
-    assert.deepEqual(server!.files_edited, ['server/teams.ts', '<path>'])
+    // Two different outside files stay two entries, each with the <path> marker (never compared, never absolute).
+    assert.deepEqual(server!.files_edited, ['server/teams.ts', '<path>/config', '<path>/n.ipynb'])
     assert.equal(server!.files_edited_more, 0)
     assert.equal(iso!.isolated, true)
     assert.deepEqual(iso!.files_edited, ['iso.ts'])
@@ -314,9 +315,38 @@ test('teams: more than 50 edited files list the first 50 and count the rest', as
     const agent = only(await read(env, [workerRow()]))[0]!.agents[0]!
     assert.equal(agent.files_edited.length, 50)
     assert.equal(agent.files_edited_more, 10)
-    // No worktree recorded: the files are redacted.
+    // No worktree recorded: each file is redacted to its own marked entry and the count stays 60.
     const unknown = only(await read(env, [workerRow()], { worktree: null }))[0]!.agents[0]!
-    assert.deepEqual(unknown.files_edited, ['<path>'])
+    assert.equal(unknown.files_edited.length, 50)
+    assert.equal(unknown.files_edited_more, 10)
+    assert.equal(unknown.files_edited[0], '<path>/f0.ts')
+    assert.ok(unknown.files_edited.every(file => file.startsWith('<path>/')))
+  })
+})
+
+test('teams: a transcript cwd other than the recorded worktree makes its files relative; outside files stay distinct and counted', async () => {
+  await withEnv(async env => {
+    const folder = await env.folder()
+    const cwd = join(env.root, 'scratch-copy')
+    const withCwd = (line: string) => JSON.stringify({ ...JSON.parse(line) as Record<string, unknown>, cwd })
+    const inside = Array.from({ length: 4 }, (_, n) => ({ name: 'Write', input: { file_path: join(cwd, 'src', `f${n}.ts`) } }))
+    const outside = [
+      { name: 'Edit', input: { file_path: join(env.root, 'elsewhere', 'a.ts') } },
+      { name: 'Edit', input: { file_path: join(env.root, 'other', 'b.ts') } },
+      // A basename clash: two raw paths serve the same string, and the second is counted, not lost.
+      { name: 'Edit', input: { file_path: join(env.root, 'third', 'a.ts') } },
+    ]
+    await writeLive(folder, 'wf_00000007-cwd', [{ id: agentId(1), label: 'impl', phase: 'Build', lines: [withCwd(assistantLine(T0, [...inside, ...outside]))] }])
+    const agent = only(await read(env, [workerRow()]))[0]!.agents[0]!
+    assert.deepEqual(agent.files_edited, ['src/f0.ts', 'src/f1.ts', 'src/f2.ts', 'src/f3.ts', '<path>/a.ts', '<path>/b.ts'])
+    assert.equal(agent.files_edited.length + agent.files_edited_more, 7)
+    // Without any recorded worktree the cwd is still the last base.
+    const unknown = only(await read(env, [workerRow()], { worktree: null }))[0]!.agents[0]!
+    assert.equal(unknown.files_edited.filter(file => file.startsWith('src/')).length, 4)
+    assert.equal(unknown.files_edited.length + unknown.files_edited_more, 7)
+    const text = JSON.stringify([agent, unknown])
+    assert.ok(!text.includes('/home/'), text)
+    assert.ok(!text.includes('/tmp/'), text)
   })
 })
 

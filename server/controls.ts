@@ -201,8 +201,8 @@ const SPECS: Spec[] = [
   },
   {
     id: 'note', label: 'Send a note to the lead', runs: 'short', confirm: 'plain',
-    effect: 'Types your note into the lane\'s lead session between its turns and records it in <lane>.notes.json.',
-    not_effect: 'It does not interrupt a running tool call; a team workflow that is running takes no input until it returns.',
+    effect: 'Types your note into the lane\'s lead session pane as an operator note and records it in the lane\'s notes.',
+    not_effect: 'A running team workflow takes no input: its agents never see the note, and the lead reads it when its current turn ends. It stops and restarts nothing.',
     display: params => `$PY -m workflow note "$RUN" ${params.lane ?? '<lane>'} --by operator -- ${quoted(params.text, '"<text>"')}`,
     argv: (runDir, params) => [...W, 'note', runDir, params.lane!, ...BY, '--', params.text!],
   },
