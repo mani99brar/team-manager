@@ -8,7 +8,7 @@ import {
   type WorkflowStatus,
 } from '../contracts/projects/teams.ts'
 import { ID_PATTERN } from './projectsConfig.ts'
-import { readBounded, redactText } from './projects.ts'
+import { readBounded, realpathOrNull, redactText } from './projects.ts'
 import { iso } from './sessions.ts'
 
 /**
@@ -25,11 +25,22 @@ import { iso } from './sessions.ts'
  *   the script's `meta.phases` literal declares (parsed without evaluating anything).
  *
  * A session can own two slug folders (it changed directory after starting: the script sits under the other slug), so every
- * folder named `<sid>` under any slug is read and the union served. Nothing follows a symlink. Transcript text never leaves
- * this module beyond the capped, redacted previews; edited files are relative to the session's (or the isolated agent's)
- * worktree, or redacted. A missing folder or one without workflow records is `records: 'none'`; a folder that cannot be read
- * is `records: 'unreadable'` with a fixed reason, never an error for the run. The roots and the clock are injected so tests
- * read temporary directories.
+ * folder named `<sid>` under any slug is read and the union served. Nothing follows a symlink; a script is read only from
+ * the session's own `workflows/scripts/*-<wf id>.js` and only when its real path stays inside the real projects root (a
+ * summary's `scriptPath` is never followed). Transcript text never leaves this module beyond the capped, redacted previews;
+ * every other served string (labels, phase titles, names, descriptions, models, tool names, providers, edited files) is
+ * redacted, models and tool names are also held to a strict shape, and a blank one is null. Edited files are relative to the
+ * session's (or the isolated agent's) worktree, or redacted.
+ *
+ * Bounds: at most `MAX_WORKFLOWS` (50) workflows per session, the newest by record time; the 400-agent cap is applied before
+ * any agent's meta or transcript is read; a transcript is read incrementally (a file that only grew is read on from its last
+ * complete line, a shorter or rewritten one from byte 0), and one request reads at most `TRANSCRIPT_READ_BUDGET` transcript
+ * bytes (the next request reads on); the script `meta` parser stops at a fixed nesting depth.
+ *
+ * A missing folder or one without workflow records is `records: 'none'`; a folder that cannot be read, a summary that exists
+ * but cannot be read or parsed (with no live record to fall back on), or anything else that throws while one session is read
+ * is `records: 'unreadable'` with a fixed reason, never an error for the run. The roots, the clock and the read budget are
+ * injected so tests read temporary directories.
  */
 
 /** The fixed reason of an unreadable session folder. */
@@ -52,6 +63,8 @@ const WORKTREE_FILE_BYTE_LIMIT = 4 * 1024 * 1024
 export const TRANSCRIPT_BYTE_LIMIT = 64 * 1024 * 1024
 const TRANSCRIPT_CACHE_ENTRIES = 4000
 const MAX_AGENTS = 400
+/** At most this many workflows of one session are read and listed: the newest by their record's modification time. */
+export const MAX_WORKFLOWS = 50
 const MAX_FILES = 50
 const MAX_PROVIDERS = 10
 const MAX_LOGS = 50
@@ -106,10 +119,24 @@ function text(value: unknown): string | null {
   return typeof value === 'string' && value.trim().length > 0 ? value : null
 }
 
-/** A non-blank string, redacted; null otherwise. */
+/** A non-blank string, redacted; null otherwise (and when nothing but blanks is left after redaction). */
 function textRedacted(value: unknown): string | null {
   const found = text(value)
-  return found === null ? null : redactText(found)
+  return found === null ? null : text(redactText(found))
+}
+
+/** A model or provider name (`claude-opus-5-5[1m]`, `openai-codex/gpt-6-astra`): redacted, then held to a strict shape; null otherwise. */
+const MODEL_SHAPE = /^[A-Za-z0-9][A-Za-z0-9._:/@+[\]-]{0,127}$/
+function modelName(value: unknown): string | null {
+  const found = textRedacted(value)
+  return found !== null && MODEL_SHAPE.test(found) ? found : null
+}
+
+/** A tool name (`Bash`, `mcp__server__tool`): redacted, then held to a strict shape; null otherwise. */
+const TOOL_SHAPE = /^[A-Za-z0-9_][A-Za-z0-9_.:@-]{0,127}$/
+function toolName(value: unknown): string | null {
+  const found = textRedacted(value)
+  return found !== null && TOOL_SHAPE.test(found) ? found : null
 }
 
 function count(value: unknown): number | null {
@@ -179,13 +206,16 @@ async function listRealDirectory(path: string): Promise<Dirent[] | null> {
   }
 }
 
-/** A regular file's bytes, opened without following a symlink, at most `limit` bytes; null when missing, larger or not a file. */
-async function readFileBounded(path: string, limit: number): Promise<Buffer | null> {
+/**
+ * A regular file's bytes, opened without following a symlink, at most `limit` bytes: `missing` when it is gone, `unreadable`
+ * when it cannot be opened or read, is larger or is not a regular file (a symlink included).
+ */
+async function readFileResult(path: string, limit: number): Promise<Buffer | 'missing' | 'unreadable'> {
   let handle: FileHandle | null = null
   try {
     handle = await fs.open(path, READ_FLAGS)
     const stat = await handle.stat()
-    if (!stat.isFile() || stat.size > limit) return null
+    if (!stat.isFile() || stat.size > limit) return 'unreadable'
     const buffer = Buffer.allocUnsafe(Math.min(stat.size, limit) + 1)
     let offset = 0
     while (offset < buffer.length) {
@@ -193,22 +223,34 @@ async function readFileBounded(path: string, limit: number): Promise<Buffer | nu
       if (bytesRead === 0) break
       offset += bytesRead
     }
-    return offset > limit ? null : buffer.subarray(0, offset)
-  } catch {
-    return null
+    return offset > limit ? 'unreadable' : buffer.subarray(0, offset)
+  } catch (error) {
+    return isGone(error) ? 'missing' : 'unreadable'
   } finally {
-    await handle?.close()
+    await handle?.close().catch(() => {})
+  }
+}
+
+/** A regular file's bytes (see `readFileResult`); null when missing, unreadable, larger or not a file. */
+async function readFileBounded(path: string, limit: number): Promise<Buffer | null> {
+  const bytes = await readFileResult(path, limit)
+  return typeof bytes === 'string' ? null : bytes
+}
+
+/** A JSON file's value; `unreadable` also when it does not parse. */
+async function readJsonRecord(path: string, limit: number): Promise<{ state: 'ok'; value: unknown } | { state: 'missing' | 'unreadable' }> {
+  const bytes = await readFileResult(path, limit)
+  if (typeof bytes === 'string') return { state: bytes }
+  try {
+    return { state: 'ok', value: JSON.parse(bytes.toString('utf8')) }
+  } catch {
+    return { state: 'unreadable' }
   }
 }
 
 async function readJsonFile(path: string, limit: number): Promise<unknown> {
-  const bytes = await readFileBounded(path, limit)
-  if (bytes === null) return undefined
-  try {
-    return JSON.parse(bytes.toString('utf8'))
-  } catch {
-    return undefined
-  }
+  const read = await readJsonRecord(path, limit)
+  return read.state === 'ok' ? read.value : undefined
 }
 
 /** A regular file's modification time and size (lstat); null when missing or not a regular file. */
@@ -257,6 +299,8 @@ type Token = { kind: 'punct' | 'string' | 'word' | 'other'; value: string }
 type Literal = string | number | boolean | null | undefined | Literal[] | { [key: string]: Literal }
 
 const MAX_TOKENS = 200_000
+/** Objects and arrays nested deeper than this are skipped (read as not a literal) without recursing into them. */
+export const MAX_LITERAL_DEPTH = 32
 
 /** Tokens of a JavaScript source from `start`: punctuation, string literals (a template with `${` is `other`), words. */
 function* tokens(source: string, start: number): Generator<Token> {
@@ -302,6 +346,7 @@ function* tokens(source: string, start: number): Generator<Token> {
 class LiteralParser {
   private readonly iterator: Generator<Token>
   private peeked: Token | null | undefined = undefined
+  private depth = 0
   constructor(iterator: Generator<Token>) {
     this.iterator = iterator
   }
@@ -334,10 +379,37 @@ class LiteralParser {
     }
   }
 
-  /** One value; after a nested one, the next token is a delimiter (or the source ended). The top value ignores what follows it. */
+  /** Skips the rest of an object or array whose opening token was just taken, without recursing (iteratively, any depth). */
+  private skipNested() {
+    let depth = 1
+    for (let token = this.take(); token !== null; token = this.take()) {
+      if (token.kind !== 'punct') continue
+      if ('{[('.includes(token.value)) depth += 1
+      else if ('}])'.includes(token.value)) depth -= 1
+      if (depth === 0) return
+    }
+  }
+
+  /**
+   * One value; after a nested one, the next token is a delimiter (or the source ended). The top value ignores what follows it.
+   * An object or array deeper than `MAX_LITERAL_DEPTH` is skipped and read as `undefined`, so no source can exhaust the stack.
+   */
   value(top = false): Literal {
     const token = this.take()
     if (token === null) return undefined
+    if ((this.isPunct(token, '{') || this.isPunct(token, '[')) && this.depth >= MAX_LITERAL_DEPTH) {
+      this.skipNested()
+      return top ? undefined : this.afterValue(undefined)
+    }
+    this.depth += 1
+    try {
+      return this.nested(token, top)
+    } finally {
+      this.depth -= 1
+    }
+  }
+
+  private nested(token: Token, top: boolean): Literal {
     let result: Literal = undefined
     if (this.isPunct(token, '{')) {
       const object: { [key: string]: Literal } = {}
@@ -374,7 +446,10 @@ class LiteralParser {
       result = token.value === 'true' ? true : token.value === 'false' ? false : token.value === 'null' ? null
         : /^-?\d+(?:\.\d+)?$/.test(token.value) ? Number(token.value) : undefined
     }
-    if (top) return result
+    return top ? result : this.afterValue(result)
+  }
+
+  private afterValue(result: Literal): Literal {
     const after = this.peek()
     if (after !== null && !(after.kind === 'punct' && ',}])'.includes(after.value))) {
       // `'a' + b`, a call or anything else that is not a plain literal: not a value we can read.
@@ -398,7 +473,7 @@ export function parseScriptMeta(source: string): ScriptMeta | null {
     const title = text(phase?.title)
     return title === null ? [] : [{ title, detail: typeof phase?.detail === 'string' ? phase.detail : null }]
   }) : []
-  return { name: text(parsed.name), description: typeof parsed.description === 'string' ? parsed.description : null, phases }
+  return { name: text(parsed.name), description: text(parsed.description), phases }
 }
 
 // ---- Transcript facts ---------------------------------------------------------------------------------------------
@@ -438,53 +513,67 @@ function timestampOf(line: string | null): string | null {
   return iso(typeof parsed?.timestamp === 'string' ? parsed.timestamp : null)
 }
 
-/** Streams one transcript: only lines naming `"tool_use"` are parsed for tool facts; the last usage line is parsed once at the end. */
-async function readTranscriptFacts(path: string): Promise<TranscriptFacts | null> {
-  const facts: TranscriptFacts = { first: null, last: null, model: null, toolCalls: 0, lastTool: null, context: null, files: [], filesTotal: 0, providers: [] }
-  const seenFiles = new Set<string>()
-  const seenProviders = new Set<string>()
-  let firstPending = true
-  const lastLines: string[] = []
-  const usageLines: string[] = []
-  const ok = await eachLine(path, line => {
-    if (line.length === 0) return
-    if (firstPending) {
-      const at = timestampOf(line)
-      if (at !== null) { facts.first = at; firstPending = false }
-    }
-    lastLines.push(line)
-    if (lastLines.length > 2) lastLines.shift()
-    if (line.includes('"usage"')) { usageLines.push(line); if (usageLines.length > 2) usageLines.shift() }
-    if (!line.includes('"tool_use"')) return
-    const parsed = record(parseLine(line))
-    const message = record(parsed?.message)
-    if (parsed?.type !== 'assistant' || !Array.isArray(message?.content)) return
-    for (const block of message.content) {
-      const tool = record(block)
-      if (tool?.type !== 'tool_use' || typeof tool.name !== 'string') continue
-      facts.toolCalls += 1
-      facts.lastTool = tool.name
-      const input = record(tool.input)
-      if (EDIT_TOOLS.has(tool.name)) {
-        const file = text(input?.file_path) ?? text(input?.notebook_path)
-        if (file !== null && !seenFiles.has(file)) {
-          seenFiles.add(file)
-          facts.filesTotal += 1
-          if (facts.files.length < RAW_FILES_KEPT) facts.files.push(file)
-        }
+/**
+ * The running state of one transcript's facts: everything a line adds, so a file that only grew is read from where the last
+ * read stopped. `files`/`providers` keep their caps; the last lines (for the last time, the last usage) are kept raw.
+ */
+type FactsState = {
+  facts: TranscriptFacts
+  seenFiles: Set<string>
+  seenProviders: Set<string>
+  lastLines: string[]
+  usageLines: string[]
+}
+
+function newFactsState(): FactsState {
+  return {
+    facts: { first: null, last: null, model: null, toolCalls: 0, lastTool: null, context: null, files: [], filesTotal: 0, providers: [] },
+    seenFiles: new Set(), seenProviders: new Set(), lastLines: [], usageLines: [],
+  }
+}
+
+/** One transcript line into the state: only lines naming `"tool_use"` are parsed for tool facts. */
+function addFactsLine(state: FactsState, line: string) {
+  if (line.length === 0) return
+  const { facts } = state
+  if (facts.first === null) facts.first = timestampOf(line)
+  state.lastLines.push(line)
+  if (state.lastLines.length > 2) state.lastLines.shift()
+  if (line.includes('"usage"')) { state.usageLines.push(line); if (state.usageLines.length > 2) state.usageLines.shift() }
+  if (!line.includes('"tool_use"')) return
+  const parsed = record(parseLine(line))
+  const message = record(parsed?.message)
+  if (parsed?.type !== 'assistant' || !Array.isArray(message?.content)) return
+  for (const block of message.content) {
+    const tool = record(block)
+    const name = tool?.type === 'tool_use' ? text(tool.name) : null
+    if (name === null) continue
+    facts.toolCalls += 1
+    facts.lastTool = name
+    const input = record(tool?.input)
+    if (EDIT_TOOLS.has(name)) {
+      const file = text(input?.file_path) ?? text(input?.notebook_path)
+      if (file !== null && !state.seenFiles.has(file)) {
+        state.seenFiles.add(file)
+        facts.filesTotal += 1
+        if (facts.files.length < RAW_FILES_KEPT) facts.files.push(file)
       }
-      if (tool.name === 'Bash' && typeof input?.command === 'string') {
-        for (const provider of providersOfCommand(input.command)) {
-          if (!seenProviders.has(provider) && seenProviders.size < MAX_PROVIDERS) { seenProviders.add(provider); facts.providers.push(provider) }
-        }
+    }
+    if (name === 'Bash' && typeof input?.command === 'string') {
+      for (const provider of providersOfCommand(input.command)) {
+        if (!state.seenProviders.has(provider) && state.seenProviders.size < MAX_PROVIDERS) { state.seenProviders.add(provider); facts.providers.push(provider) }
       }
     }
-  })
-  if (!ok) return null
+  }
+}
+
+/** The facts the state holds so far: the last time from the last line that parses, the context and model from the last usage line. */
+function factsOf(state: FactsState): TranscriptFacts {
+  const facts: TranscriptFacts = { ...state.facts, files: [...state.facts.files], providers: [...state.facts.providers], last: null, context: null, model: null }
   // The last complete line: a torn (or spliced) last line fails to parse, so the one before it is used.
-  for (let k = lastLines.length - 1; k >= 0 && facts.last === null; k -= 1) facts.last = timestampOf(lastLines[k]!)
-  for (let k = usageLines.length - 1; k >= 0; k -= 1) {
-    const parsed = record(parseLine(usageLines[k]!))
+  for (let k = state.lastLines.length - 1; k >= 0 && facts.last === null; k -= 1) facts.last = timestampOf(state.lastLines[k]!)
+  for (let k = state.usageLines.length - 1; k >= 0; k -= 1) {
+    const parsed = record(parseLine(state.usageLines[k]!))
     const message = record(parsed?.message)
     const usage = record(message?.usage)
     if (parsed?.type !== 'assistant' || usage === null) continue
@@ -495,6 +584,71 @@ async function readTranscriptFacts(path: string): Promise<TranscriptFacts | null
     break
   }
   return facts
+}
+
+/** The bytes at a transcript's start that identify it: a file whose head changed was rewritten and is read again from byte 0. */
+const HEAD_BYTES = 256
+const CHUNK_BYTES = 1024 * 1024
+/** Transcript bytes one teams request reads at most, over every agent; what is left is read by the next request. */
+export const TRANSCRIPT_READ_BUDGET = 128 * 1024 * 1024
+
+/** A transcript's cached read: its size and time when read, how far its complete lines were consumed, its head and its state. */
+type TranscriptEntry = { mtimeMs: number; size: number; offset: number; complete: boolean; head: Buffer; state: FactsState | null; facts: TranscriptFacts | null }
+
+/** The bytes a request may still read. */
+type ReadBudget = { bytes: number }
+
+/**
+ * Reads a transcript from where `previous` stopped when the file only grew (same head, not shorter), else from byte 0; at most
+ * `TRANSCRIPT_BYTE_LIMIT` bytes of the file and at most the budget's bytes. Only complete lines are consumed (a last line
+ * without its newline counts when it parses, a torn one waits for the next read); the offset stays at the last consumed line.
+ */
+async function advanceTranscript(path: string, previous: TranscriptEntry | undefined, budget: ReadBudget): Promise<TranscriptEntry> {
+  let handle: FileHandle | null = null
+  try {
+    handle = await fs.open(path, READ_FLAGS)
+    const stat = await handle.stat()
+    if (!stat.isFile()) throw new Error('not a file')
+    const head = Buffer.alloc(Math.min(HEAD_BYTES, stat.size))
+    if (head.length > 0) await handle.read(head, 0, head.length, 0)
+    const resume = previous !== undefined && previous.state !== null && stat.size >= previous.size && previous.head.length <= head.length
+      && head.subarray(0, previous.head.length).equals(previous.head)
+      && !(previous.complete && stat.size === previous.size && stat.mtimeMs !== previous.mtimeMs)
+    const state = resume ? previous.state! : newFactsState()
+    let offset = resume ? previous.offset : 0
+    const end = Math.min(stat.size, TRANSCRIPT_BYTE_LIMIT)
+    let position = offset
+    let pending: Buffer[] = []
+    const chunk = Buffer.allocUnsafe(CHUNK_BYTES)
+    while (position < end && budget.bytes > 0) {
+      const want = Math.min(CHUNK_BYTES, end - position, budget.bytes)
+      const { bytesRead } = await handle.read(chunk, 0, want, position)
+      if (bytesRead === 0) break
+      budget.bytes -= bytesRead
+      let from = 0
+      for (let at = chunk.indexOf(10, 0); at >= 0 && at < bytesRead; at = chunk.indexOf(10, from)) {
+        pending.push(chunk.subarray(from, at))
+        addFactsLine(state, Buffer.concat(pending).toString('utf8').replace(/\r$/, ''))
+        pending = []
+        from = at + 1
+        offset = position + from
+      }
+      if (from < bytesRead) pending.push(Buffer.from(chunk.subarray(from, bytesRead)))
+      position += bytesRead
+    }
+    const reachedEnd = position >= end
+    if (reachedEnd && pending.length > 0) {
+      const tail = Buffer.concat(pending).toString('utf8')
+      if (parseLine(tail) !== undefined) { addFactsLine(state, tail); offset = end }
+    }
+    // A first read the budget cut short serves nothing yet (never a partial count as fact); a resumed one serves what it has.
+    const servable = reachedEnd || (resume && previous.facts !== null)
+    return { mtimeMs: stat.mtimeMs, size: stat.size, offset, complete: reachedEnd, head, state, facts: servable ? factsOf(state) : null }
+  } catch {
+    return { mtimeMs: 0, size: -1, offset: 0, complete: false, head: Buffer.alloc(0), state: null, facts: null }
+  } finally {
+    await handle?.close().catch(() => {})
+  }
 }
 
 // ---- Journal ------------------------------------------------------------------------------------------------------
@@ -583,6 +737,8 @@ export type TeamReaderOptions = {
   claudeHome: string
   /** Epoch milliseconds; tests pin it. */
   now?: () => number
+  /** Transcript bytes one request reads at most (`TRANSCRIPT_READ_BUDGET`); tests shrink it. */
+  readBudgetBytes?: number
 }
 
 export type TeamReadInput = {
@@ -598,26 +754,38 @@ type FolderIndex = { builtAt: number; state: 'ok' | 'missing' | 'unreadable'; fo
 /** Where a session's records sit: the final summaries, the live agent folders and the scripts, by workflow run id. */
 type SessionRecords = { finals: Map<string, string>; lives: Map<string, string>; scripts: Map<string, string> }
 
-type SessionContext = { row: SessionRow; worktree: string | null; now: number }
+type SessionContext = { row: SessionRow; worktree: string | null; now: number; budget: ReadBudget }
+
+/** A summary that exists but cannot be read or parsed (and has no live record to fall back on). */
+const UNREADABLE_WORKFLOW = Symbol('unreadable workflow')
 
 export class TeamReader {
   private readonly projects: string
   private readonly now: () => number
   private index: FolderIndex | null = null
   private indexing: Promise<FolderIndex> | null = null
-  private readonly transcripts = new Map<string, { mtimeMs: number; size: number; facts: TranscriptFacts | null }>()
+  private readonly readBudgetBytes: number
+  private readonly transcripts = new Map<string, TranscriptEntry>()
 
   constructor(options: TeamReaderOptions) {
     this.projects = join(options.claudeHome, 'projects')
     this.now = options.now ?? Date.now
+    this.readBudgetBytes = options.readBudgetBytes ?? TRANSCRIPT_READ_BUDGET
   }
 
   /** The teams payload for a run: one entry per Claude session row, in the payload's order, and the totals over every listed agent. */
   async read(input: TeamReadInput): Promise<Teams> {
     const now = this.now()
+    const budget: ReadBudget = { bytes: this.readBudgetBytes }
     const sessions: TeamSession[] = []
     for (const row of teamSessionRows(input.rows)) {
-      sessions.push(await this.readSession({ row, worktree: input.worktrees.get(row.key) ?? null, now }))
+      const base = { key: row.key, role: row.role, label: row.label, node_id: row.node_id, lane: row.lane, session_id: row.session_id }
+      try {
+        sessions.push(await this.readSession({ row, worktree: input.worktrees.get(row.key) ?? null, now, budget }))
+      } catch {
+        // Anything a session's records make throw makes that session unreadable, never an error for the run.
+        sessions.push({ ...base, records: 'unreadable', reason: UNREADABLE_REASON, workflows: [] })
+      }
     }
     return { contract_version: TEAMS_VERSION, run_id: input.runId, read_at: new Date(now).toISOString(), sessions, totals: teamTotals(sessions) }
   }
@@ -685,10 +853,11 @@ export class TeamReader {
     } catch {
       return unreadable
     }
-    const ids = [...new Set([...records.finals.keys(), ...records.lives.keys()])]
+    const ids = await this.newestWorkflows(records)
     const workflows: TeamWorkflow[] = []
     for (const id of ids) {
       const workflow = await this.readWorkflow(id, records, context)
+      if (workflow === UNREADABLE_WORKFLOW) return unreadable
       if (workflow !== null) workflows.push(workflow)
     }
     if (workflows.length === 0) return none
@@ -702,6 +871,25 @@ export class TeamReader {
       return a.run_id < b.run_id ? -1 : a.run_id > b.run_id ? 1 : 0
     })
     return { ...base, records: 'found', reason: null, workflows }
+  }
+
+  /**
+   * The session's workflow ids, at most `MAX_WORKFLOWS`: the newest by their record's modification time (the summary, else the
+   * live folder's journal, else the folder), so a session with hundreds of old workflows costs one listing, not hundreds of reads.
+   */
+  private async newestWorkflows(records: SessionRecords): Promise<string[]> {
+    const ids = [...new Set([...records.finals.keys(), ...records.lives.keys()])]
+    if (ids.length <= MAX_WORKFLOWS) return ids
+    const times = new Map<string, number>()
+    for (const id of ids) {
+      const final = records.finals.get(id)
+      const live = records.lives.get(id)
+      let at = final === undefined ? null : (await fileStat(final))?.mtimeMs ?? null
+      if (at === null && live !== undefined) at = (await fileStat(join(live, 'journal.jsonl')))?.mtimeMs ?? null
+      if (at === null && live !== undefined) at = await fs.lstat(live).then(stat => stat.mtimeMs, () => null)
+      times.set(id, at ?? 0)
+    }
+    return ids.sort((a, b) => times.get(b)! - times.get(a)! || (a < b ? -1 : a > b ? 1 : 0)).slice(0, MAX_WORKFLOWS)
   }
 
   /** The union of every slug folder's records; a folder that cannot be listed throws (the session is unreadable). */
@@ -729,42 +917,65 @@ export class TeamReader {
     return records
   }
 
-  private async transcriptFacts(path: string): Promise<{ facts: TranscriptFacts | null; mtimeMs: number | null }> {
+  /**
+   * A transcript's facts, cached by path: unchanged (same time and size, read to its end) is served from the cache; a file that
+   * only grew is read on from the last complete line it consumed; a shorter or rewritten one is read again from byte 0. Every
+   * byte read counts against the request's budget.
+   */
+  private async transcriptFacts(path: string, budget: ReadBudget): Promise<{ facts: TranscriptFacts | null; mtimeMs: number | null }> {
     const stat = await fileStat(path)
     if (stat === null) return { facts: null, mtimeMs: null }
     const cached = this.transcripts.get(path)
-    if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) return { facts: cached.facts, mtimeMs: stat.mtimeMs }
-    const facts = await readTranscriptFacts(path)
+    if (cached && cached.complete && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) return { facts: cached.facts, mtimeMs: stat.mtimeMs }
+    const entry = await advanceTranscript(path, cached, budget)
     this.transcripts.delete(path)
-    this.transcripts.set(path, { ...stat, facts })
+    this.transcripts.set(path, entry)
     while (this.transcripts.size > TRANSCRIPT_CACHE_ENTRIES) this.transcripts.delete(this.transcripts.keys().next().value!)
-    return { facts, mtimeMs: stat.mtimeMs }
+    return { facts: entry.facts, mtimeMs: stat.mtimeMs }
   }
 
-  private async scriptMeta(id: string, records: SessionRecords, scriptPath: unknown): Promise<ScriptMeta | null> {
-    let path = records.scripts.get(id) ?? null
-    if (path === null && typeof scriptPath === 'string' && isAbsolute(scriptPath)) {
-      const inside = relative(this.projects, scriptPath)
-      if (inside && !inside.startsWith('..') && !isAbsolute(inside)) path = scriptPath
-    }
+  /**
+   * The `meta` of a workflow's script, read only from this session's own `<slug>/<sid>/workflows/scripts/*-<id>.js` (listed
+   * without following a symlink); the file's real path must stay inside the real path of the projects root. A summary's
+   * `scriptPath` is never followed: it may name any file.
+   */
+  private async scriptMeta(id: string, records: SessionRecords): Promise<ScriptMeta | null> {
+    const path = records.scripts.get(id) ?? null
     if (path === null) return null
-    const bytes = await readFileBounded(path, SCRIPT_BYTE_LIMIT)
+    const [real, root] = await Promise.all([realpathOrNull(path), realpathOrNull(this.projects)])
+    if (real === null || root === null) return null
+    const inside = relative(root, real)
+    if (!inside || inside === '..' || inside.startsWith(`..${sep}`) || isAbsolute(inside)) return null
+    const bytes = await readFileBounded(real, SCRIPT_BYTE_LIMIT)
     const meta = bytes === null ? null : parseScriptMeta(bytes.toString('utf8'))
-    return meta === null ? null : {
-      name: meta.name === null ? null : redactText(meta.name),
-      description: meta.description === null ? null : redactText(meta.description),
-      phases: meta.phases.map(phase => ({ title: redactText(phase.title), detail: phase.detail })),
+    if (meta === null) return null
+    return {
+      name: textRedacted(meta.name),
+      description: textRedacted(meta.description),
+      phases: meta.phases.flatMap(phase => {
+        const title = textRedacted(phase.title)
+        return title === null ? [] : [{ title, detail: phase.detail }]
+      }),
     }
   }
 
-  private async readWorkflow(id: string, records: SessionRecords, context: SessionContext): Promise<TeamWorkflow | null> {
+  /** A workflow from its summary, else its live record; a summary that exists but cannot be read or parsed, with no live record, is unreadable. */
+  private async readWorkflow(id: string, records: SessionRecords, context: SessionContext): Promise<TeamWorkflow | typeof UNREADABLE_WORKFLOW | null> {
     const finalPath = records.finals.get(id)
     const liveDir = records.lives.get(id) ?? null
+    let summaryUnreadable = false
     if (finalPath !== undefined) {
-      const parsed = summarySchema.safeParse(await readJsonFile(finalPath, SUMMARY_BYTE_LIMIT))
-      if (parsed.success) return this.finalWorkflow(id, parsed.data, liveDir, records, context)
+      const read = await readJsonRecord(finalPath, SUMMARY_BYTE_LIMIT)
+      const parsed = read.state === 'ok' ? summarySchema.safeParse(read.value) : null
+      if (parsed?.success) return this.finalWorkflow(id, parsed.data, liveDir, records, context)
+      // A summary removed since the listing is simply gone; any other failure is an unreadable record.
+      summaryUnreadable = read.state !== 'missing'
     }
-    return liveDir === null ? null : this.liveWorkflow(id, liveDir, records, context)
+    if (liveDir !== null) {
+      const live = await this.liveWorkflow(id, liveDir, records, context)
+      if (live !== null) return live
+    }
+    return summaryUnreadable ? UNREADABLE_WORKFLOW : null
   }
 
   /** Files and providers from an agent's transcript, with the agent's own worktree (isolated) before the session's. */
@@ -776,7 +987,7 @@ export class TeamReader {
       files_edited: listed,
       // The served (deduplicated) files past the first 50, plus any raw paths past those kept from the transcript.
       files_edited_more: served.length - listed.length + Math.max(0, facts.filesTotal - facts.files.length),
-      providers: facts.providers.map(provider => redactText(provider)).filter(provider => provider.length > 0).slice(0, MAX_PROVIDERS),
+      providers: [...new Set(facts.providers.flatMap(provider => modelName(provider) ?? []))].slice(0, MAX_PROVIDERS),
     }
   }
 
@@ -793,21 +1004,22 @@ export class TeamReader {
     // Phases: the summary's `phases`, else its `workflow_phase` entries, else the script's `meta.phases`.
     let phaseList: { title: string; detail: string | null }[] = Array.isArray(summary.phases) ? summary.phases.flatMap(entry => {
       const phase = record(entry)
-      const title = text(phase?.title)
-      return title === null ? [] : [{ title: redactText(title), detail: typeof phase?.detail === 'string' ? phase.detail : null }]
+      const title = textRedacted(phase?.title)
+      return title === null ? [] : [{ title, detail: typeof phase?.detail === 'string' ? phase.detail : null }]
     }) : []
     if (phaseList.length === 0) {
       phaseList = summary.workflowProgress.flatMap(entry => {
         const phase = record(entry)
-        const title = text(phase?.title)
-        return phase?.type === 'workflow_phase' && title !== null ? [{ title: redactText(title), detail: null }] : []
+        const title = phase?.type === 'workflow_phase' ? textRedacted(phase.title) : null
+        return title !== null ? [{ title, detail: null }] : []
       })
     }
-    if (phaseList.length === 0) phaseList = (await this.scriptMeta(id, records, summary.scriptPath))?.phases ?? []
+    if (phaseList.length === 0) phaseList = (await this.scriptMeta(id, records))?.phases ?? []
 
+    // Indexes first (cheap), then the cap, then the meta and transcript reads for the listed agents only.
     const used = new Set<number>()
     let nextIndex = 1
-    const agents: TeamAgent[] = []
+    const entries: { index: number; entry: Record<string, unknown> }[] = []
     for (const raw of summary.workflowProgress) {
       const entry = record(raw)
       if (entry?.type !== 'workflow_agent') continue
@@ -817,19 +1029,25 @@ export class TeamReader {
         index = nextIndex
       }
       used.add(index)
+      entries.push({ index, entry })
+    }
+    entries.sort((a, b) => a.index - b.index)
+    const listedEntries = entries.slice(0, MAX_AGENTS)
+    const listed: TeamAgent[] = []
+    for (const { index, entry } of listedEntries) {
       const agentId = typeof entry.agentId === 'string' && AGENT_ID.test(entry.agentId) ? entry.agentId : null
       let state: AgentState = entry.state === 'done' ? 'done' : entry.state === 'start' ? 'queued' : agentId === null ? 'queued' : 'interrupted'
       if (agentId !== null && journal?.failed.has(agentId)) state = 'failed'
-      const label = redactText(text(entry.label) ?? `agent ${index}`)
+      const label = textRedacted(entry.label) ?? `agent ${index}`
       const meta = await this.readMeta(liveDir, agentId)
       const worktreePath = text(meta?.worktreePath)
-      const transcript = liveDir === null || agentId === null ? null : (await this.transcriptFacts(join(liveDir, `agent-${agentId}.jsonl`))).facts
+      const transcript = liveDir === null || agentId === null ? null : (await this.transcriptFacts(join(liveDir, `agent-${agentId}.jsonl`), context.budget)).facts
       const phaseIndex = positive(entry.phaseIndex)
-      agents.push({
+      listed.push({
         agent_id: agentId, index, label, role: roleOf(label),
         phase: textRedacted(entry.phaseTitle) ?? (phaseIndex !== null ? phaseList[phaseIndex - 1]?.title ?? null : null),
         phase_index: phaseIndex,
-        model: text(entry.model) ?? transcript?.model ?? null,
+        model: modelName(entry.model) ?? modelName(transcript?.model),
         state,
         cached: entry.cached === true,
         attempt: positive(entry.attempt),
@@ -839,15 +1057,13 @@ export class TeamReader {
         duration_ms: count(entry.durationMs),
         tool_calls: count(entry.toolCalls),
         context_tokens: count(entry.tokens),
-        last_tool: text(entry.lastToolName),
+        last_tool: toolName(entry.lastToolName),
         last_tool_summary: preview(entry.lastToolSummary, TOOL_SUMMARY_CHARS),
         prompt_preview: preview(entry.promptPreview, AGENT_PREVIEW_CHARS),
         result_preview: preview(entry.resultPreview, AGENT_PREVIEW_CHARS),
         ...this.agentFiles(transcript, [...(worktreePath !== null && isAbsolute(worktreePath) ? [worktreePath] : []), ...(context.worktree !== null ? [context.worktree] : [])]),
       })
     }
-    agents.sort((a, b) => a.index - b.index)
-    const listed = agents.slice(0, MAX_AGENTS)
     const startedAt = epochIso(summary.startTime)
     const endedAt = iso(typeof summary.timestamp === 'string' ? summary.timestamp : null)
     const lastAgent = listed.reduce<string | null>((latest, agent) => laterIso(latest, agent.last_activity_at), null)
@@ -858,22 +1074,22 @@ export class TeamReader {
     return {
       run_id: id,
       name: textRedacted(summary.workflowName),
-      description: typeof summary.summary === 'string' ? redactText(summary.summary) : null,
+      description: textRedacted(summary.summary),
       status, record: 'final',
       started_at: startedAt,
       ended_at: endedAt,
       last_activity_at: laterIso(endedAt, lastAgent),
       duration_ms: count(summary.durationMs),
-      default_model: text(summary.defaultModel),
-      agent_count: count(summary.agentCount) ?? agents.length,
+      default_model: modelName(summary.defaultModel),
+      agent_count: count(summary.agentCount) ?? entries.length,
       tool_calls: count(summary.totalToolCalls),
       context_tokens: count(summary.totalTokens),
       phases: phaseCounts(phaseList, listed),
       agents: listed,
-      agents_more: agents.length - listed.length,
+      agents_more: entries.length - listed.length,
       logs,
       result_preview: valuePreview(summary.result, WORKFLOW_RESULT_CHARS),
-      error: errorLine === null ? null : cap(redactText(errorLine), ERROR_CHARS),
+      error: errorLine === null ? null : text(cap(redactText(errorLine), ERROR_CHARS)),
     }
   }
 
@@ -884,22 +1100,23 @@ export class TeamReader {
     const journalStat = await fileStat(journalPath)
     let freshest = journalStat?.mtimeMs ?? 0
     type Started = { entry: Journal['started'][number]; meta: z.infer<typeof metaSchema> | null; facts: TranscriptFacts | null }
+    // The cap first: only the listed agents' meta and transcripts are read.
     const started: Started[] = []
-    for (const entry of journal.started) {
+    for (const entry of journal.started.slice(0, MAX_AGENTS)) {
       const meta = await this.readMeta(liveDir, entry.agentId)
-      const { facts, mtimeMs } = await this.transcriptFacts(join(liveDir, `agent-${entry.agentId}.jsonl`))
+      const { facts, mtimeMs } = await this.transcriptFacts(join(liveDir, `agent-${entry.agentId}.jsonl`), context.budget)
       if (mtimeMs !== null) freshest = Math.max(freshest, mtimeMs)
       started.push({ entry, meta, facts })
     }
     const running = context.now - freshest <= LIVE_WINDOW_MS && !ENDED_STATUSES.has(context.row.status)
-    const script = await this.scriptMeta(id, records, null)
+    const script = await this.scriptMeta(id, records)
     const phaseList = [...(script?.phases ?? [])]
     for (const { entry, meta } of started) {
       const title = textRedacted(entry.phase) ?? textRedacted(meta?.workflowPhase)
       if (title !== null && !phaseList.some(phase => phase.title === title)) phaseList.push({ title, detail: null })
     }
-    const agents: TeamAgent[] = started.map(({ entry, meta, facts }, position) => {
-      const label = redactText(entry.label ?? text(meta?.description) ?? `agent ${position + 1}`)
+    const listed: TeamAgent[] = started.map(({ entry, meta, facts }, position) => {
+      const label = textRedacted(entry.label) ?? textRedacted(meta?.description) ?? `agent ${position + 1}`
       const phase = textRedacted(entry.phase) ?? textRedacted(meta?.workflowPhase)
       const at = phase === null ? -1 : phaseList.findIndex(candidate => candidate.title === phase)
       const worktreePath = text(meta?.worktreePath)
@@ -909,18 +1126,17 @@ export class TeamReader {
       const duration = first !== null && last !== null ? Math.max(0, Date.parse(last) - Date.parse(first)) : null
       return {
         agent_id: entry.agentId, index: position + 1, label, role: roleOf(label), phase, phase_index: at < 0 ? null : at + 1,
-        model: facts?.model ?? text(meta?.model), state, cached: false, attempt: null, isolated: worktreePath !== null,
+        model: modelName(facts?.model) ?? modelName(meta?.model), state, cached: false, attempt: null, isolated: worktreePath !== null,
         started_at: first, last_activity_at: last, duration_ms: duration,
         tool_calls: facts === null ? null : facts.toolCalls, context_tokens: facts?.context ?? null,
-        last_tool: facts?.lastTool ?? null, last_tool_summary: null, prompt_preview: null,
+        last_tool: toolName(facts?.lastTool), last_tool_summary: null, prompt_preview: null,
         result_preview: journal.results.has(entry.agentId) ? valuePreview(journal.results.get(entry.agentId), AGENT_PREVIEW_CHARS) : null,
         ...this.agentFiles(facts, [...(worktreePath !== null && isAbsolute(worktreePath) ? [worktreePath] : []), ...(context.worktree !== null ? [context.worktree] : [])]),
       }
     })
-    const listed = agents.slice(0, MAX_AGENTS)
-    const startedAt = agents.reduce<string | null>((earliest, agent) => earlierIso(earliest, agent.started_at), null)
-    const lastAgent = agents.reduce<string | null>((latest, agent) => laterIso(latest, agent.last_activity_at), null)
-    const toolCalls = agents.some(agent => agent.tool_calls !== null) ? agents.reduce((sum, agent) => sum + (agent.tool_calls ?? 0), 0) : null
+    const startedAt = listed.reduce<string | null>((earliest, agent) => earlierIso(earliest, agent.started_at), null)
+    const lastAgent = listed.reduce<string | null>((latest, agent) => laterIso(latest, agent.last_activity_at), null)
+    const toolCalls = listed.some(agent => agent.tool_calls !== null) ? listed.reduce((sum, agent) => sum + (agent.tool_calls ?? 0), 0) : null
     return {
       run_id: id,
       name: script?.name ?? null,
@@ -929,9 +1145,9 @@ export class TeamReader {
       started_at: startedAt, ended_at: null,
       last_activity_at: laterIso(lastAgent, journalStat === null ? null : epochIso(journalStat.mtimeMs)),
       duration_ms: null, default_model: null,
-      agent_count: agents.length, tool_calls: toolCalls, context_tokens: null,
+      agent_count: journal.started.length, tool_calls: toolCalls, context_tokens: null,
       phases: phaseCounts(phaseList, listed),
-      agents: listed, agents_more: agents.length - listed.length,
+      agents: listed, agents_more: journal.started.length - listed.length,
       logs: [], result_preview: null, error: null,
     }
   }
@@ -941,7 +1157,7 @@ export class TeamReader {
 function phaseCounts(list: readonly { title: string; detail: string | null }[], agents: readonly TeamAgent[]): TeamPhase[] {
   return list.map((phase, position) => {
     const index = position + 1
-    const counts: TeamPhase = { index, title: phase.title, detail: phase.detail === null ? null : redactText(phase.detail), agents: 0, queued: 0, running: 0, done: 0, failed: 0, interrupted: 0 }
+    const counts: TeamPhase = { index, title: phase.title, detail: textRedacted(phase.detail), agents: 0, queued: 0, running: 0, done: 0, failed: 0, interrupted: 0 }
     for (const agent of agents) {
       if (agent.phase_index !== null ? agent.phase_index !== index : agent.phase !== phase.title) continue
       counts.agents += 1

@@ -388,6 +388,18 @@ test('sessions redaction: a path (one root-level segment too) and a fake 40-char
   assert.equal(redactText('the task-file is fine, sk- alone stays, and so does openai-codex/gpt-6.1-sol'), 'the task-file is fine, sk- alone stays, and so does openai-codex/gpt-6.1-sol')
 })
 
+test('sessions redaction: gh OAuth/server/user/refresh tokens, upper-case secret assignments and PEM blocks are removed; ordinary text stays', () => {
+  for (const prefix of ['gho', 'ghs', 'ghu', 'ghr']) assert.equal(redactText(`token ${prefix}_${'a1B2'.repeat(9)} printed`), 'token <redacted> printed')
+  assert.equal(redactText('TELEGRAM_BOT_TOKEN=123456:AAH-xyz_abc and AWS_SECRET_ACCESS_KEY="wJalr XUtnFEMI" set'), 'TELEGRAM_BOT_TOKEN=<redacted> and AWS_SECRET_ACCESS_KEY=<redacted> set')
+  assert.equal(redactText("export OPENAI_API_KEY='abc' DB_PASSWORD=hunter2 MY_SECRET_VALUE=s3 GH_TOKEN=x"), 'export OPENAI_API_KEY=<redacted> DB_PASSWORD=<redacted> MY_SECRET_VALUE=<redacted> GH_TOKEN=<redacted>')
+  const pem = `-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA/BG9uZQ+AAAA\nAAAAAQAAADMAAAAL\n-----END OPENSSH PRIVATE KEY-----`
+  assert.equal(redactText(`key:\n${pem}\ndone`), 'key:\n<redacted>\ndone')
+  // A block cut before its end line is redacted to the text's end.
+  assert.equal(redactText('head -----BEGIN RSA PRIVATE KEY-----\nMIIEow'), 'head <redacted>')
+  const ordinary = 'The KEY idea: MONKEY business, TOKEN_COUNT=5, max_tokens=100, SORT_ORDER=asc, KEY = value, ghp_short, gho_, a ----- rule, the TOKEN= alone and -----BEGIN of nothing'
+  assert.equal(redactText(ordinary), ordinary)
+})
+
 // ---- The route's HTTP contract ------------------------------------------------------------------------------------
 
 test('sessions route: GET and HEAD answer 200; an unknown project, workflow or run is a 404 with the error shape; writes are 405', async () => {

@@ -143,12 +143,17 @@ export function redactPaths(text: string): string {
 }
 
 /**
- * Credential-shaped strings are never forwarded (docs/PRD_RUN_SESSIONS.md 4, [P6], [L1]): a GitHub token, an OpenAI-style
- * `sk-` key, a Slack `xox?-` token, a `Bearer` header or a `token=`/`password=` assignment becomes `<redacted>`. Each pattern
- * is anchored on a word boundary with a minimum tail, so ordinary words such as `task-file` or a lone `sk-` stay intact.
+ * Credential-shaped strings are never forwarded (docs/PRD_RUN_SESSIONS.md 4, [P6], [L1]): a GitHub token (`ghp_`, the
+ * `gho_`/`ghs_`/`ghu_`/`ghr_` OAuth, server and refresh tokens `gh auth token` prints, `github_pat_`), an OpenAI-style `sk-`
+ * key, a Slack `xox?-` token, a `Bearer` header, a `token=`/`password=` assignment or a PEM block (`-----BEGIN …-----` to its
+ * `-----END …-----`, or to the text's end when cut) becomes `<redacted>`; an upper-case environment assignment of a
+ * secret-looking name (`…TOKEN=`, `…SECRET…=`, `…KEY=`, `…PASSWORD=`, as in `TELEGRAM_BOT_TOKEN=…`) keeps its name and loses
+ * its value (`NAME=<redacted>`). Each pattern is anchored on a word boundary with a minimum tail, so ordinary words such as
+ * `task-file`, a lone `sk-`, `MONKEY` or `TOKEN_COUNT=5` stay intact.
  */
 const CREDENTIAL_PATTERNS: readonly RegExp[] = [
-  /\bghp_[A-Za-z0-9]{20,}/g,
+  /-----BEGIN ([A-Z0-9 ]{1,64})-----[\s\S]*?(?:-----END \1-----|$)/g,
+  /\bgh[pousr]_[A-Za-z0-9]{20,}/g,
   /\bgithub_pat_[A-Za-z0-9_]{20,}/g,
   /\bsk-[A-Za-z0-9_-]{20,}/g,
   /\bxox[abprs]-[A-Za-z0-9-]{10,}/g,
@@ -156,8 +161,10 @@ const CREDENTIAL_PATTERNS: readonly RegExp[] = [
   /\btoken=[A-Za-z0-9._~+/-]{12,}/g,
   /\bpassword=\S{6,}/g,
 ]
+/** An upper-case environment assignment of a secret-looking name: the name is kept, the (quoted or bare) value is not. */
+const SECRET_ASSIGNMENT = /\b((?:[A-Z][A-Z0-9_]*)?(?:SECRET[A-Z0-9_]*|TOKEN|KEY|PASSWORD|PASSWD))=(?:"[^"\n]*"|'[^'\n]*'|[^\s"']+)/g
 export function redactCredentials(text: string): string {
-  return CREDENTIAL_PATTERNS.reduce((acc, pattern) => acc.replace(pattern, '<redacted>'), text)
+  return CREDENTIAL_PATTERNS.reduce((acc, pattern) => acc.replace(pattern, '<redacted>'), text).replace(SECRET_ASSIGNMENT, '$1=<redacted>')
 }
 
 /** Every free text served under the sessions route: path-redacted, then credential-filtered (the resume command is exempt). */
