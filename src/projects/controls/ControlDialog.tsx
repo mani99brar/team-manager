@@ -1,8 +1,8 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import { postCleanPreview, postControl, postRelaunchPreview, readToken } from './client.ts'
 import {
-  answerCheck, askCheck, buildParams, currentCheck, describeFailure, dialogValid, headlineOf, initialValues, newRequestId, NOTE_CONFIRM, NOTE_FIELD_HELPER, NOTE_FIELD_LABEL,
-  noteOutcome, noteTitle, pinToken, paramProblem, reasonOf, relaunchConfirmable, typedConfirm, type DialogPreset, type DialogValues, type RelaunchCheck,
+  answerCheck, askCheck, attemptFingerprint, buildParams, currentCheck, describeFailure, dialogValid, headlineOf, heldAfterFailure, initialValues, nextAttempt, NOTE_CONFIRM, NOTE_FIELD_HELPER, NOTE_FIELD_LABEL,
+  noteOutcome, noteTitle, pinToken, paramProblem, reasonOf, relaunchConfirmable, typedConfirm, type DialogPreset, type DialogValues, type RelaunchCheck, type RequestAttempt,
 } from './model.ts'
 import { adoptRecord, closeDialog, refreshControls, unpairBrowser, useRunControls } from './store.ts'
 import type { WaitingQuestion } from './questions.ts'
@@ -67,7 +67,8 @@ function Body({ scope, id, preset, questions, onClose }: { scope: ControlScope; 
   const [opened] = useState<Control | undefined>(live)
   const control = live ?? opened
   const [values, setValues] = useState<DialogValues>(() => initialValues(control!, preset))
-  const [requestId, setRequestId] = useState(newRequestId)
+  // The last attempt, held only while its answer was lost (the request_id rule in model.ts `nextAttempt`).
+  const held = useRef<RequestAttempt | null>(null)
   const [sending, setSending] = useState(false)
   const [alert, setAlert] = useState<string | null>(null)
   const [preview, setPreview] = useState<CleanPreview | 'loading' | 'failed'>('loading')
@@ -136,8 +137,12 @@ function Body({ scope, id, preset, questions, onClose }: { scope: ControlScope; 
     inFlight.current = true
     setSending(true)
     setAlert(null)
+    const params = buildParams(control, values)
+    const attempt = nextAttempt(held.current, attemptFingerprint(token, params))
+    held.current = attempt
     try {
-      const { record } = await postControl(scope, secret, id, { request_id: requestId, run_state_token: token, params: buildParams(control, values) })
+      const { record } = await postControl(scope, secret, id, { request_id: attempt.id, run_state_token: token, params })
+      held.current = null
       adoptRecord(scope, record)
       if (note && record.status !== 'running') setFinished(record)
       else onClose()
@@ -154,10 +159,9 @@ function Body({ scope, id, preset, questions, onClose }: { scope: ControlScope; 
           setPinned(null)
         })
       }
-      // STATE_CHANGED and BUSY mean nothing ran, so the next Confirm is a new request. A network failure may have lost only the
-      // answer: the retry keeps this request_id, so the server returns the first record instead of running the control twice.
-      const lostAnswer = (error as { code?: unknown } | null)?.code === 'NETWORK'
-      if (outcome.retryable && !lostAnswer) setRequestId(newRequestId())
+      // An answered failure (STATE_CHANGED, BUSY, a refused spawn) makes the next Confirm a new request; a lost answer keeps
+      // this request_id for a retry with unchanged values, so the server returns the first record instead of acting twice.
+      held.current = heldAfterFailure(attempt, error)
     } finally {
       inFlight.current = false
       setSending(false)

@@ -149,6 +149,40 @@ export function headlineOf(record: ControlRecord): string | null {
   return record.status === 'running' ? null : record.output_tail.filter(line => line.trim() !== '').at(-1) ?? null
 }
 
+/**
+ * The `request_id` rule of both confirmation dialogs (the run controls' and the GitHub actions'). Each Confirm is an attempt
+ * `{ id, sent }`, `sent` being the fingerprint of what it carried (the token and the params). The dialog holds the last
+ * attempt only while its answer was lost:
+ * - a retry after a lost answer with UNCHANGED values keeps the id, so a POST that did reach the server answers with its
+ *   first record instead of acting twice;
+ * - an edit of any field after that starts a new id, since the server's dedup would otherwise answer the edited request with
+ *   the first one's record (and its old values);
+ * - every answered failure (STATE_CHANGED, BUSY, NOT_AVAILABLE, a refused or failed spawn such as SPAWN_FAILED, which the
+ *   server records under the id) drops the held attempt, so the next Confirm is a new request.
+ */
+export type RequestAttempt = { id: string; sent: string }
+
+/** What one attempt carries, as compared between attempts. */
+export const attemptFingerprint = (token: string | null, params: unknown): string => JSON.stringify([token, params])
+
+/** The attempt the next Confirm sends: the held one when its values are unchanged, else a new id. */
+export function nextAttempt(held: RequestAttempt | null, sent: string): RequestAttempt {
+  return held !== null && held.sent === sent ? held : { id: newRequestId(), sent }
+}
+
+/**
+ * Whether a failure may have lost only the answer: a NETWORK failure (the POST may have reached the server), an answer that
+ * came back 2xx but could not be read, or a failure that is not the server's (a dropped body). The server never answered
+ * any of them with an error, so the action may have run.
+ */
+export function answerLost(error: unknown): boolean {
+  if (!(error instanceof ControlError)) return true
+  return error.code === 'NETWORK' || (error.status >= 200 && error.status < 300)
+}
+
+/** The attempt held after a failure: kept only when its answer was lost, so only a retry with unchanged values reuses it. */
+export const heldAfterFailure = (attempt: RequestAttempt, error: unknown): RequestAttempt | null => (answerLost(error) ? attempt : null)
+
 export type Outcome = {
   /** What the dialog says. */
   message: string
