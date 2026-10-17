@@ -157,8 +157,9 @@ export function headlineOf(record: ControlRecord): string | null {
  *   first record instead of acting twice;
  * - an edit of any field after that starts a new id, since the server's dedup would otherwise answer the edited request with
  *   the first one's record (and its old values);
- * - every answered failure (STATE_CHANGED, BUSY, NOT_AVAILABLE, a refused or failed spawn such as SPAWN_FAILED, which the
- *   server records under the id) drops the held attempt, so the next Confirm is a new request.
+ * - an answered refusal that means nothing ran (STATE_CHANGED, BUSY, NOT_AVAILABLE, INVALID_PARAMS, TOKEN_*, a refused spawn
+ *   SPAWN_FAILED, which the server records under the id) drops the held attempt, so the next Confirm is a new request; a 5xx
+ *   or an UNKNOWN answer keeps it (`answerLost`).
  */
 export type RequestAttempt = { id: string; sent: string }
 
@@ -171,14 +172,30 @@ export function nextAttempt(held: RequestAttempt | null, sent: string): RequestA
 }
 
 /**
- * Whether a failure may have lost only the answer: a NETWORK failure (the POST may have reached the server), an answer that
- * came back 2xx but could not be read, or a failure that is not the server's (a dropped body). The server never answered
- * any of them with an error, so the action may have run.
+ * The answered refusals that mean nothing ran (final review F5.1): the server checked the request and turned it down before any
+ * command started (a 4xx of the contract's codes), or the spawn itself failed and the server stored a refused record under the
+ * request_id (SPAWN_FAILED, a 500). Only these start a new request_id with unchanged values.
+ */
+const NOTHING_RAN: ReadonlySet<string> = new Set([
+  'STATE_CHANGED', 'BUSY', 'NOT_AVAILABLE', 'INVALID_PARAMS', 'INVALID_ID', 'TOKEN_REQUIRED', 'TOKEN_INVALID', 'CONTROLS_DISABLED', 'NOT_FOUND',
+  'FORBIDDEN_ORIGIN', 'UNSUPPORTED_MEDIA_TYPE', 'SPAWN_FAILED',
+])
+
+/**
+ * Whether a failure may have lost only the answer, so the action may have run and a retry must carry the same request_id:
+ * a NETWORK failure (the POST may have reached the server), an answer that came back 2xx but could not be read, any 5xx but a
+ * stored refused spawn (an INTERNAL raised after the command ran, a proxy's 502 while the API restarted), an UNKNOWN code (a
+ * proxy's page, not the API's answer) and a failure that is not the server's (a dropped body). Only an answered refusal of
+ * `NOTHING_RAN` is not.
  */
 export function answerLost(error: unknown): boolean {
   if (!(error instanceof ControlError)) return true
-  return error.code === 'NETWORK' || (error.status >= 200 && error.status < 300)
+  if (error.code === 'NETWORK' || (error.status >= 200 && error.status < 300)) return true
+  return !NOTHING_RAN.has(error.code)
 }
+
+/** Said beside the dialog's Cancel while a Confirm is being sent (final review F4.1): closing then would lose the request's answer. */
+export const SENDING_HINT = 'Sending: the dialog stays open until the server answers.'
 
 /** The attempt held after a failure: kept only when its answer was lost, so only a retry with unchanged values reuses it. */
 export const heldAfterFailure = (attempt: RequestAttempt, error: unknown): RequestAttempt | null => (answerLost(error) ? attempt : null)

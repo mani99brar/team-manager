@@ -746,6 +746,45 @@ test(`[scenario:team-drawer-history] Opening a second agent while a drawer is op
   await expectPhoneFits(page)
 })
 
+test(`[regression:team-drawer-replace-close] A view-wide search or another card's filter that closes a pushed drawer goes back first, so no drawer entry is left and one Back leaves the Team view (${phase})`, async ({ page }) => {
+  await open(page, runPage(TEAMS_RUNS.base))
+  await runViewLink(page, 'team').click()
+  await expect(teamView(page)).toHaveAttribute('data-state', 'ready')
+  const finished = workflowCard(page, 'wf_1a2b3c4d-5e6')
+  await finished.getByRole('button', { name: 'build-run-teams' }).click()
+  const before = await (page.evaluate('history.length') as Promise<number>)
+  await agentButton(finished, 5).click()
+  await expect(drawer(page)).toHaveAttribute('data-index', '5')
+  // The view-wide search clears the agent: the drawer entry is gone and the search sits on the entry before it.
+  await page.getByTestId('team-view-search').fill('review')
+  await expect(drawer(page)).toHaveCount(0)
+  await expect(page).toHaveURL(/[?&]q=review/)
+  await expect(page).not.toHaveURL(/agent=/)
+  await expect(page.getByTestId('team-view-search')).toHaveValue('review')
+  await expect.poll(() => page.evaluate('history.length') as Promise<number>).toBe(before + 1)
+  await page.goBack()
+  await expect(page).not.toHaveURL(/\/team(\?|$)/)
+  await expect(page.getByTestId('workflow-graph')).toBeVisible()
+  // Another card's filter clears the agent the same way.
+  await page.goForward()
+  await expect(teamView(page)).toHaveAttribute('data-state', 'ready')
+  await page.getByTestId('team-view-search').fill('')
+  await expect(page).not.toHaveURL(/q=/)
+  const card = workflowCard(page, 'wf_1a2b3c4d-5e6')
+  if ((await card.getByRole('button', { name: 'build-run-teams' }).getAttribute('aria-expanded')) !== 'true') await card.getByRole('button', { name: 'build-run-teams' }).click()
+  await agentButton(card, 5).click()
+  await expect(drawer(page)).toHaveAttribute('data-index', '5')
+  const other = workflowCard(page, 'wf_7f8e9d0c-b1a')
+  // Its phase strip toggle is a card filter (the phase), written with replace.
+  await other.getByRole('button', { name: /^Phase 1, Fix/ }).click()
+  await expect(drawer(page)).toHaveCount(0)
+  await expect(page).not.toHaveURL(/agent=/)
+  await expect(page).toHaveURL(/[?&]workflow=wf_7f8e9d0c-b1a/)
+  await expect(page).toHaveURL(/[?&]phase=1/)
+  await page.goBack()
+  await expect(page).not.toHaveURL(/\/team(\?|$)/)
+})
+
 test(`[scenario:team-deep-link-earlier] A link that selects an agent of an older tucked workflow, or a reload with a search, opens the earlier-workflows disclosure and the card at load (${phase})`, async ({ page }, testInfo) => {
   const base = fixtureTeams(TEAMS_RUNS.base)
   const [finished, live] = base.sessions[0]!.workflows
