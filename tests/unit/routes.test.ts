@@ -1,11 +1,15 @@
 /**
- * Projects routes (docs/PRD_VIEWER_UX.md 3.1): a run's Assignment view lives in the path, `/runs/<r>/assignment`, and so
- * does one attempt of a node, `/nodes/<n>/attempts/<k>`, so each can be linked and survives a reload; every URL that worked
- * before keeps working, and anything else is malformed.
+ * Projects routes (docs/PRD_VIEWER_UX.md 3.1, docs/PRD_RUN_TEAMS.md 2): a run's Team, GitHub and Assignment views live in
+ * the path, `/runs/<r>/team|github|assignment`, and so does one attempt of a node, `/nodes/<n>/attempts/<k>`, so each can be
+ * linked and survives a reload; the Team view's selection lives in the search; every URL that worked before keeps working,
+ * and anything else is malformed.
  */
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { assignmentPathname, attemptPathname, canonicalPathname, DEFAULT_LIST_SEARCH, keepsListSearch, listSearchString, parseListSearch, parseProjectsPathname, routeToPathname, runPathname, triagePathname, type ListSearch, type ProjectsRoute } from '../../src/projects/routes.ts'
+import {
+  assignmentPathname, attemptPathname, canonicalPathname, DEFAULT_LIST_SEARCH, EMPTY_TEAM_QUERY, githubPathname, keepsListSearch, listSearchString, parseListSearch, parseProjectsPathname,
+  parseTeamQuery, routeToPathname, RUN_TABS, runPathname, runViewPathname, splitHref, teamHref, teamPathname, teamQuerySearch, triagePathname, type ListSearch, type ProjectsRoute,
+} from '../../src/projects/routes.ts'
 
 const RUN = '/projects/alpha/workflows/flow/runs/run-1'
 
@@ -176,5 +180,99 @@ describe('the kind-aware date read (ux-critique-fixes-c)', () => {
     const written = listSearchString({ ...DEFAULT_LIST_SEARCH, date: 'all' })
     assert.match(written, /date=all/)
     assert.equal(parseListSearch(written).date, 'all')
+  })
+})
+
+// ---- The Team and GitHub views (docs/PRD_RUN_TEAMS.md 2 "Views and routing") ------------------------------------------
+
+describe('the Team and GitHub views', () => {
+  const run = { level: 'run', projectId: 'alpha', workflowId: 'flow', runId: 'run-1', nodeId: null } as const
+
+  test('`team` and `github` after the run id read those views, and build back to the same paths', () => {
+    assert.deepEqual(parseProjectsPathname(`${RUN}/team`), { ...run, tab: 'team' })
+    assert.deepEqual(parseProjectsPathname(`${RUN}/github`), { ...run, tab: 'github' })
+    assert.deepEqual(parseProjectsPathname(`${RUN}/team/`), parseProjectsPathname(`${RUN}/team`))
+    assert.equal(teamPathname('alpha', 'flow', 'run-1'), `${RUN}/team`)
+    assert.equal(githubPathname('alpha', 'flow', 'run-1'), `${RUN}/github`)
+    for (const tab of RUN_TABS) {
+      const pathname = runViewPathname('alpha', 'flow', 'run-1', tab)
+      assert.deepEqual(parseProjectsPathname(pathname), { ...run, tab }, pathname)
+      assert.equal(routeToPathname({ ...run, tab }), pathname)
+    }
+    assert.equal(runViewPathname('alpha', 'flow', 'run-1', 'run'), RUN)
+    assert.equal(runViewPathname('alpha', 'flow', 'run-1', 'assignment'), assignmentPathname('alpha', 'flow', 'run-1'))
+    // A route's Team selection never changes its pathname.
+    assert.equal(routeToPathname({ ...run, tab: 'team', teamQuery: { ...EMPTY_TEAM_QUERY, agent: 3 } }), `${RUN}/team`)
+  })
+
+  test('an extra segment, another spelling or a view under a node is malformed', () => {
+    for (const pathname of [
+      `${RUN}/team/extra`,
+      `${RUN}/github/extra`,
+      `${RUN}/team/agents/3`,
+      `${RUN}/Team`,
+      `${RUN}/GitHub`,
+      `${RUN}/teams`,
+      `${RUN}/nodes/verify_ui/team`,
+      `${RUN}/nodes/verify_ui/github`,
+      `${RUN}/team/attempts/1`,
+      '/projects/alpha/workflows/flow/team',
+      '/projects/alpha/github',
+    ]) assert.equal(parseProjectsPathname(pathname), null, pathname)
+  })
+
+  test('runs and nodes named `team` or `github` are still runs and nodes', () => {
+    assert.deepEqual(parseProjectsPathname('/projects/alpha/workflows/flow/runs/team'), { ...run, runId: 'team', tab: 'run' })
+    assert.deepEqual(parseProjectsPathname(`${RUN}/nodes/github`), { ...run, nodeId: 'github', tab: 'run' })
+  })
+
+  test('with its search, a Team route carries its selection; other views ignore the search', () => {
+    assert.deepEqual(parseProjectsPathname(`${RUN}/team`, '?session=worker%3Aui&workflow=wf_7f8e9d0c-b1a&agent=2&state=running&phase=1&q=fix'), {
+      ...run, tab: 'team', teamQuery: { session: 'worker:ui', workflow: 'wf_7f8e9d0c-b1a', agent: 2, state: 'running', phase: 1, q: 'fix' },
+    })
+    assert.deepEqual(parseProjectsPathname(`${RUN}/team`, ''), { ...run, tab: 'team', teamQuery: EMPTY_TEAM_QUERY })
+    assert.deepEqual(parseProjectsPathname(`${RUN}/github`, '?agent=2'), { ...run, tab: 'github' })
+    assert.deepEqual(parseProjectsPathname(RUN, '?agent=2'), { ...run, tab: 'run' })
+    // Without a search (how the app parses its pathname) a Team route has no selection.
+    assert.equal('teamQuery' in parseProjectsPathname(`${RUN}/team`)!, false)
+  })
+})
+
+describe('parseTeamQuery and teamQuerySearch', () => {
+  test('every value is validated by shape; a wrong one reads as absent and unknown keys are ignored', () => {
+    assert.deepEqual(parseTeamQuery(''), EMPTY_TEAM_QUERY)
+    assert.deepEqual(parseTeamQuery('?session=repair:2&agent=12&phase=3&state=done'), { ...EMPTY_TEAM_QUERY, session: 'repair:2', agent: 12, phase: 3, state: 'done' })
+    for (const search of [
+      '?agent=0', '?agent=01', '?agent=-1', '?agent=1.5', '?agent=x', '?agent=',
+      '?phase=0', '?phase=one',
+      '?state=thinking', '?state=Running', '?state=',
+      '?workflow=wf_', '?workflow=run-1', '?workflow=wf_a%2Fb',
+      '?session=', '?session=%20worker', '?session=worker/ui', '?session=-x',
+      '?status=failed&sort=newest&bogus=1',
+    ]) assert.deepEqual(parseTeamQuery(search), EMPTY_TEAM_QUERY, search)
+    assert.equal(parseTeamQuery(`?q=${'a'.repeat(500)}`).q.length, 200)
+    assert.equal(parseTeamQuery('?q=%3Cb%3Ex%3C%2Fb%3E').q, '<b>x</b>')
+  })
+
+  test('writes keys in the fixed order, never absent ones, and reads back what it wrote', () => {
+    assert.equal(teamQuerySearch(EMPTY_TEAM_QUERY), '')
+    assert.equal(teamQuerySearch({}), '')
+    const full = { session: 'worker:ui', workflow: 'wf_1a2b3c4d-5e6', agent: 3, state: 'failed', phase: 2, q: 'review gpt' } as const
+    const search = teamQuerySearch({ q: full.q, phase: full.phase, state: full.state, agent: full.agent, workflow: full.workflow, session: full.session })
+    assert.equal(search, '?session=worker%3Aui&workflow=wf_1a2b3c4d-5e6&agent=3&state=failed&phase=2&q=review+gpt')
+    assert.deepEqual(parseTeamQuery(search), full)
+    // A value of the wrong shape is dropped rather than written.
+    assert.equal(teamQuerySearch({ agent: 0, session: 'worker:ui' }), '?session=worker%3Aui')
+  })
+
+  test('teamHref links into the Team view with a selection; splitHref separates it again', () => {
+    assert.equal(teamHref('alpha', 'flow', 'run-1'), `${RUN}/team`)
+    assert.equal(teamHref('alpha', 'flow', 'run-1', { session: 'worker:ui' }), `${RUN}/team?session=worker%3Aui`)
+    assert.equal(teamHref('alpha', 'flow', 'run-1', { state: 'running' }), `${RUN}/team?state=running`)
+    assert.deepEqual(splitHref(`${RUN}/team?state=running`), { pathname: `${RUN}/team`, search: '?state=running' })
+    assert.deepEqual(splitHref(RUN), { pathname: RUN, search: '' })
+    // The pathname half is canonical and keeps the list-search rules every Projects pathname has.
+    assert.equal(canonicalPathname(`${RUN}/team/`), `${RUN}/team`)
+    assert.equal(keepsListSearch(`${RUN}/team`), true)
   })
 })

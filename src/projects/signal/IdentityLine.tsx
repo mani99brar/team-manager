@@ -1,10 +1,11 @@
+import type { ReactNode } from 'react'
 import { ControlsHistory } from '../controls/ControlsRow.tsx'
 import { ControlsMenu } from '../controls/ControlsMenu.tsx'
 import { acceptedFindingsText, acceptedOf, isUntried } from '../../../contracts/projects/triage.ts'
 import type { RunAccepted, RunDetail, RunInputs, WorkflowDefinition } from '../api.ts'
 import { INPUTS_NONE_SENTENCE } from '../Assignment.tsx'
 import { LiveStatus } from '../LiveStatus.tsx'
-import { AppLink, ErrorPanel, StatusBadge } from '../panels.tsx'
+import { ErrorPanel, StatusBadge } from '../panels.tsx'
 import { deadlinesLabel, OVERRIDE_LABEL, OVERRIDE_SHORT, RUN_STATUS_SHORT, shortRevision, workflowTitle } from '../status.ts'
 import { Time } from '../Time.tsx'
 import { TimeZoneToggle } from '../TimeZoneToggle.tsx'
@@ -23,9 +24,8 @@ type Props = {
   tone: Tone
   /** The word beside the status when the run waits on the operator. */
   attentionWord: string | null
-  /** The other view of the run, as a link: Assignment from the graph, the graph from Assignment. */
-  other: { label: string; href: string; testId: string }
-  onNavigate: (pathname: string) => void
+  /** The run's view switcher (`RunViews`, docs/PRD_RUN_TEAMS.md 2), placed after the Local/UTC switch and before Controls. */
+  views: ReactNode
 }
 
 /**
@@ -60,11 +60,11 @@ function AcceptedOutcome({ accepted }: { accepted: RunAccepted }) {
 
 /**
  * The identity line (the Signal Box design): one row that names the run in monospace, its status in colour, glyph and
- * word, its feature, the pinned definition, how fresh the page is, the Local/UTC switch and the link to its other view.
+ * word, its feature, the pinned definition, how fresh the page is, the Local/UTC switch and the switcher of its four views.
  * Every other pinned fact (branch, base commit, mode, deadlines, created and export times) waits behind Details, so the
  * first screen stays the graph.
  */
-export function IdentityLine({ detail, inputs, onRetryInputs, current, freshness, clock, tone, attentionWord, other, onNavigate }: Props) {
+export function IdentityLine({ detail, inputs, onRetryInputs, current, freshness, clock, tone, attentionWord, views }: Props) {
   const { summary, definition } = detail
   const data = inputs.status === 'ready' ? inputs.data : null
   const title = data?.feature ?? workflowTitle(definition)
@@ -96,7 +96,7 @@ export function IdentityLine({ detail, inputs, onRetryInputs, current, freshness
         <LiveStatus status={summary.status} meta={freshness} now={clock} />
         <TimeZoneToggle />
       </div>
-      <AppLink href={other.href} onNavigate={onNavigate} className="sb-other" data-testid={other.testId}>{other.label}</AppLink>
+      {views}
       <ControlsMenu scope={scope} />
       {accepted && <AcceptedOutcome accepted={accepted} />}
       <details className="run-details sb-details" data-testid="run-details">

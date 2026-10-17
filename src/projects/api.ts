@@ -40,14 +40,25 @@ import {
 } from '../../contracts/projects/v1.ts'
 import { eventSchema, validateWorkerResult, type WorkerResult, type WorkflowEvent } from '../../contracts/workflow/v1.ts'
 import { homeRunsSchema, registryRunsSchema, type ReadError, type RegistryRuns } from '../../contracts/projects/dispatch.ts'
+import { validateTeams, type Teams } from '../../contracts/projects/teams.ts'
+import {
+  githubActionRequestSchema, githubActionResponseSchema, runGithubActionsSchema, runGithubSchema,
+  type GithubActionId, type GithubActionRecord, type GithubActionRequest, type RunGithub, type RunGithubActions,
+} from '../../contracts/projects/github.ts'
+import { ControlError } from './controls/client.ts'
 import { validateSessions, type LaneReview, type LaneReviewFinding, type LaneReviewReviewer, type NightShiftDecision, type NightShiftProvider, type SessionRow, type Sessions, type SessionTotals } from '../../contracts/projects/sessions.ts'
 
 export type { AttackAttacker, AttackFinding, AttackResult, PanelEntry, PanelFinding, PanelProvider, PanelResults, Project, ReviewFinding, ReviewResult, RunAccepted, RunActivity, RunDetail, RunInputs, RunInputWorker, RunSummary, SidecarFinding, SidecarLedger, SidecarMessage, SidecarPass, WorkflowDefinition, WorkerResult, WorkflowEvent }
+export type { Teams, RunGithub, RunGithubActions, GithubActionId, GithubActionRecord, GithubActionRequest }
 export type { LaneReview, LaneReviewFinding, LaneReviewReviewer, NightShiftDecision, NightShiftProvider, SessionRow, Sessions, SessionTotals }
 export { isBlockingFinding }
 
-/** The contract's "not recorded" 404 codes: a run whose export predates a section, never an error state. */
-export const NOT_RECORDED = { review: 'REVIEW_NOT_FOUND', inputs: 'INPUTS_NOT_FOUND', sidecar: 'SIDECAR_NOT_FOUND', attack: 'ATTACK_NOT_FOUND', panels: 'PANELS_NOT_FOUND', sessions: 'RUN_NOT_FOUND' } as const
+/**
+ * The contract's "not recorded" 404 codes: a run whose export predates a section, never an error state. The teams and the
+ * run's GitHub read answer `NOT_FOUND` from a server that predates them (its scope's catch-all 404), which reads as "not
+ * served" (docs/PRD_RUN_TEAMS.md 3.9).
+ */
+export const NOT_RECORDED = { review: 'REVIEW_NOT_FOUND', inputs: 'INPUTS_NOT_FOUND', sidecar: 'SIDECAR_NOT_FOUND', attack: 'ATTACK_NOT_FOUND', panels: 'PANELS_NOT_FOUND', sessions: 'RUN_NOT_FOUND', teams: 'NOT_FOUND', runGithub: 'NOT_FOUND' } as const
 
 export type ApiErrorKind = 'network' | 'http' | 'malformed'
 
@@ -111,6 +122,12 @@ export const paths = {
   attack: (scope: RunScope) => `${paths.run(scope)}/attack`,
   panels: (scope: RunScope) => `${paths.run(scope)}/panels`,
   sessions: (scope: RunScope) => `${paths.run(scope)}/sessions`,
+  teams: (scope: RunScope) => `${paths.run(scope)}/teams`,
+  /** The run's GitHub read lives under the dispatch API (docs/PRD_RUN_TEAMS.md Appendix B). */
+  runGithub: (scope: RunScope) => `/api/dispatch/projects/${encodeSegments(scope.projectId)}/workflows/${encodeSegments(scope.workflowId)}/runs/${encodeSegments(scope.runId)}/github`,
+  /** The GitHub actions live in the run-control scope, behind its pairing token (docs/PRD_RUN_TEAMS.md Appendix C). */
+  githubActions: (scope: RunScope) => `/api/run-controls/${encodeSegments(scope.projectId, scope.workflowId, scope.runId)}/github`,
+  githubAction: (scope: RunScope, actionId: GithubActionId) => `${paths.githubActions(scope)}/${encodeSegments(actionId)}`,
 }
 
 async function request(path: string, signal: AbortSignal | undefined, accept: string): Promise<Response> {
@@ -378,6 +395,82 @@ export function fetchPanelResults(scope: RunScope, signal?: AbortSignal): Promis
  */
 export function fetchSessions(scope: RunScope, signal?: AbortSignal): Promise<Sessions> {
   return requestJson(paths.sessions(scope), input => validateSessions(input), signal)
+}
+
+/**
+ * The agent teams of the run's Claude sessions (docs/PRD_RUN_TEAMS.md Appendix A "Team reader"), validated with the
+ * contract's cross-field rules and scoped to this run. A server that predates the route answers 404 `NOT_FOUND`, which
+ * `orNotRecorded(…, NOT_RECORDED.teams)` loads as null ("not served").
+ */
+export function fetchTeams(scope: RunScope, signal?: AbortSignal): Promise<Teams> {
+  return requestJson(paths.teams(scope), input => {
+    const teams = validateTeams(input)
+    if (teams.run_id !== scope.runId) throw new Error(`the teams payload belongs to run ${teams.run_id}.`)
+    return teams
+  }, signal)
+}
+
+/**
+ * Where the run's branch stands against GitHub (docs/PRD_RUN_TEAMS.md Appendix B "GitHub read"), scoped to this project,
+ * workflow and run. A server that predates the route answers 404 `NOT_FOUND` (`NOT_RECORDED.runGithub`).
+ */
+export function fetchRunGithub(scope: RunScope, signal?: AbortSignal): Promise<RunGithub> {
+  return requestJson(paths.runGithub(scope), input => {
+    const read = runGithubSchema.parse(input)
+    if (read.project_id !== scope.projectId || read.workflow_id !== scope.workflowId || read.run_id !== scope.runId) {
+      throw new Error('the GitHub read belongs to a different project, workflow or run.')
+    }
+    return read
+  }, signal)
+}
+
+/** The run-control pairing header, as the controls client sends it (`controls/client.ts`). */
+const CONTROL_TOKEN_HEADER = 'X-MDM-Control-Token'
+
+/**
+ * One request in the run-control scope, with the controls client's error model (docs/PRD_RUN_TEAMS.md "GitHub actions"):
+ * a failed request is a `ControlError` carrying the server's code (`TOKEN_INVALID`, `STATE_CHANGED`, `NOT_AVAILABLE`…), an
+ * unreachable server is `NETWORK`, and an answer that does not match the contract is `UNKNOWN` with what did not match.
+ */
+async function controlRequest<T>(path: string, token: string, parse: (input: unknown) => T, body: unknown, signal: AbortSignal | undefined): Promise<T> {
+  let response: Response
+  try {
+    response = await fetch(path, {
+      method: body === undefined ? 'GET' : 'POST',
+      signal,
+      headers: { Accept: 'application/json', [CONTROL_TOKEN_HEADER]: token, ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    })
+  } catch (error) {
+    if (signal?.aborted) throw error
+    throw new ControlError(0, 'NETWORK', 'The viewer could not reach its server.')
+  }
+  const text = await response.text()
+  let parsed: unknown
+  try { parsed = text === '' ? null : JSON.parse(text) } catch { parsed = null }
+  if (!response.ok) {
+    const error = errorBodySchema.safeParse(parsed)
+    throw new ControlError(response.status, error.success ? error.data.error.code as ControlError['code'] : 'UNKNOWN', error.success ? error.data.error.message : `The server answered ${response.status}.`)
+  }
+  try {
+    return parse(parsed)
+  } catch (error) {
+    throw new ControlError(response.status, 'UNKNOWN', `The server's answer does not match the GitHub actions contract: ${error instanceof z.ZodError ? z.prettifyError(error) : error instanceof Error ? error.message : 'invalid payload'}`)
+  }
+}
+
+/** The four GitHub actions as this paired browser may run them now, with their recent records (`runGithubActionsSchema`). */
+export function fetchGithubActions(scope: RunScope, token: string, signal?: AbortSignal): Promise<RunGithubActions> {
+  return controlRequest(paths.githubActions(scope), token, input => runGithubActionsSchema.parse(input), undefined, signal)
+}
+
+/**
+ * Runs one GitHub action: the body carries the dialog's `request_id` (one per dialog), the `state_token` the offers were
+ * read with and the action's params; the answer is the action's record. A stale token is 409 `STATE_CHANGED`.
+ */
+export function postGithubAction(scope: RunScope, actionId: GithubActionId, body: GithubActionRequest, token: string, signal?: AbortSignal): Promise<GithubActionRecord> {
+  const request = githubActionRequestSchema.parse(body)
+  return controlRequest(paths.githubAction(scope, actionId), token, input => githubActionResponseSchema.parse(input).record, request, signal)
 }
 
 /** Whether a failure is the contract's 404 for a section the run's export does not carry. */

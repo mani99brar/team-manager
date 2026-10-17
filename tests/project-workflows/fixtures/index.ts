@@ -12,6 +12,8 @@
  */
 import type { AttackResult, PanelResults, ReviewResult, RunDetail, RunInputs, SidecarLedger, WorkflowDefinition } from '../../../contracts/projects/v1.ts'
 import type { Sessions } from '../../../contracts/projects/sessions.ts'
+import type { Teams } from '../../../contracts/projects/teams.ts'
+import type { RunGithub, RunGithubActions } from '../../../contracts/projects/github.ts'
 import type { WorkerResult, WorkflowEvent } from '../../../contracts/workflow/v1.ts'
 import {
   artifactFiles, attackResults, panelResults, projectList, PROJECT, reviewResults, runDetails, runEvents, runInputs, runLists, sidecarLedgers, workerResults, workflowLists,
@@ -37,6 +39,8 @@ import { uxRefine } from './ux-refine.ts'
 import { uxCritique } from './ux-critique.ts'
 import { uxControls } from './controls.ts'
 import { uxSessions } from './sessions.ts'
+import { uxRunViews } from './run-views.ts'
+import { uxTeams } from './ux-teams.ts'
 
 /** A module's worker-phase payloads, keyed like the maps of `fixtures.ts`; run lists are derived from `runDetails`. */
 export type UxPayloads = {
@@ -57,6 +61,12 @@ export type UxPayloads = {
   panelResults?: Record<string, PanelResults>
   /** The sessions payload served at `/sessions` per run (contract 1.13.0, run-sessions). */
   sessions?: Record<string, Sessions>
+  /** The teams payload served at `/teams` per run (teams 1.0.0, docs/PRD_RUN_TEAMS.md Appendix A); a run without one answers 404 NOT_FOUND. */
+  teams?: Record<string, Teams>
+  /** The run's GitHub read served at `/api/dispatch/projects/:p/workflows/:w/runs/:r/github` per run (run GitHub read 1.0.0). */
+  runGithub?: Record<string, RunGithub>
+  /** The GitHub actions a paired browser reads at `/api/run-controls/:p/:w/:r/github` per run (GitHub actions 1.0.0). */
+  runGithubActions?: Record<string, RunGithubActions>
   /**
    * Per run, the raw facts the shared session-node projection reads ([L4]/[L5]/[L11]), filled from the same builder the
    * module's seed writes: the export's review section (null when none; its raw reviewers with status, null when it lists
@@ -68,6 +78,12 @@ export type UxPayloads = {
 
 /** The sessions payloads served at `/sessions`, merged across modules (run-sessions). */
 export const sessionsByRun: Record<string, Sessions> = {}
+/** The teams payloads served at `/teams`, merged across modules (run-teams). */
+export const teamsByRun: Record<string, Teams> = {}
+/** The run GitHub reads served by the dispatch mock, merged across modules (run-teams). */
+export const runGithubByRun: Record<string, RunGithub> = {}
+/** The GitHub actions served by the run-controls mock to a paired browser, merged across modules (run-teams). */
+export const runGithubActionsByRun: Record<string, RunGithubActions> = {}
 /** The raw facts one run's seed writes for the session-node projection (run-sessions, [L5]); each key optional. */
 export type SessionFacts = {
   review?: { reviewers: { reviewer_id: string; status: string | null }[] | null } | null
@@ -95,7 +111,7 @@ export type UxFixtureModule = {
 }
 
 /** In slice order; the order the added workflows are listed in, in both phases. */
-export const UX_FIXTURE_MODULES: readonly UxFixtureModule[] = [uxTime, uxRun, uxNode, uxVerify, uxLaunch, uxReview, uxLists, uxSidecar, uxRevampLists, uxRevampPages, uxAttack, uxPanel, uxRefine, uxCritique, uxAccepted, uxControls, uxSessions, uxJudged]
+export const UX_FIXTURE_MODULES: readonly UxFixtureModule[] = [uxTime, uxRun, uxNode, uxVerify, uxLaunch, uxReview, uxLists, uxSidecar, uxRevampLists, uxRevampPages, uxAttack, uxPanel, uxRefine, uxCritique, uxAccepted, uxControls, uxSessions, uxJudged, uxRunViews, uxTeams]
 
 function mergePayloads(modules: readonly UxFixtureModule[]) {
   for (const { payloads = {} } of modules) {
@@ -113,6 +129,9 @@ function mergePayloads(modules: readonly UxFixtureModule[]) {
     Object.assign(panelResults, payloads.panelResults)
     Object.assign(sessionsByRun, payloads.sessions)
     Object.assign(reviewerIdsByRun, payloads.reviewerIds)
+    Object.assign(teamsByRun, payloads.teams)
+    Object.assign(runGithubByRun, payloads.runGithub)
+    Object.assign(runGithubActionsByRun, payloads.runGithubActions)
     // The mocks index these per run: a run without events, results or artifacts serves none rather than failing.
     for (const runId of Object.keys(payloads.runDetails ?? {})) {
       runEvents[runId] ??= []

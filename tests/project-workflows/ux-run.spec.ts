@@ -19,7 +19,7 @@ import { RUN_CHALLENGE, UX_REFINE_WORKFLOW_ID } from './fixtures/ux-refine.ts'
 import { REVAMP_PAGES_WORKFLOW_ID, RUN_REVAMP_BLOCKED, RUN_REVAMP_DONE, RUN_REVAMP_RUNNING } from './fixtures/ux-revamp-pages.ts'
 import { installProjectMocks } from './mock.ts'
 import { RUN_SESSIONS, UX_SESSIONS_WORKFLOW_ID } from './fixtures/sessions.ts'
-import { attach, expectNoExecutionControls, graphNode, installHooks, liveDock, nodeDetail, nodeListItem, openRunDetails, openStepSheet, phase, runUrl, stepSheet, workflowUrl } from './support.ts'
+import { attach, expectNoExecutionControls, graphNode, installHooks, liveDock, nodeDetail, nodeListItem, openRunDetails, openStepSheet, phase, runUrl, runViewLink, stepSheet, workflowUrl } from './support.ts'
 
 installHooks()
 
@@ -258,52 +258,47 @@ test(`[scenario:graph-fits] The graph opens readable at 1280 and 1440 px with th
   await attach(page, testInfo, 'graph-fits')
 })
 
-test(`[scenario:assignment-routed] The Assignment view is a URL, survives a reload and keeps its keyboard pattern; its link sits on the identity line above the graph (${phase})`, async ({ page }, testInfo) => {
+test(`[scenario:assignment-routed] The Assignment view is a URL, survives a reload and is reached by keyboard; the view switcher sits on the identity line above the graph (${phase})`, async ({ page }, testInfo) => {
   const runPage = runUrl(RUN_SUCCEEDED)
   await page.goto(runPage)
   const graph = page.getByTestId('workflow-graph')
   await expect(graph).toBeVisible()
-  // The run page has no tabs: the identity line links to the other view, above the stage.
+  // The run page has no tabs: the identity line's view switcher links to every view, above the stage (docs/PRD_RUN_TEAMS.md 2).
   await expect(page.getByRole('tablist', { name: 'Run views' })).toHaveCount(0)
-  const assignmentLink = page.getByTestId('run-header').getByTestId('tab-assignment')
+  const assignmentLink = runViewLink(page.getByTestId('run-header'), 'assignment')
+  const runLink = runViewLink(page.getByTestId('run-header'), 'run')
   await expect(assignmentLink).toHaveText('Assignment')
+  await expect(runLink).toHaveAttribute('aria-current', 'page')
   expect(await bottomOf(assignmentLink)).toBeLessThanOrEqual((await page.getByTestId('run-stage').boundingBox())!.y)
 
   await assignmentLink.click()
   await expect(page).toHaveURL(new RegExp(`${escape(runPage)}/assignment$`))
-  const tablist = page.getByRole('tablist', { name: 'Run views' })
-  const runTab = tablist.getByTestId('tab-run')
-  const assignmentTab = tablist.getByTestId('tab-assignment')
-  await expect(assignmentTab).toHaveAttribute('aria-selected', 'true')
+  await expect(assignmentLink).toHaveAttribute('aria-current', 'page')
+  await expect(runLink).not.toHaveAttribute('aria-current')
   await expect(page.getByTestId('assignment')).toBeVisible()
   await expect(graph).toHaveCount(0)
-  await expect(page.getByTestId('run-header').getByTestId('run-graph-link')).toHaveText('Run graph')
   await page.reload()
-  await expect(assignmentTab).toHaveAttribute('aria-selected', 'true')
+  await expect(assignmentLink).toHaveAttribute('aria-current', 'page')
   await expect(page.getByTestId('assignment')).toBeVisible()
   await expect(graph).toHaveCount(0)
   await attach(page, testInfo, 'assignment-routed')
 
-  // Arrow keys and Home/End still switch views from the Assignment page's tabs, and each switch is a URL.
-  await expect(runTab).toHaveAttribute('aria-selected', 'false')
-  await assignmentTab.focus()
-  await page.keyboard.press('ArrowLeft')
+  // The links are in the normal Tab order; Enter follows one, and each switch is a URL.
+  await runLink.focus()
+  await page.keyboard.press('Enter')
   await expect(page).toHaveURL(new RegExp(`${escape(runPage)}$`))
   await expect(graph).toBeVisible()
-  // Back on the Assignment page, End keeps it and Home switches to the graph.
-  await page.getByTestId('run-header').getByTestId('tab-assignment').click()
+  await assignmentLink.focus()
+  await page.keyboard.press('Enter')
   await expect(page).toHaveURL(new RegExp(`${escape(runPage)}/assignment$`))
-  await runTab.focus()
-  await page.keyboard.press('End')
-  await expect(assignmentTab).toBeFocused()
-  await expect(page).toHaveURL(new RegExp(`${escape(runPage)}/assignment$`))
-  await page.keyboard.press('Home')
-  await expect(page).toHaveURL(new RegExp(`${escape(runPage)}$`))
-  await expect(graph).toBeVisible()
-  // Back returns to the Assignment view.
+  await expect(page.locator('#run-view-title')).toBeFocused()
+  // Back returns to the graph, Forward to the Assignment view.
   await page.goBack()
+  await expect(page).toHaveURL(new RegExp(`${escape(runPage)}$`))
+  await expect(graph).toBeVisible()
+  await page.goForward()
   await expect(page).toHaveURL(new RegExp(`${escape(runPage)}/assignment$`))
-  await expect(assignmentTab).toHaveAttribute('aria-selected', 'true')
+  await expect(assignmentLink).toHaveAttribute('aria-current', 'page')
   await expect(graph).toHaveCount(0)
   await expectNoExecutionControls(page)
 })
@@ -312,7 +307,9 @@ test(`[scenario:narrow-run] At 390×844 the run page fits the width, starts with
   await page.setViewportSize({ width: 390, height: 844 })
   const banner = await openRun(page, reviewersRunUrl(RUN_REVIEWER_BLOCKED), 'review_blocked')
   expect(await pageWidth(page)).toBeLessThanOrEqual(390)
-  expect(await bottomOf(banner)).toBeLessThanOrEqual(844)
+  // The identity line gained the view switcher's own 44 px row on a phone (docs/PRD_RUN_TEAMS.md 2), so the first screen
+  // holds the banner's headline (where the run stopped, why and since when); its next-step commands may continue below.
+  expect(await bottomOf(banner.getByTestId('now-headline'))).toBeLessThanOrEqual(844)
   // On a phone the stage lays the flow top to bottom; the dock opens over it with the banner.
   await expect(page.getByTestId('run-stage')).toHaveAttribute('data-direction', 'TB')
   await expect(liveDock(page)).toHaveAttribute('data-open', 'true')

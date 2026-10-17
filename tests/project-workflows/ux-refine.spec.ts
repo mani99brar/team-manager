@@ -8,7 +8,7 @@ import { test, expect, type Page } from '@playwright/test'
 import {
   RUN_CHALLENGE, RUN_LANE_TONES, RUN_LOOP_DONE, RUN_LOOP_RESTORED, RUN_LOOP_RUNNING, UX_REFINE_WORKFLOW_ID,
 } from './fixtures/ux-refine.ts'
-import { attach, expectNoExecutionControls, installHooks, liveDock, openRunDetails, openStepSheet, phase, runUrl, stepSheet } from './support.ts'
+import { attach, expectNoExecutionControls, installHooks, liveDock, openRunDetails, openStepSheet, phase, runUrl, runViewLink, stepSheet } from './support.ts'
 
 installHooks()
 
@@ -133,7 +133,7 @@ test(`[scenario:assignment-and-diff] The Assignment tab opens on one setup line 
 
   // The Assignment tab: the setup line, then one row per lane before any long text.
   await page.goto(refineUrl(RUN_LOOP_DONE))
-  await runView(page).getByTestId('tab-assignment').click()
+  await runViewLink(runView(page), 'assignment').click()
   const setup = runView(page).getByTestId('assignment-setup-line')
   await expect(setup).toContainText('Viewer refine')
   await expect(setup).toContainText('2 fix rounds')

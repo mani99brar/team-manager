@@ -25,7 +25,7 @@ import {
   WORKFLOW_NAME,
   runDetails,
 } from './fixtures.ts'
-import { apiRun, attach, executionControlCount, graphNode, installHooks, nodeDetail, nodeListItem, openStep, phase, projectUrl, projectsUrl, runUrl, stepSheet, workflowUrl, workspace } from './support.ts'
+import { apiRun, attach, executionControlCount, graphNode, installHooks, nodeDetail, nodeListItem, openStep, phase, projectUrl, projectsUrl, runUrl, runViewLink, stepSheet, workflowUrl, workspace } from './support.ts'
 
 installHooks()
 
@@ -481,12 +481,12 @@ test(`[scenario:live-refresh] A shown run re-reads its state in the background w
   await expect(graphNode(page, changed.node_id)).toHaveClass(/\battn\b/)
   await expect(graphNode(page, changed.node_id)).toHaveAttribute('aria-label', /^Independent review, review, [^,]+ · needs you, attempt 1,/)
   // The reader's place survives a poll: the page is updated in place, not reloaded behind a loading panel.
-  await page.getByTestId('tab-assignment').click()
+  await runViewLink(page, 'assignment').click()
   current = moved
   await expect(view).toHaveAttribute('data-run-status', 'running', { timeout: 15_000 })
-  await expect(page.getByRole('tablist', { name: 'Run views' }).getByTestId('tab-assignment')).toHaveAttribute('aria-selected', 'true')
-  // Back to the graph through the identity line's pill link.
-  await page.getByTestId('run-graph-link').click()
+  await expect(runViewLink(page, 'assignment')).toHaveAttribute('aria-current', 'page')
+  // Back to the graph through the identity line's view switcher.
+  await runViewLink(page, 'run').click()
   await expect(graphNode(page, changed.node_id)).toHaveClass(/is-running/)
   await expect(graphNode(page, changed.node_id)).not.toHaveAttribute('data-attention')
   await expect(graphNode(page, changed.node_id)).not.toHaveClass(/\battn\b/)

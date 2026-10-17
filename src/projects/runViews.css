@@ -1,0 +1,33 @@
+/* ---- The run views switcher (docs/PRD_RUN_TEAMS.md 2 "Views and routing"): Run · Team · GitHub · Assignment as four joined
+   links on the identity line (after the Local/UTC switch, before Controls) and on a node page's run bar. Sheet fill, 1 px rule,
+   13px 600; 36 px tall on a desk with a 44 px hit area; the current one bold with a 3 px accent bar along its bottom edge. ---- */
+
+.run-views-nav { display: inline-flex; align-items: stretch; flex: none; min-width: 0; }
+.workspace-projects .run-view-link { position: relative; display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 36px; min-width: 0; box-sizing: border-box; padding: 0 12px; border: 1px solid var(--border); background: var(--surface); color: var(--fg); font-size: var(--type-floor); font-weight: 600; line-height: 1.2; text-decoration: none; white-space: nowrap; }
+.run-view-link + .run-view-link { margin-left: -1px; }
+.run-view-link:first-child { border-radius: 8px 0 0 8px; }
+.run-view-link:last-child { border-radius: 0 8px 8px 0; }
+/* The 44 px hit area around the 36 px segment. */
+.run-view-link::before { content: ''; position: absolute; left: 0; right: 0; top: 50%; height: 44px; transform: translateY(-50%); }
+.workspace-projects .run-view-link[aria-current="page"] { font-weight: 700; }
+.run-view-link[aria-current="page"]::after { content: ''; position: absolute; left: 0; right: 0; bottom: -1px; height: 3px; background: var(--accent); }
+.workspace-projects .run-view-link:hover { color: var(--accent); }
+.run-view-link:focus-visible { z-index: 1; outline: 2px solid var(--focus); outline-offset: 2px; }
+.run-view-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.run-view-suffix { display: inline-flex; align-items: center; gap: 4px; min-width: 0; font-weight: 600; font-variant-numeric: tabular-nums; }
+.run-view-glyph { width: 13px; height: 13px; flex: none; }
+.run-view-word { color: var(--muted); }
+
+/* Phones (a stage under 720 px): the switcher takes its own full-width row under the identity line's first row, four equal
+   44 px columns at 14px; Team and GitHub keep only their glyph, the word lives in the link's accessible name. On the identity
+   line the row runs edge to edge (into the line's 12 px padding) so "Assignment" fits a quarter of a 390 px screen. */
+@media (max-width: 720px) {
+  .run-views-nav { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); flex: 1 1 100%; width: 100%; }
+  .sb-idline > .run-views-nav { order: 3; flex-basis: calc(100% + 24px); width: calc(100% + 24px); margin: 2px -12px; }
+  .workspace-projects .run-view-link { min-height: 44px; padding: 0; gap: 4px; font-size: var(--type-floor); letter-spacing: -0.02em; }
+  .sb-idline > .run-views-nav .run-view-link { border-radius: 0; border-width: 1px 0 1px 1px; margin-left: 0; }
+  .sb-idline > .run-views-nav .run-view-link:first-child { border-left-width: 0; }
+  .run-view-link::before { height: 100%; }
+  .run-view-word { display: none; }
+  .run-view-glyph { width: 14px; height: 14px; }
+}

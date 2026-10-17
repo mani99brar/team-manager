@@ -1,12 +1,15 @@
 /**
- * Projects routes: `/projects[/<project>[/workflows/<workflow>[/runs/<run>[/assignment | /nodes/<node>[/attempts/<k>]]]]]`.
- * A run's views live in the path (docs/PRD_VIEWER_UX.md 3.1): the Run view (with its node pages, the latest attempt or an
- * earlier one) and the Assignment view, so each can be linked and survives a reload.
+ * Projects routes: `/projects[/<project>[/workflows/<workflow>[/runs/<run>[/team | /github | /assignment | /nodes/<node>[/attempts/<k>]]]]]`.
+ * A run's views live in the path (docs/PRD_VIEWER_UX.md 3.1, docs/PRD_RUN_TEAMS.md 2 "Views and routing"): the Run view
+ * (with its node pages, the latest attempt or an earlier one), the Team view, the GitHub view and the Assignment view, so
+ * each can be linked and survives a reload. The Team view keeps its selection (session, workflow, agent, state, phase and
+ * search) in the URL's search: opening an agent pushes a history entry, a filter change replaces it.
  *
  * Every ID is an opaque contract identifier: it must match the shared ID pattern and is percent-encoded
  * as one path segment. Anything else is malformed rather than looked up. This domain is read-only and
  * separate from the Pi/Claude skill sources; nothing here names a filesystem path.
  */
+import { AGENT_STATES, type AgentState } from '../../contracts/projects/teams.ts'
 import { PHASES } from './dispatch/phases.ts'
 import { STATUS_FILTERS } from './runFilter.ts'
 
@@ -15,6 +18,24 @@ export const PROJECT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/
 
 export const PROJECTS_ROUTE = 'projects'
 
+/** A run's four views, in the switcher's order (docs/PRD_RUN_TEAMS.md 2). A node page is part of the Run view. */
+export const RUN_TABS = ['run', 'team', 'github', 'assignment'] as const
+export type RunTab = (typeof RUN_TABS)[number]
+
+/**
+ * The Team view's selection as its URL's search carries it (docs/PRD_RUN_TEAMS.md 2): the session key (`worker:ui`), the
+ * workflow's `run_id`, the agent's `index`, the state filter, the phase filter (a phase `index`) and the search text. A
+ * value of the wrong shape reads as absent; unknown keys are ignored.
+ */
+export type TeamQuery = {
+  session: string | null
+  workflow: string | null
+  agent: number | null
+  state: AgentState | null
+  phase: number | null
+  q: string
+}
+
 export type ProjectsRoute =
   | { level: 'projects' }
   /** Triage, `/projects/-/triage` (the former Runs home). `-` cannot start a project id, so the path never collides ([D1]). */
@@ -22,7 +43,8 @@ export type ProjectsRoute =
   | { level: 'project'; projectId: string }
   | { level: 'workflow'; projectId: string; workflowId: string }
   /** `attempt` is present only on an attempt's own page, `/nodes/<node>/attempts/<k>`; a node page shows its latest attempt. */
-  | { level: 'run'; projectId: string; workflowId: string; runId: string; nodeId: string | null; tab: 'run' | 'assignment'; attempt?: number }
+  /** `teamQuery` is present only on the Team view, and only when the route was parsed with its search. */
+  | { level: 'run'; projectId: string; workflowId: string; runId: string; nodeId: string | null; tab: RunTab; attempt?: number; teamQuery?: TeamQuery }
 
 export function isContractId(value: string): boolean {
   return PROJECT_ID_PATTERN.test(value)
@@ -64,6 +86,28 @@ export function assignmentPathname(projectId: string, workflowId: string, runId:
   return encode([PROJECTS_ROUTE, projectId, 'workflows', workflowId, 'runs', runId, ASSIGNMENT_SEGMENT])
 }
 
+/** The literals after a run id that select its Team and GitHub views (docs/PRD_RUN_TEAMS.md 2). */
+export const TEAM_SEGMENT = 'team'
+export const GITHUB_SEGMENT = 'github'
+
+export function teamPathname(projectId: string, workflowId: string, runId: string): string {
+  return encode([PROJECTS_ROUTE, projectId, 'workflows', workflowId, 'runs', runId, TEAM_SEGMENT])
+}
+
+export function githubPathname(projectId: string, workflowId: string, runId: string): string {
+  return encode([PROJECTS_ROUTE, projectId, 'workflows', workflowId, 'runs', runId, GITHUB_SEGMENT])
+}
+
+/** The pathname of one of a run's four views (the Run view is the run page itself). */
+export function runViewPathname(projectId: string, workflowId: string, runId: string, tab: RunTab): string {
+  switch (tab) {
+    case 'run': return runPathname(projectId, workflowId, runId)
+    case 'team': return teamPathname(projectId, workflowId, runId)
+    case 'github': return githubPathname(projectId, workflowId, runId)
+    case 'assignment': return assignmentPathname(projectId, workflowId, runId)
+  }
+}
+
 /** The literal after a node id that selects one of its attempts. */
 export const ATTEMPTS_SEGMENT = 'attempts'
 
@@ -81,7 +125,7 @@ export function routeToPathname(route: ProjectsRoute): string {
     case 'project': return projectPathname(route.projectId)
     case 'workflow': return workflowPathname(route.projectId, route.workflowId)
     case 'run':
-      if (route.tab === 'assignment') return assignmentPathname(route.projectId, route.workflowId, route.runId)
+      if (route.tab !== 'run') return runViewPathname(route.projectId, route.workflowId, route.runId, route.tab)
       if (route.nodeId !== null && route.attempt !== undefined) return attemptPathname(route.projectId, route.workflowId, route.runId, route.nodeId, route.attempt)
       return runPathname(route.projectId, route.workflowId, route.runId, route.nodeId)
   }
@@ -93,11 +137,21 @@ export function isProjectsPathname(pathname: string): boolean {
   return first === PROJECTS_ROUTE
 }
 
+/** The literal after a run id that selects each view other than the Run view. */
+const VIEW_SEGMENTS: Readonly<Record<string, Exclude<RunTab, 'run'>>> = { [TEAM_SEGMENT]: 'team', [GITHUB_SEGMENT]: 'github', [ASSIGNMENT_SEGMENT]: 'assignment' }
+
 /**
  * Parses a Projects pathname. Returns null when it is not a Projects pathname or when any segment is
- * malformed (bad encoding, an invalid ID, an unexpected literal or trailing segments).
+ * malformed (bad encoding, an invalid ID, an unexpected literal or trailing segments). With `search` (the URL's search,
+ * "?session=…"), a Team view's route also carries its `teamQuery`; the search never makes a pathname malformed.
  */
-export function parseProjectsPathname(pathname: string): ProjectsRoute | null {
+export function parseProjectsPathname(pathname: string, search?: string): ProjectsRoute | null {
+  const route = parsePathnameOnly(pathname)
+  if (search !== undefined && route !== null && route.level === 'run' && route.tab === 'team') return { ...route, teamQuery: parseTeamQuery(search) }
+  return route
+}
+
+function parsePathnameOnly(pathname: string): ProjectsRoute | null {
   const raw = pathname.split('/').filter(segment => segment !== '')
   if (raw[0] !== PROJECTS_ROUTE) return null
   let segments: string[]
@@ -116,11 +170,81 @@ export function parseProjectsPathname(pathname: string): ProjectsRoute | null {
   if (runsLiteral === undefined) return { level: 'workflow', projectId, workflowId }
   if (runsLiteral !== 'runs' || runId === undefined || !isContractId(runId)) return null
   if (nodesLiteral === undefined) return { level: 'run', projectId, workflowId, runId, nodeId: null, tab: 'run' }
-  if (nodesLiteral === ASSIGNMENT_SEGMENT && nodeId === undefined) return { level: 'run', projectId, workflowId, runId, nodeId: null, tab: 'assignment' }
+  if (Object.hasOwn(VIEW_SEGMENTS, nodesLiteral)) return nodeId === undefined ? { level: 'run', projectId, workflowId, runId, nodeId: null, tab: VIEW_SEGMENTS[nodesLiteral] } : null
   if (nodesLiteral !== 'nodes' || nodeId === undefined || !isContractId(nodeId)) return null
   if (attemptsLiteral === undefined) return { level: 'run', projectId, workflowId, runId, nodeId, tab: 'run' }
   if (attemptsLiteral !== ATTEMPTS_SEGMENT || attempt === undefined || !ATTEMPT_PATTERN.test(attempt) || rest.length > 0) return null
   return { level: 'run', projectId, workflowId, runId, nodeId, tab: 'run', attempt: Number(attempt) }
+}
+
+// ---- The Team view's selection in the URL's search (docs/PRD_RUN_TEAMS.md 2) ------------------------------------------
+
+export const EMPTY_TEAM_QUERY: TeamQuery = { session: null, workflow: null, agent: null, state: null, phase: null, q: '' }
+
+/** A sessions payload row key, such as `worker:ui` or `repair:2`. */
+const SESSION_KEY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/
+/** A Claude Code workflow run id, as the teams contract spells it. */
+const WORKFLOW_RUN_PATTERN = /^wf_[0-9A-Za-z-]{1,64}$/
+/** An agent's `index` or a phase's `index`: a positive whole number without leading zeros. */
+const INDEX_PATTERN = /^[1-9][0-9]{0,5}$/
+/** The search text the URL may carry; longer text is cut. */
+const TEAM_SEARCH_MAX = 200
+
+/** Reads the Team view's selection from a URL search; a value of the wrong shape reads as absent, unknown keys are ignored. */
+export function parseTeamQuery(search: string): TeamQuery {
+  const params = new URLSearchParams(search)
+  const matching = (key: string, pattern: RegExp) => {
+    const value = params.get(key)
+    return value !== null && pattern.test(value) ? value : null
+  }
+  const index = (key: string) => {
+    const value = matching(key, INDEX_PATTERN)
+    return value === null ? null : Number(value)
+  }
+  const state = params.get('state')
+  return {
+    session: matching('session', SESSION_KEY_PATTERN),
+    workflow: matching('workflow', WORKFLOW_RUN_PATTERN),
+    agent: index('agent'),
+    state: state !== null && (AGENT_STATES as readonly string[]).includes(state) ? state as AgentState : null,
+    phase: index('phase'),
+    q: (params.get('q') ?? '').slice(0, TEAM_SEARCH_MAX),
+  }
+}
+
+/**
+ * Writes the Team view's selection as a URL search, keys in the fixed order session, workflow, agent, state, phase, q;
+ * absent values (and values of the wrong shape) are never written, so the default selection has an empty search.
+ */
+export function teamQuerySearch(query: Partial<TeamQuery>): string {
+  const given = Object.entries(query).flatMap(([key, value]): [string, string][] => (value === null || value === undefined || value === '' ? [] : [[key, String(value)]]))
+  const clean = parseTeamQuery(new URLSearchParams(given).toString())
+  const params = new URLSearchParams()
+  if (clean.session !== null) params.set('session', clean.session)
+  if (clean.workflow !== null) params.set('workflow', clean.workflow)
+  if (clean.agent !== null) params.set('agent', String(clean.agent))
+  if (clean.state !== null) params.set('state', clean.state)
+  if (clean.phase !== null) params.set('phase', String(clean.phase))
+  if (clean.q !== '') params.set('q', clean.q)
+  const text = params.toString()
+  return text === '' ? '' : `?${text}`
+}
+
+/** A link into the Team view with a selection, e.g. "Open in Team view ›" with `{ session: 'worker:ui' }`. */
+export function teamHref(projectId: string, workflowId: string, runId: string, query: Partial<TeamQuery> = {}): string {
+  return teamPathname(projectId, workflowId, runId) + teamQuerySearch(query)
+}
+
+/**
+ * How the Team view changes its selection, following how the app navigates (docs/PRD_RUN_TEAMS.md 2): opening an agent
+ * (`push`) adds a history entry, so Back closes the drawer; a filter or search change (`replace`) rewrites the current one.
+ */
+export type TeamQueryMode = 'push' | 'replace'
+
+/** Splits an app href into its pathname and its search ("" when it has none). */
+export function splitHref(href: string): { pathname: string; search: string } {
+  const at = href.indexOf('?')
+  return at < 0 ? { pathname: href, search: '' } : { pathname: href.slice(0, at), search: href.slice(at) }
 }
 
 // ---- A list's state in the URL's search -------------------------------------------------------------------------------

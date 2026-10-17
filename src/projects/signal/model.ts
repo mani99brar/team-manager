@@ -16,6 +16,8 @@ import { executorCategory, isAttackNode, isChallengeNode, isSidecarNode, KIND_LA
 import type { StepRow } from '../steps.ts'
 import { stateTone, TONE_LABEL, type Tone } from '../tone.ts'
 import { projectedSessionKind } from './executor.ts'
+import type { Teams } from '../../../contracts/projects/teams.ts'
+import { laneWorkers, stageTeam, type StageTeam } from '../teams/model.ts'
 
 export type StageEvent = { sequence: number; at: string; status: RunStatus | null; text: string }
 
@@ -68,6 +70,12 @@ export type StageNode = {
   projected: 'reviewer' | 'panel' | 'lane_review' | null
   /** The 2 or 3 facts the far view keeps on the card. */
   facts: string
+  /**
+   * The step's agent team (docs/PRD_RUN_TEAMS.md 5): its workflows, agents, running and failed counts, files edited outside the
+   * lane's paths and the running agent's line, from the node's team sessions with records `found`; null otherwise, and the card
+   * then renders exactly as before teams existed.
+   */
+  team: StageTeam | null
 }
 
 export type StageModelInput = {
@@ -84,6 +92,8 @@ export type StageModelInput = {
   sessions?: Sessions | null
   /** The panels route's record: the Panel card's state word, answered providers and accepted P0/P1 ([L12] 1); null when unread. */
   panels?: PanelResults | null
+  /** The run's teams read (docs/PRD_RUN_TEAMS.md 5): a card whose sessions have team records gains its team facts; null when unread or not served. */
+  teams?: Teams | null
 }
 
 const shortSha = (value: string) => value.slice(0, 7)
@@ -188,7 +198,8 @@ function advisoryCard(card: StageCard, review: ReviewResult, nodeId: string, ses
 }
 
 export function stageNodes(input: StageModelInput, span: (ms: number) => string): StageNode[] {
-  const { detail, rows, events, inputs, review, attention, reviewRound, sessions, panels } = input
+  const { detail, rows, events, inputs, review, attention, reviewRound, sessions, panels, teams } = input
+  const workers = laneWorkers(inputs)
   const snapshot = new Map(detail.snapshot.nodes.map(node => [node.node_id, node]))
   const rowOf = new Map(rows.map(row => [row.node_id, row]))
   const repairs = detail.fixLoop && 'repairs' in detail.fixLoop ? detail.fixLoop.repairs : []
@@ -244,6 +255,7 @@ export function stageNodes(input: StageModelInput, span: (ms: number) => string)
       openFindings: stageCard ? stageCard.openP01 : reviewOpen,
       cost: stageCard ? stageCard.cost : null,
       projected,
+      team: stageTeam(teams ?? null, node.node_id, workers),
     }
     return { ...card, facts: factsOf(card, span) }
   })

@@ -3,7 +3,8 @@
  * or the panel), so the stage never calls a reviewer node "agent"; every pinned step keeps the kind's wording from
  * `src/projects/status.ts` (which is not an owned path, so it is read, not edited). The node-page header names a projected
  * node's executor with the same phrase as its card's accessible name, and a finished reviewer or lane review says its verdict
- * is on the page rather than "This step completed."; a pinned step's header keeps the kind's wording. The unit tests cover
+ * is on the page rather than "This step completed."; a pinned step's header keeps the kind's wording. A step whose session
+ * ran an agent team says `team`, "a lead session with a team of agents" (docs/PRD_RUN_TEAMS.md 5). The unit tests cover
  * this wrapper.
  */
 import type { ReviewResult } from '../api.ts'
@@ -26,8 +27,12 @@ export function projectedSessionKind(nodeId: string): Projected | null {
   return nodeId === 'panel' ? 'panel' : nodeId.startsWith('lane-review-') ? 'lane_review' : 'reviewer'
 }
 
-export function stageExecutor(node: { projected: Projected | null; exec: Executor; kind: NodeKind; id: string }): { word: string; phrase: string } {
+/** A lead session with a team of agents (docs/PRD_RUN_TEAMS.md 5): the card's row two reads `worker · team`. */
+export const TEAM_EXECUTOR = { word: 'team', phrase: 'a lead session with a team of agents' } as const
+
+export function stageExecutor(node: { projected: Projected | null; exec: Executor; kind: NodeKind; id: string; team?: unknown }): { word: string; phrase: string } {
   if (node.projected) return PROJECTED_EXECUTOR[node.projected]
+  if (node.team) return TEAM_EXECUTOR
   return { word: EXECUTOR_WORD[node.exec], phrase: executorOf(node.kind, undefined, node.id) }
 }
 

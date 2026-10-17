@@ -24,7 +24,7 @@ import {
   WORKFLOW_ID,
   reviewFindings,
 } from './fixtures.ts'
-import { attach, expectNoExecutionControls, graphNode, installHooks, nodeDetail, nodeListItem, openRunDetails, openTask, phase, renderedText, runUrl, workflowUrl } from './support.ts'
+import { attach, expectNoExecutionControls, graphNode, installHooks, nodeDetail, nodeListItem, openRunDetails, openTask, phase, renderedText, runUrl, runViewLink, workflowUrl } from './support.ts'
 
 installHooks()
 
@@ -83,7 +83,7 @@ test(`[scenario:viewer-three-lanes] A three-lane run shows three launch and veri
   await expect(page.getByTestId('run-inputs-facts')).toContainText(LANES_FEATURE_NAME)
 
   // The Assignment tab lists the three workers in policy order, with the lane selection and each lane's required check kinds.
-  await page.getByTestId('tab-assignment').click()
+  await runViewLink(page, 'assignment').click()
   const workers = page.getByTestId('assignment-worker')
   await expect(workers).toHaveCount(3)
   expect(await attributeList(workers, 'data-worker')).toEqual([...THREE_LANES])
@@ -175,7 +175,7 @@ test(`[scenario:viewer-three-lanes] A three-lane run shows three launch and veri
   await expect(edge(page, 'launch_docs', 'handoff')).toHaveCount(1)
   await expect(edge(page, 'verify_docs', 'candidate')).toHaveCount(1)
   await expect(page.locator('[data-testid="workflow-graph"] [data-graph-node][data-status="succeeded"]')).toHaveCount(ONE_LANE_NODES.length)
-  await page.getByTestId('tab-assignment').click()
+  await runViewLink(page, 'assignment').click()
   await expect(page.getByTestId('assignment-worker')).toHaveCount(1)
   await expect(assignmentWorker(page, 'docs')).toBeVisible()
   await expect(page.getByTestId('assignment-selected-workers')).toHaveText('docs')
@@ -216,7 +216,7 @@ test(`[scenario:legacy-run] A stored 1.2.0 two-lane export renders as before wit
   await expect(page.getByTestId('inputs-none')).toHaveCount(0)
 
   // The Assignment tab: the two recorded workers, both selected and nothing excluded, with the role-derived check kinds.
-  await page.getByTestId('tab-assignment').click()
+  await runViewLink(page, 'assignment').click()
   const workers = page.getByTestId('assignment-worker')
   await expect(workers).toHaveCount(2)
   expect(await attributeList(workers, 'data-worker')).toEqual(['ui', 'adapter'])

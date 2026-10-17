@@ -47,7 +47,7 @@ import {
   runDetails,
   runInputs,
 } from './fixtures.ts'
-import { apiRun, attach, expectNoExecutionControls, graphNode, installHooks, nodeDetail, openStep, phase, renderedText, runUrl } from './support.ts'
+import { apiRun, attach, expectNoExecutionControls, graphNode, installHooks, nodeDetail, openStep, phase, renderedText, runUrl, runViewLink } from './support.ts'
 
 installHooks()
 
@@ -374,9 +374,9 @@ test(`[scenario:assignment-folded] The Assignment view prints the feature once a
   test.slow()
   await page.setViewportSize({ width: 1440, height: 900 })
   await page.goto(guardedRunUrl())
-  await page.getByTestId('tab-assignment').click()
+  await runViewLink(page, 'assignment').click()
   const assignment = page.getByTestId('assignment')
-  await expect(page.getByRole('tablist', { name: 'Run views' })).toHaveCount(1)
+  await expect(page.getByRole('navigation', { name: 'Run views' })).toHaveCount(1)
 
   // The feature title is printed once.
   const feature = (await assignment.getByTestId('assignment-setup-line').locator('strong').textContent())!.trim()
@@ -450,7 +450,7 @@ test(`[scenario:assignment-folded] The Assignment view prints the feature once a
 
 test(`[scenario:decisions-shown] The Assignment page renders decisions.md as Markdown; a run without it says so (${phase})`, async ({ page }, testInfo) => {
   await page.goto(guardedRunUrl())
-  await page.getByTestId('tab-assignment').click()
+  await runViewLink(page, 'assignment').click()
   const decisions = page.getByTestId('assignment-decisions')
   // Decisions is a closed fold whose summary says its size; opened, it renders as it always did.
   const fold = decisions.getByTestId('assignment-decisions-fold')
@@ -471,7 +471,7 @@ test(`[scenario:decisions-shown] The Assignment page renders decisions.md as Mar
   // A run whose export predates decisions says it has none.
   for (const url of [clarityRunUrl(RUN_FILES), runUrl(RUN_SUCCEEDED)]) {
     await page.goto(url)
-    await page.getByTestId('tab-assignment').click()
+    await runViewLink(page, 'assignment').click()
     await expect(page.getByTestId('assignment-decisions-none')).toContainText('No decisions.md was recorded for this run')
     await expect(page.getByTestId('assignment-decisions-rendered')).toHaveCount(0)
   }
@@ -496,7 +496,7 @@ test(`[scenario:inert-markdown] Captured Markdown and decisions.md with a remote
   await attach(page, testInfo, 'inert-markdown-file')
 
   // decisions.md on the Assignment page.
-  await page.getByTestId('tab-assignment').click()
+  await runViewLink(page, 'assignment').click()
   await openFolds(page.getByTestId('assignment'))
   const decisions = page.getByTestId('assignment-decisions-rendered')
   await expect(decisions).toBeVisible()
