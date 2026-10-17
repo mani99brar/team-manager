@@ -334,14 +334,25 @@ describe('the request_id rule of both dialogs (final review F5.2, F5.3)', () => 
     assert.notEqual(edited.id, first.id)
     assert.match(edited.id, /^[0-9a-f-]{36}$/)
   })
-  test('every answered failure (refused spawn, STATE_CHANGED, BUSY, NOT_AVAILABLE) starts a new request_id even with unchanged values', () => {
-    for (const [status, code] of [[500, 'SPAWN_FAILED'], [409, 'STATE_CHANGED'], [409, 'BUSY'], [409, 'NOT_AVAILABLE'], [500, 'UNKNOWN']] as const) {
+  test('every answered refusal that means nothing ran (refused spawn, STATE_CHANGED, BUSY, NOT_AVAILABLE, INVALID_PARAMS, TOKEN_*) starts a new request_id even with unchanged values', () => {
+    for (const [status, code] of [[500, 'SPAWN_FAILED'], [409, 'STATE_CHANGED'], [409, 'BUSY'], [409, 'NOT_AVAILABLE'], [400, 'INVALID_PARAMS'], [401, 'TOKEN_INVALID'], [401, 'TOKEN_REQUIRED']] as const) {
       const sent = attemptFingerprint('rs-1', {})
       const first = nextAttempt(null, sent)
       const error = new ControlError(status, code as ControlError['code'], 'no')
       assert.equal(answerLost(error), false, code)
       assert.equal(heldAfterFailure(first, error), null, code)
       assert.notEqual(nextAttempt(heldAfterFailure(first, error), sent).id, first.id, code)
+    }
+  })
+  test('a 5xx (INTERNAL after the action ran, a proxy 502) or an UNKNOWN answer keeps the request_id: the action may have run (final review F5.1)', () => {
+    for (const [status, code] of [[500, 'INTERNAL'], [500, 'UNKNOWN'], [502, 'UNKNOWN'], [503, 'UNKNOWN'], [404, 'UNKNOWN']] as const) {
+      const sent = attemptFingerprint('rs-1', { text: 'hello' })
+      const first = nextAttempt(null, sent)
+      const error = new ControlError(status, code as ControlError['code'], 'no')
+      assert.equal(answerLost(error), true, `${status} ${code}`)
+      assert.equal(nextAttempt(heldAfterFailure(first, error), sent).id, first.id, `${status} ${code}`)
+      // An edit after it still starts a new request.
+      assert.notEqual(nextAttempt(heldAfterFailure(first, error), attemptFingerprint('rs-1', { text: 'edited' })).id, first.id)
     }
   })
 })

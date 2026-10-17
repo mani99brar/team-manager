@@ -8,6 +8,7 @@ import { readFileSync } from 'node:fs'
 import { test, expect, type Locator, type Page } from '@playwright/test'
 import { COMMAND_CAPTION } from '../../contracts/projects/triage.ts'
 import type { RunGithub } from '../../contracts/projects/github.ts'
+import { SENDING_HINT } from '../../src/projects/controls/model.ts'
 import { TOKEN_KEY } from '../../src/projects/controls/types.ts'
 import { githubPathname } from '../../src/projects/routes.ts'
 import { PUBLISH_BRANCHES, PUBLISH_PR, PUBLISH_PROJECT, PUBLISH_REPO, PUBLISH_RUNS, PUBLISH_WORKFLOW_ID, PUSH_FIRST } from './fixtures/ux-run-github.ts'
@@ -329,6 +330,48 @@ test(`[scenario:controls-refused] A refused control shows failed with its Blocke
   answers = []
   await page.getByTestId('dialog-cancel').click()
   await expect(dialog(page)).toHaveCount(0)
+})
+
+test(`[regression:controls-dialog-in-flight] While a Confirm is being sent nothing closes the run-control dialog: Cancel is aria-disabled with the reason, the backdrop, Escape and a forced native close leave it open; one POST (${phase})`, async ({ page }) => {
+  const requests = watch(page)
+  await open(page, RUN_STOPPED)
+  let release: () => void = () => undefined
+  const held = new Promise<void>(resolve => { release = resolve })
+  await page.route('**/api/run-controls/*/*/*/restart', async route => {
+    await held
+    await route.fallback()
+  })
+  await page.getByTestId('run-command').click()
+  await expect(dialog(page)).toBeVisible()
+  await confirmButton(page).click()
+  await expect(confirmButton(page)).toHaveAttribute('aria-busy', 'true')
+  const cancel = page.getByTestId('dialog-cancel')
+  await expect(cancel).toHaveAttribute('aria-disabled', 'true')
+  await expect(page.getByTestId('dialog-sending-hint')).toHaveText(SENDING_HINT)
+  await expect(cancel).toHaveAccessibleDescription(SENDING_HINT)
+  await cancel.click({ force: true })
+  await expect(dialog(page)).toBeVisible()
+  await page.mouse.click(4, 4)
+  await expect(dialog(page)).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(dialog(page)).toBeVisible()
+  // A close the cancel event cannot stop (a second Escape, a back gesture) opens the dialog again while it sends.
+  await dialog(page).evaluate(element => (element as unknown as { close(): void }).close())
+  await expect(dialog(page)).toBeVisible()
+  await expect(dialog(page)).toHaveJSProperty('open', true)
+  await expect(confirmButton(page)).toHaveAttribute('aria-busy', 'true')
+  release()
+  await expect(dialog(page)).toHaveCount(0)
+  await expect(page.getByTestId('controls-row')).toContainText('Restart supervisor')
+  expect(posts(requests, '/restart')).toHaveLength(1)
+  // Once nothing is sent, a forced native close closes the store's dialog too: the control opens again.
+  await page.getByTestId('run-command').click()
+  await expect(dialog(page)).toBeVisible()
+  await expect(cancel).not.toHaveAttribute('aria-disabled', 'true')
+  await dialog(page).evaluate(element => (element as unknown as { close(): void }).close())
+  await expect(dialog(page)).toHaveCount(0)
+  await page.getByTestId('run-command').click()
+  await expect(dialog(page)).toBeVisible()
 })
 
 test(`[scenario:controls-phone] At 390 px the Controls list is a bottom sheet and the dialog fits with its command wrapped, nothing scrolls sideways (${phase})`, async ({ page }, testInfo) => {

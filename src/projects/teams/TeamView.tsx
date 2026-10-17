@@ -1,16 +1,16 @@
-import { useEffect, useMemo, useRef } from 'react'
+import { useCallback, useEffect, useMemo, useRef } from 'react'
 import type { Now } from '../../../contracts/projects/triage.ts'
 import type { TeamAgent, TeamSession } from '../../../contracts/projects/teams.ts'
 import { describeApiError, type ReviewResult, type RunDetail, type RunInputs, type RunScope, type Sessions, type Teams } from '../api.ts'
 import { LoadingPanel } from '../panels.tsx'
-import type { TeamQuery, TeamQueryMode } from '../routes.ts'
+import { teamQuerySearch, type TeamQuery, type TeamQueryMode } from '../routes.ts'
 import { formatAgo, type Zone } from '../time.ts'
 import type { Resource, ResourceMeta } from '../useResource.ts'
 import { TeamContext, useRosterExtras, type TeamContextValue } from './context.ts'
 import { DrawerHost } from './DrawerHost.tsx'
 import { LaneBody, LanePanel } from './LanePanel.tsx'
-import { currentHistoryKey, markDrawerEntry, markWideSearch, wideSearchMark } from './history.ts'
-import { CONTEXT_NOTE, frozenAtOf, headSentence, idPart, laneGroups, laneWorkers, needsALook, openMode, openQuery, otherSessionsLine, otherSessionsPanel, ownedPathsOf, teamChanges, teamClockOf, viewScopeLine, viewSearchOf, wideSearch } from './model.ts'
+import { currentHistoryKey, drawerEntryKey, markDrawerEntry, markWideSearch, wideSearchMark } from './history.ts'
+import { closeMode, CONTEXT_NOTE, frozenAtOf, headSentence, idPart, laneGroups, laneWorkers, needsALook, openMode, openQuery, otherSessionsLine, otherSessionsPanel, ownedPathsOf, teamChanges, teamClockOf, viewScopeLine, viewSearchOf, wideSearch } from './model.ts'
 import { NeedsALook } from './NeedsALook.tsx'
 import { WorkingNow } from './WorkingNow.tsx'
 import './teams.css'
@@ -54,6 +54,27 @@ export type TeamViewProps = {
   resultStamp?: string
 }
 
+/**
+ * The view's query writer with the drawer entry kept in mind (3.8, final review F7.1): a `replace` that clears the agent (the
+ * view-wide search, another card's filter) while the current entry is the drawer entry the view pushed goes back instead, then
+ * writes the new selection onto the landed entry, so no drawer entry is left behind and one Back still leaves the view. Writes
+ * that arrive while that Back is on its way (the next keystrokes) are folded into the one written when it lands.
+ */
+function useDrawerAwareQuery(write: (query: TeamQuery, mode: TeamQueryMode) => void): (query: TeamQuery, mode: TeamQueryMode) => void {
+  const pending = useRef<TeamQuery | null>(null)
+  return useCallback((next: TeamQuery, mode: TeamQueryMode) => {
+    if (pending.current !== null) { pending.current = next; return }
+    if (mode !== 'replace' || next.agent !== null || closeMode(currentHistoryKey(), drawerEntryKey()) !== 'back') { write(next, mode); return }
+    pending.current = next
+    window.addEventListener('popstate', () => {
+      const landed = pending.current!
+      pending.current = null
+      if (teamQuerySearch(landed) !== window.location.search) write(landed, 'replace')
+    }, { once: true })
+    window.history.back()
+  }, [write])
+}
+
 /** The announcer speaks at most every 10 s, coalescing what remains (docs/PRD_RUN_TEAMS.md 10). */
 const ANNOUNCE_GAP_MS = 10_000
 
@@ -64,7 +85,8 @@ const ANNOUNCE_GAP_MS = 10_000
  * line, the switcher and the visually hidden `h2#run-view-title` above it. The view states of 3.9: loading, not loaded (with
  * Read again; a failed poll keeps the last read and says so), not served, and no sessions yet.
  */
-export function TeamView({ scope, detail, inputs, sessions, teams, teamsMeta, onRetryTeams, clock, live, query, onQuery, nodeHref, onNavigate, onAnnounce, onOpenFile, resultStamp }: TeamViewProps) {
+export function TeamView({ scope, detail, inputs, sessions, teams, teamsMeta, onRetryTeams, clock, live, query, onQuery: writeQuery, nodeHref, onNavigate, onAnnounce, onOpenFile, resultStamp }: TeamViewProps) {
+  const onQuery = useDrawerAwareQuery(writeQuery)
   const data = teams.status === 'ready' ? teams.data : null
   const workers = useMemo(() => laneWorkers(inputs.status === 'ready' ? inputs.data : null), [inputs])
   const opener = useRef<Element | null>(null)

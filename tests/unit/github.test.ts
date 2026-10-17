@@ -540,3 +540,23 @@ test('F6.1 the open_pr command is never copyable with <body>: the body goes in t
   // A title that merely looks like a placeholder is the operator's text, not a placeholder.
   assert.equal(filledCommand(open, { ...values, title: 'Fix <div> rendering' }).copyable, true)
 })
+
+test('swarm F6.1 filledCommand fills placeholders by position: a title holding "--body-file <body>" stays the typed title and the real --body-file names the heredoc file', () => {
+  const open = GITHUB_ACTIONS.openPr.actions.find(action => action.id === 'open_pr')!
+  const title = 'Docs: explain --body-file <body> and <reviewers>'
+  const values = { ...initialDialogValues(open), title, body: 'The body.\n' }
+  const filled = filledCommand(open, values)
+  assert.equal(filled.copyable, true, filled.waiting ?? '')
+  assert.ok(filled.text.includes(shellQuote(`--title=${title}`)), filled.text)
+  assert.match(filled.text, /--body-file "\$body_file" --by operator$/)
+  const ran = runCopied(filled.text)
+  assert.ok(ran.argv.includes(`--title=${title}`), ran.argv.join(' | '))
+  const at = ran.argv.indexOf('--body-file')
+  assert.notEqual(ran.argv[at + 1], '<body>')
+  assert.equal(ran.body, values.body)
+  // The server's `--title <title>` form (two words) is filled as the one `--title=…` word too.
+  const spaced = filledCommand({ ...open, command: open.command.replace('--title=<title>', '--title <title>') }, values)
+  assert.equal(spaced.copyable, true, spaced.waiting ?? '')
+  assert.ok(spaced.text.includes(` ${shellQuote(`--title=${title}`)} --body-file "$body_file"`), spaced.text)
+  assert.doesNotMatch(spaced.text, /--title '--title=/)
+})

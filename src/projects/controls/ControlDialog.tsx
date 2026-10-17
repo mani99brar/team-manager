@@ -2,13 +2,16 @@ import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import { postCleanPreview, postControl, postRelaunchPreview, readToken } from './client.ts'
 import {
   answerCheck, askCheck, attemptFingerprint, buildParams, currentCheck, describeFailure, dialogValid, headlineOf, heldAfterFailure, initialValues, nextAttempt, NOTE_CONFIRM, NOTE_FIELD_HELPER, NOTE_FIELD_LABEL,
-  noteOutcome, noteTitle, pinToken, paramProblem, reasonOf, relaunchConfirmable, typedConfirm, type DialogPreset, type DialogValues, type RelaunchCheck, type RequestAttempt,
+  noteOutcome, noteTitle, pinToken, SENDING_HINT, paramProblem, reasonOf, relaunchConfirmable, typedConfirm, type DialogPreset, type DialogValues, type RelaunchCheck, type RequestAttempt,
 } from './model.ts'
 import { adoptRecord, closeDialog, refreshControls, unpairBrowser, useRunControls } from './store.ts'
 import type { WaitingQuestion } from './questions.ts'
 import type { CleanPreview, Control, ControlId, ControlRecord, ControlScope, ParamSpec } from './types.ts'
 
 const FALLBACK_FOCUS = '[data-testid="controls-button"]'
+
+/** Whether the dialog's confirm is sending: Escape, Cancel and the backdrop then leave it open. */
+const isSending = (dialog: HTMLDialogElement) => dialog.querySelector('[data-testid="dialog-confirm"][aria-busy="true"]') !== null
 
 function Field({ control, spec, values, set, runId }: { control: ControlId; spec: ParamSpec; values: DialogValues; set: (change: Partial<DialogValues>) => void; runId: string }) {
   const id = useId()
@@ -87,6 +90,7 @@ function Body({ scope, id, preset, questions, onClose }: { scope: ControlScope; 
   // the node page too, where no dock shows the record afterwards.
   const note = id === 'note'
   const [finished, setFinished] = useState<ControlRecord | null>(null)
+  const sendingHint = useId()
   // Relaunch's dry run for the lane and token chosen now: a new choice asks again, and only the answer to the current one counts.
   if (relaunch && token !== null && values.lane !== '' && currentCheck(check, values.lane, token) === null) setCheck(askCheck(check, values.lane, token))
   const askedFor = useRef<RelaunchCheck | null>(null)
@@ -229,8 +233,12 @@ function Body({ scope, id, preset, questions, onClose }: { scope: ControlScope; 
         )
       })()}
       {alert !== null && <p className="ctl-error" role="alert" data-testid="dialog-alert">{alert}</p>}
+      {sending && <p className="ctl-hint" id={sendingHint} data-testid="dialog-sending-hint">{SENDING_HINT}</p>}
       <div className="ctl-actions">
-        <button type="button" className="button button-small" data-testid="dialog-cancel" onClick={onClose}>{finished === null ? 'Cancel' : 'Close'}</button>
+        <button
+          type="button" className="button button-small" data-testid="dialog-cancel" aria-disabled={sending || undefined} aria-describedby={sending ? sendingHint : undefined}
+          onClick={() => { if (!sending && !inFlight.current) onClose() }}
+        >{finished === null ? 'Cancel' : 'Close'}</button>
         {finished === null && (
           <button
             type="button" className={`button button-small ctl-primary${typedConfirm(control) ? ' is-destructive' : ''}`} data-testid="dialog-confirm"
@@ -246,6 +254,8 @@ function Body({ scope, id, preset, questions, onClose }: { scope: ControlScope; 
  * The confirmation (docs/PRD_RUN_CONTROLS.md section 6): a native modal dialog like the screenshot one, mounted while a control
  * is chosen. It shows the label, the exact redacted command, what the control does and does not do, and the inputs it needs.
  * One `request_id` per dialog, one request in flight; Escape or Cancel closes it without sending and the opener gets focus back.
+ * While a Confirm is being sent nothing closes it (final review F4.1): Cancel is aria-disabled with the reason beside it, the
+ * backdrop and Escape do nothing, and a forced native close opens it again, so the held request_id is never lost mid-send.
  */
 export function ControlDialogHost({ scope, questions }: { scope: ControlScope; questions: Record<string, WaitingQuestion> }) {
   const state = useRunControls(scope)
@@ -264,18 +274,29 @@ function DialogShell({ scope, id, preset, questions }: { scope: ControlScope; id
     if (!dialog.open) dialog.showModal()
     const onCancel = (event: Event) => {
       event.preventDefault()
-      if (dialog.querySelector('[data-testid="dialog-confirm"][aria-busy="true"]') === null) close.current()
+      if (!isSending(dialog)) close.current()
+    }
+    // A close the cancel event could not stop (a non-cancelable cancel under the close-watcher rules, a second Escape or a back
+    // gesture): while a Confirm is being sent the dialog opens again, since unmounting it would drop the held request_id and a
+    // second Confirm would act twice; otherwise the store's dialog closes with it, so the control can be opened again. The close
+    // event is queued, so one left over from a remount's own close() (React's strict effects) finds the dialog open again.
+    const onNativeClose = () => {
+      if (dialog.open || !dialog.isConnected) return
+      if (isSending(dialog)) dialog.showModal()
+      else close.current()
     }
     dialog.addEventListener('cancel', onCancel)
+    dialog.addEventListener('close', onNativeClose)
     return () => {
       dialog.removeEventListener('cancel', onCancel)
+      dialog.removeEventListener('close', onNativeClose)
       if (dialog.open) dialog.close()
       const target = opener?.isConnected ? opener : document.querySelector<HTMLElement>(FALLBACK_FOCUS)
       target?.focus()
     }
   }, [])
   return (
-    <dialog ref={ref} className="ctl-dialog" aria-labelledby="ctl-dialog-title" data-testid="control-dialog" data-control={id} onClick={event => { if (event.target === event.currentTarget) close.current() }}>
+    <dialog ref={ref} className="ctl-dialog" aria-labelledby="ctl-dialog-title" data-testid="control-dialog" data-control={id} onClick={event => { if (event.target === event.currentTarget && !isSending(event.currentTarget)) close.current() }}>
       <Body scope={scope} id={id} preset={preset} questions={questions} onClose={() => closeDialog(scope)} />
     </dialog>
   )

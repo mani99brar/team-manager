@@ -212,30 +212,43 @@ export const placeholderReason = (placeholders: string[]): string => `The comman
  * "The exact command" with the typed values filled in, as the server words the record's command (`githubDisplay`): the title as
  * one shell word `--title=…` and the reviewers as one comma-joined word. The body (open_pr) is written to a temporary file by a
  * quoted heredoc first, and `--body-file` names that file, so the pasted command opens the pull request with the real body.
- * Every value goes in through a replacer function, so a `$&`, `$'` or `$$` in it is inserted literally. `copyable` is false
- * while a field is incomplete or any `<…>` placeholder remains (pasted into bash, `<title>` is a redirection); `waiting` says
- * why, and is null when it is copyable.
+ * The command is built from parts (final review F6.1): the server's command is split into its words once, each placeholder word
+ * (`--title=<title>`, `--title <title>`, `<reviewers>`, `--body-file <body>`) is replaced at its own position, and the words are
+ * joined again. No step searches text that already holds a typed value, so a title containing `--body-file <body>` or
+ * `<reviewers>` stays exactly what was typed, and a `$&` in a value is inserted literally. `copyable` is false while a field is
+ * incomplete or any `<…>` placeholder of the server's command is left (pasted into bash, `<title>` is a redirection); `waiting`
+ * says why, and is null when it is copyable.
  */
 export function filledCommand(action: GithubAction, values: DialogValues): { text: string; copyable: boolean; hasBody: boolean; waiting: string | null } {
-  let text = action.command
-  // The placeholders the server's command holds; each one filled below is crossed off. The typed values are never scanned, so
-  // a title like "Fix <div> rendering" does not read as a placeholder.
-  const left = new Set(action.command.match(/<[^<>\s]+>/g) ?? [])
-  const fill = (placeholder: string, from: string, word: string) => {
-    if (!text.includes(from)) return
-    text = text.replace(from, () => word)
-    left.delete(placeholder)
-  }
+  // Words at even indexes, the whitespace between them at odd ones; only the server's own words are ever compared.
+  const parts = action.command.split(/(\s+)/)
+  const isWord = (index: number) => index % 2 === 0
+  const prevWord = (index: number) => (index >= 2 ? parts[index - 2] : undefined)
+  const left = new Set<string>()
+  for (const [index, part] of parts.entries()) if (isWord(index)) for (const found of part.match(/<[^<>\s]+>/g) ?? []) left.add(found)
   const problem = fieldsProblem(action, values)
-  if (spec(action, 'title') && values.title.trim() !== '') fill('<title>', '--title=<title>', shellQuote(`--title=${values.title}`))
-  const reviewers = spec(action, 'reviewers')
-  if (reviewers && reviewers.kind === 'list') {
-    const parsed = parseReviewers(values.reviewers, reviewers.max_items)
-    if (parsed.problem === null && parsed.items.length > 0) fill('<reviewers>', '<reviewers>', shellQuote(parsed.items.join(',')))
+  const out = [...parts]
+  /** Replaces word `index` (and, when `withFlag`, the flag word before it and the space between) by `word`. */
+  const put = (index: number, word: string, withFlag = false) => {
+    out[index] = word
+    if (withFlag) { out[index - 2] = ''; out[index - 1] = '' }
   }
-  const hasBody = action.command.includes('--body-file <body>')
-  if (spec(action, 'body') && hasBody && values.body.trim() !== '') {
-    fill('<body>', '--body-file <body>', '--body-file "$body_file"')
+  const title = spec(action, 'title') && values.title.trim() !== '' ? shellQuote(`--title=${values.title}`) : null
+  const reviewersSpec = spec(action, 'reviewers')
+  const parsed = reviewersSpec && reviewersSpec.kind === 'list' ? parseReviewers(values.reviewers, reviewersSpec.max_items) : null
+  const reviewers = parsed !== null && parsed.problem === null && parsed.items.length > 0 ? shellQuote(parsed.items.join(',')) : null
+  const bodyIndex = parts.findIndex((part, index) => isWord(index) && part === '<body>' && prevWord(index) === '--body-file')
+  const hasBody = bodyIndex >= 0
+  const body = spec(action, 'body') && hasBody && values.body.trim() !== ''
+  for (const [index, part] of parts.entries()) {
+    if (!isWord(index)) continue
+    if (part === '--title=<title>' && title !== null) { put(index, title); left.delete('<title>') }
+    else if (part === '<title>' && title !== null) { put(index, title, prevWord(index) === '--title'); left.delete('<title>') }
+    else if (part === '<reviewers>' && reviewers !== null) { put(index, reviewers); left.delete('<reviewers>') }
+    else if (index === bodyIndex && body) { put(index, '"$body_file"'); left.delete('<body>') }
+  }
+  let text = out.join('')
+  if (body) {
     const delimiter = heredocDelimiter(values.body)
     const content = values.body.endsWith('\n') ? values.body : `${values.body}\n`
     text = `body_file=$(mktemp) && cat > "$body_file" <<'${delimiter}'\n${content}${delimiter}\n${text}`
