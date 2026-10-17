@@ -24,6 +24,8 @@ export type TeamContextValue = {
   /** Where running durations stop once the run finished (`frozenAtOf`); null while the run is live. */
   frozenAt: number | null
   query: TeamQuery
+  /** The query's search is view-wide although it names the open agent's workflow (a drawer opened from a view-wide search). */
+  wide?: boolean
   onQuery: (query: TeamQuery, mode: TeamQueryMode) => void
   nodeHref: (nodeId: string) => string
   onNavigate: (pathname: string) => void

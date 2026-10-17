@@ -9,7 +9,8 @@ import type { Resource, ResourceMeta } from '../useResource.ts'
 import { TeamContext, useRosterExtras, type TeamContextValue } from './context.ts'
 import { DrawerHost } from './DrawerHost.tsx'
 import { LaneBody, LanePanel } from './LanePanel.tsx'
-import { CONTEXT_NOTE, frozenAtOf, headSentence, idPart, laneGroups, laneWorkers, needsALook, openQuery, otherSessionsLine, otherSessionsPanel, ownedPathsOf, teamChanges, teamClockOf, viewScopeLine } from './model.ts'
+import { currentHistoryKey, markDrawerEntry, markWideSearch, wideSearchMark } from './history.ts'
+import { CONTEXT_NOTE, frozenAtOf, headSentence, idPart, laneGroups, laneWorkers, needsALook, openMode, openQuery, otherSessionsLine, otherSessionsPanel, ownedPathsOf, teamChanges, teamClockOf, viewScopeLine, viewSearchOf, wideSearch } from './model.ts'
 import { NeedsALook } from './NeedsALook.tsx'
 import { WorkingNow } from './WorkingNow.tsx'
 import './teams.css'
@@ -68,9 +69,6 @@ export function TeamView({ scope, detail, inputs, sessions, teams, teamsMeta, on
   const workers = useMemo(() => laneWorkers(inputs.status === 'ready' ? inputs.data : null), [inputs])
   const opener = useRef<Element | null>(null)
   const { extras, onExtras } = useRosterExtras()
-  // Whether the open drawer's entry was pushed by `open` (so Close goes back); a Back that closed it clears the mark.
-  const pushed = useRef(false)
-  useEffect(() => { if (query.agent === null) pushed.current = false }, [query.agent])
 
   // The polite announcer: a workflow's status change, then a newly failed agent; nothing on the first read, at most every 10 s.
   // What arrives inside the gap is spoken when the gap ends, even when no later read comes (the run finished, polling stopped).
@@ -133,20 +131,29 @@ export function TeamView({ scope, detail, inputs, sessions, teams, teamsMeta, on
   }
 
   const teamClock = teamClockOf(data, clock)
+  // A drawer opened from a view-wide search names the agent's workflow in the URL; the search stays view-wide (3.5).
+  const wide = wideSearch(query, wideSearchMark(), currentHistoryKey())
   const context: TeamContextValue = {
-    scope, detail, teams: data, workers, sessions, clock: teamClock, live, frozenAt: frozenAtOf(data, live), query, onQuery, nodeHref, onNavigate, idPrefix: 'team',
+    scope, detail, teams: data, workers, sessions, clock: teamClock, live, frozenAt: frozenAtOf(data, live), query, wide, onQuery, nodeHref, onNavigate, idPrefix: 'team',
     currentNodeId: null, extras, onExtras, onOpenFile, resultStamp,
   }
   const { lanes, other } = laneGroups(data, workers)
+  // The view-wide search (3.5): one field over every workflow; it names no session or workflow, so each card applies it.
+  const viewQ = viewSearchOf(query, wide)
   const open = (session: TeamSession, workflow: string, agent: TeamAgent) => {
     opener.current = document.activeElement
-    pushed.current = true
-    onQuery(openQuery(query, session.key, workflow, agent.index), 'push')
+    // No drawer open: push one entry and mark it (Close goes back to the entry before). A drawer open: replace its entry, so one
+    // Close closes the drawer; the mark stays, as the entry's key does (3.8).
+    const mode = openMode(query)
+    const fromWide = viewQ.trim() !== ''
+    const before = currentHistoryKey()
+    onQuery(openQuery(query, session.key, workflow, agent.index, fromWide), mode)
+    // Marked only when the push really made a new entry (a host without pushes replaces, and Close must not go back then).
+    if (mode === 'push' && currentHistoryKey() !== before) markDrawerEntry()
+    markWideSearch(fromWide ? query.q : null)
   }
   const failedPoll = teamsMeta.failures > 0 && teamsMeta.settledAt !== null
   const look = needsALook([...lanes.flatMap(group => group.sessions), ...other], { owned: session => ownedPathsOf(session, workers), readAt: data.read_at })
-  // The view-wide search (3.5): one field over every workflow; it names no session or workflow, so each card applies it.
-  const viewQ = query.workflow === null ? query.q : ''
   const search = (q: string) => onQuery({ ...query, session: null, workflow: null, agent: null, state: null, phase: null, q }, 'replace')
   const hasTeams = data.totals.sessions_with_teams > 0
   return (
@@ -172,7 +179,7 @@ export function TeamView({ scope, detail, inputs, sessions, teams, teamsMeta, on
             <LaneBody sessions={other} attention={false} onOpen={open} />
           </section>
         ) : <p className="team-caption" data-testid="team-other-line">{otherSessionsLine(other.length)}</p>)}
-        <DrawerHost opener={opener} pushedRef={pushed} />
+        <DrawerHost opener={opener} history />
       </section>
     </TeamContext.Provider>
   )
