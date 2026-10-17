@@ -35,3 +35,17 @@ test('run summary: a team lane, a missing report, a draft PR, no review and reda
   assert.ok(!text.includes('Review'))
   assert.ok(!text.includes('spend'))
 })
+
+test('[F2.2] a lane summary is redacted whole before the first-paragraph and 600-character cut', async () => {
+  const { redactText } = await import('../../contracts/projects/redact.ts')
+  const token = `ghp_${'A'.repeat(36)}`
+  // The token straddles the 600-character cut (at 581..621): cutting first would leave `ghp_AAAA…` shorter than the pattern's minimum tail.
+  const summary = `${'x'.repeat(580)} ${token} tail`
+  const text = runSummaryMarkdown({ ...base, lanes: [{ lane: 'ui', summary, team: null }] }, redactText)
+  assert.ok(!text.includes('ghp_'), 'no token prefix survives the cut')
+  assert.match(text, /<redacted>/)
+  // A PEM block across the paragraph break is redacted before the split, so no key body leaks into the first paragraph.
+  const pem = runSummaryMarkdown({ ...base, lanes: [{ lane: 'ui', summary: 'key -----BEGIN RSA PRIVATE KEY-----\nMIIabc\n\nMIIdef\n-----END RSA PRIVATE KEY----- done', team: null }] }, redactText)
+  assert.ok(!pem.includes('MIIabc') && !pem.includes('BEGIN'), pem)
+  assert.match(pem, /key <redacted> done/)
+})

@@ -410,7 +410,8 @@ export function summaryInput(loaded: LoadedRun, workflowId: string, read: RunGit
 }
 
 export function summaryDefaults(loaded: LoadedRun, workflowId: string, read: RunGithub | null, teams: Teams | null = null, meteredUsd: number | null = null): { title: string; body: string } {
-  const input = summaryInput(loaded, workflowId, read, teams, meteredUsd)
+  // The body is the NEW pull request's: a CLOSED or MERGED earlier one (open_pr is offered then) is not this pull request.
+  const input = { ...summaryInput(loaded, workflowId, read, teams, meteredUsd), ...(hasOpenPr(read) ? {} : { pr: null }) }
   const title = runSummaryTitle(input, redactText).replace(/[\r\n]+/g, ' ').slice(0, TITLE_MAX)
   return { title, body: truncateBytes(runSummaryMarkdown(input, redactText), BODY_MAX) }
 }

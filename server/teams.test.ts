@@ -749,3 +749,13 @@ test('teams route: GET and HEAD answer 200 with a validated payload; unknown pro
     }
   })
 })
+
+test('[F3.1] a file inside a recorded worktree is served relative and never path-redacted; outside files keep <path>/basename', async () => {
+  const { servedFile } = await import('./teams.ts')
+  const base = '/work/tree'
+  assert.equal(servedFile('/work/tree/app/[slug]/page.tsx', [base]), 'app/[slug]/page.tsx')
+  assert.equal(servedFile('/work/tree/src/(group)/layout.tsx', [base]), 'src/(group)/layout.tsx')
+  assert.equal(servedFile('/work/tree/config/token=abcdefghijkl/x.ts', [base]), 'config/token=<redacted>', 'credentials are still filtered')
+  assert.equal(servedFile('/elsewhere/app/[slug]/page.tsx', [base]), '<path>/page.tsx')
+  assert.equal(servedFile('app/[slug]/page.tsx', [base]), '<path>/page.tsx')
+})
