@@ -173,7 +173,7 @@ export function GithubColumn({ project, git, github, runBranches, others, primar
                 : gitUnavailable ? null : <p className="dispatch-gsub dispatch-muted" data-testid="dispatch-gh-local-notread">{notReadText}</p>}
             {git.origin?.compare === 'compared' && (git.origin.ahead ?? 0) > 0 && (
               <p className="dispatch-gsub" data-testid="dispatch-ahead-naming">
-                Of the {git.origin.ahead} ahead, {git.ahead_naming_run} name a run; {(git.origin.ahead ?? 0) - git.ahead_naming_run} do not name a known run. Runs never push.
+                Of the {git.origin.ahead} ahead, {git.ahead_naming_run} name a run; {(git.origin.ahead ?? 0) - git.ahead_naming_run} do not name a known run. The workflow never pushes on its own; pushing is the operator's explicit, paired action.
               </p>
             )}
             {git.landings.length > 0 && (
@@ -208,7 +208,7 @@ export function GithubColumn({ project, git, github, runBranches, others, primar
         <Group title="Others, open" items={groups.others} render={(pr: Pr) => <PrRow key={pr.number} pr={pr} defaultBranch={defaultBranch} readAt={readAt} />} />
         <Group title="Merged in the last 14 days" items={groups.merged} note="among the 20 shown" render={(pr: Pr) => <PrRow key={pr.number} pr={pr} defaultBranch={defaultBranch} readAt={readAt} />} />
         {github.prs.length === 0 && <p className="dispatch-muted">No pull requests.</p>}
-        <p className="dispatch-note">Read <Time iso={github.read_at ?? new Date(readAt).toISOString()} />. Runs integrate locally and never open a pull request; related means a branch name matches.</p>
+        <p className="dispatch-note" data-testid="dispatch-gh-prs-note">Read <Time iso={github.read_at ?? new Date(readAt).toISOString()} />. Runs integrate locally: the workflow never pushes or opens a pull request on its own; pushing and pull requests are the operator's explicit, paired actions. Related means a branch name matches.</p>
       </div>
     )
     const ig = issueGroups(github.issues, { viewerLogin })

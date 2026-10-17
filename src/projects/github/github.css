@@ -1,0 +1,136 @@
+/* ---- The GitHub view (docs/PRD_RUN_TEAMS.md 4 and 8): a list page, so no shadows. The answer banner takes the situation's
+   soft fill and glyph; cards are Sheets with a 1 px rule; only pills, the banner and the visibility band carry a tone. Desk: the
+   banner across, a 720 px main column beside a 360 px side column, the commands across the bottom. Under 720 px one column in
+   the spec's order (banner, Publish, Pull request, Branch, Share, Commands, Connection), set by each card's `order`. ---- */
+
+.gh-view { display: block; padding: 12px 0 24px; min-width: 0; }
+.gh-layout { display: grid; gap: 12px; min-width: 0; }
+.gh-columns { display: grid; grid-template-columns: minmax(0, 720px) minmax(280px, 360px); gap: 12px; align-items: start; min-width: 0; }
+.gh-col { display: grid; gap: 12px; min-width: 0; align-content: start; }
+
+.gh-card { display: grid; gap: 6px; min-width: 0; padding: 12px 14px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }
+.gh-card .gh-card-h { margin: 0 0 2px; font-size: 15px; font-weight: 700; }
+.gh-card-h:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; border-radius: 4px; }
+.gh-sub-h { margin: 6px 0 0; font-size: var(--type-floor); font-weight: 700; color: var(--muted); }
+.gh-line { margin: 0; font-size: var(--type-floor); line-height: 1.45; max-width: 70ch; overflow-wrap: anywhere; }
+.gh-muted, .gh-fresh { color: var(--muted); }
+.gh-fresh { margin: 2px 0 0; font-size: var(--type-floor); line-height: 1.45; overflow-wrap: anywhere; }
+.gh-none { color: var(--muted); font-style: italic; }
+.gh-mono, .gh-sha { font-family: var(--font-mono); font-size: var(--type-floor); }
+.gh-wrap { overflow-wrap: anywhere; word-break: break-word; }
+.gh-link { color: var(--accent); overflow-wrap: anywhere; }
+.gh-link:focus-visible, .gh-banner a:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; border-radius: 4px; }
+.gh-glyph { width: 13px; height: 13px; flex: none; vertical-align: -2px; }
+
+/* The answer banner: soft fill and glyph in the situation's tone, the sentence at 14px 700. */
+.gh-banner { display: grid; gap: 4px; padding: 10px 14px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--idle-soft); min-width: 0; }
+.gh-banner.tone-ok { background: var(--ok-soft); }
+.gh-banner.tone-run { background: var(--run-soft); }
+.gh-banner.tone-warn { background: var(--warn-soft); }
+.gh-banner.tone-fail { background: var(--fail-soft); }
+.gh-banner.tone-pause { background: var(--pause-soft); }
+.gh-banner-sentence { display: flex; gap: 8px; align-items: baseline; margin: 0; font-size: 14px; font-weight: 700; line-height: 1.45; overflow-wrap: anywhere; }
+.gh-banner.tone-fail .gh-banner-sentence { color: var(--fail); }
+.gh-banner.tone-warn .gh-banner-sentence { color: var(--warn); }
+.gh-banner.tone-ok .gh-banner-sentence { color: var(--ok); }
+.gh-banner-sentence > span { flex: 1 1 0; min-width: 0; }
+.gh-banner-glyph { width: 14px; height: 14px; flex: none; align-self: center; }
+.gh-banner-next { margin: 2px 0 0; font-size: var(--type-floor); }
+.gh-banner-next a { color: var(--accent); font-weight: 600; }
+
+/* Pills: glyph and word in the tone over its soft fill (theme tokens only). */
+.gh-pill { display: inline-flex; align-items: center; gap: 5px; padding: 1px 9px; border-radius: 999px; font-size: var(--type-floor); font-weight: 600; white-space: nowrap; background: var(--idle-soft); color: var(--idle); }
+.gh-pill.tone-ok { background: var(--ok-soft); color: var(--ok); }
+.gh-pill.tone-run { background: var(--run-soft); color: var(--run); }
+.gh-pill.tone-warn { background: var(--warn-soft); color: var(--warn); }
+.gh-pill.tone-fail { background: var(--fail-soft); color: var(--fail); }
+.gh-pill.tone-pause { background: var(--pause-soft); color: var(--pause); }
+.gh-tone-text.tone-warn { color: var(--warn); }
+.gh-tone-text.tone-fail { color: var(--fail); }
+/* An untoned chip: a fact (visibility, a requested reviewer), never a state. */
+.gh-chip { display: inline-flex; align-items: center; padding: 1px 9px; border: 1px solid var(--border); border-radius: 999px; font-size: var(--type-floor); font-weight: 600; color: var(--fg); background: var(--surface-2); white-space: nowrap; }
+.gh-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; }
+.gh-repo { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+
+.gh-pr-head { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; margin: 0; font-size: 14px; font-weight: 600; }
+.gh-facts { display: grid; gap: 4px; margin: 4px 0 0; font-size: var(--type-floor); }
+.gh-facts > div { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; }
+.gh-facts dt { color: var(--muted); min-width: 7em; }
+.gh-facts dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.gh-rows { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
+.gh-row { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: center; min-height: 28px; font-size: var(--type-floor); overflow-wrap: anywhere; }
+.gh-row-name { font-family: var(--font-mono); font-size: var(--type-floor); min-width: 0; }
+
+.gh-branch-name { display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center; margin: 0; }
+.gh-commits { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+.gh-commit { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 0 8px; padding: 4px 0; border-top: 1px solid var(--border); font-size: var(--type-floor); }
+.gh-commit:first-child { border-top: 0; }
+.gh-commit .gh-sha { grid-row: span 3; }
+.gh-commit-subject { font-weight: 600; overflow-wrap: anywhere; }
+.gh-commit-author { font-family: var(--font-mono); font-size: var(--type-floor); overflow-wrap: anywhere; }
+.gh-commit-time { color: var(--muted); }
+.gh-fold-toggle { display: none; justify-self: start; }
+
+.gh-copy { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; }
+.gh-copy-button { min-height: 30px; }
+.gh-copied { font-size: var(--type-floor); color: var(--muted); }
+.gh-copied:empty { display: none; }
+.gh-share-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 4px 0 0; }
+.gh-summary { margin: 4px 0 0; padding: 8px 10px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface-2); font-family: var(--font-mono); font-size: var(--type-floor); line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 320px; overflow: auto; }
+
+/* Commands to run by hand: one command-line box per command, each with its own Copy; it scrolls inside its box. */
+.gh-command { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; min-width: 0; margin: 2px 0; }
+.gh-command-line { flex: 1 1 24em; max-height: 220px; overflow: auto; }
+.gh-after { color: var(--muted); }
+.gh-field { display: grid; gap: 4px; max-width: 520px; font-size: var(--type-floor); font-weight: 600; }
+.gh-field input { font: inherit; font-weight: 400; font-size: 14px; min-height: 36px; padding: 4px 8px; border: 1px solid var(--border-strong); border-radius: 4px; background: var(--surface); color: var(--fg); box-sizing: border-box; width: 100%; }
+.gh-field input:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+.gh-hint { font-weight: 400; color: var(--fail); }
+
+/* Publish on GitHub: one row per action, a 44 px button with what it publishes beneath, or the label and its reason. */
+.gh-action-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.gh-action { display: grid; gap: 2px; justify-items: start; }
+.gh-action-button { min-height: 44px; padding: 0 14px; border-radius: 10px; font-weight: 600; }
+.gh-action-label { font-size: 14px; font-weight: 600; color: var(--muted); }
+.gh-action-note { font-size: var(--type-floor); color: var(--muted); line-height: 1.4; overflow-wrap: anywhere; }
+.gh-record { display: grid; gap: 2px; padding: 4px 0; border-top: 1px solid var(--border); font-size: var(--type-floor); }
+.gh-record:first-child { border-top: 0; }
+.gh-record-line { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: center; }
+.gh-output-fold summary { cursor: pointer; color: var(--accent); font-size: var(--type-floor); }
+.gh-output { margin: 4px 0 0; padding: 6px 8px; border-radius: 4px; background: var(--surface-2); font-family: var(--font-mono); font-size: var(--type-floor); line-height: 1.4; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 180px; overflow: auto; }
+
+/* The dialog's parts (the shell is the controls' `ctl-dialog`): the visibility block is a Sheet with a 5 px warn band on top
+   (the Band Rule) and the question-diamond glyph, no tinted box; a private repository's block has no band. */
+.gh-visibility { display: flex; gap: 8px; align-items: flex-start; margin: 4px 0 8px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
+.gh-visibility.has-band { border-top: 5px solid var(--warn); }
+.gh-visibility p { margin: 0; font-size: 14px; line-height: 1.45; max-width: 62ch; }
+.gh-visibility .gh-glyph { width: 16px; height: 16px; margin-top: 2px; color: var(--warn); }
+.gh-dialog-part { display: grid; gap: 2px; margin: 6px 0; }
+.gh-dialog .gh-dialog-h { margin: 0; font-size: var(--type-floor); font-weight: 700; color: var(--muted); }
+.gh-preview { display: grid; gap: 4px; margin-top: 6px; max-height: 260px; overflow: auto; }
+.gh-chip-toggle { min-height: 32px; padding: 0 10px; border: 1px solid var(--border-strong); border-radius: 999px; background: var(--surface); color: var(--fg); font: inherit; font-size: var(--type-floor); cursor: pointer; }
+.gh-chip-toggle[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+.gh-chip-toggle:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.gh-outcome { display: grid; gap: 4px; justify-items: start; margin: 8px 0; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-2); }
+.gh-outcome p { margin: 0; font-size: 14px; }
+.gh-controls-group { display: grid; gap: 6px; margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border); }
+
+@media (max-width: 1100px) {
+  .gh-columns { grid-template-columns: minmax(0, 1fr) minmax(260px, 340px); }
+}
+
+/* Under 720 px: one column in the spec's order; long lists fold after five; controls reach 44 px. */
+@media (max-width: 720px) {
+  .gh-view { padding: 8px 0 20px; }
+  .gh-layout { display: flex; flex-direction: column; gap: 10px; }
+  .gh-columns, .gh-col { display: contents; }
+  .gh-line, .gh-fresh, .gh-row, .gh-commit, .gh-action-note { font-size: var(--type-floor); }
+  .gh-fold:not(.is-open) > li:nth-child(n+6) { display: none; }
+  .gh-fold-toggle { display: inline-flex; }
+  .gh-copy-button, .gh-fold-toggle, .gh-share-actions .button, .gh-chip-toggle { min-height: 44px; }
+  .gh-command-line { flex-basis: 100%; }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .gh-banner { transition: background-color 160ms ease-out; }
+}

@@ -16,6 +16,7 @@ import { RunBar } from './RunHeader.tsx'
 import { RunViews } from './RunViews.tsx'
 import { GithubView } from './github/GithubView.tsx'
 import { githubSuffix } from './github/model.ts'
+import { useGithubActionEnded } from './github/store.ts'
 import { GlyphDefs } from './signal/Glyph.tsx'
 import { teamSuffix } from './teams/model.ts'
 import { TeamView } from './teams/TeamView.tsx'
@@ -138,6 +139,8 @@ export function RunView({ scope, detail, current, selectedNodeId, selectedAttemp
   const githubPoll = usePoll(true, tab === 'github' ? GITHUB_VIEW_MS : GITHUB_OTHER_MS)
   const { state: runGithub, reload: reloadRunGithub, meta: runGithubMeta } = useResource(`run-github:${runKey}`, loadRunGithub, refreshToken, githubPoll)
   const runGithubData = runGithub.status === 'ready' ? runGithub.data : null
+  // A GitHub action record that ended (pushed, opened, marked ready, requested) reads GitHub again at once.
+  useGithubActionEnded(scope, reloadRunGithub)
   // The recorded review and the lane results are immutable per URI: read once through the run's cache (docs/PRD_VIEWER_UX.md 7).
   const reviewPath = snapshot.nodes.find(node => node.node_id === 'review')?.result_uri ?? null
   const review = useRunReview(scope, reviewPath, String(refreshToken))

@@ -171,10 +171,10 @@ describe('the switcher suffixes (docs/PRD_RUN_TEAMS.md 2)', () => {
     assert.equal(teamSuffix(withTotals({ sessions_with_teams: 0 })), null)
   })
 
-  test('GitHub (provisional until the situation table): none when not served, reading while pending, else untoned', () => {
+  test('GitHub: the section 4.2 situation\'s suffix and tone (tests/unit/github.test.ts has every row), none when not served', () => {
     assert.equal(githubSuffix(null), null)
-    assert.deepEqual(githubSuffix({ ...examples.runGithub, github: { ...examples.runGithub.github, status: 'pending' } }), { tone: null, word: 'reading', spoken: 'reading GitHub' })
-    assert.equal(githubSuffix(examples.runGithub)?.word, '#531')
+    assert.deepEqual(githubSuffix({ ...examples.runGithub, github: { ...examples.runGithub.github, status: 'pending' } }), { tone: 'idle', word: 'reading', spoken: 'reading GitHub' })
+    assert.deepEqual(githubSuffix(examples.runGithub), { tone: 'fail', word: '#531 checks failing', spoken: 'pull request 531, checks failing' })
     assert.equal(githubSuffix({ ...examples.runGithub, pr: null, branch: { ...examples.runGithub.branch, push_state: 'not_pushed' } })?.word, 'not pushed')
   })
 })

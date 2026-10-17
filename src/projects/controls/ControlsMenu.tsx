@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { canOpen, controlRows, hasSince } from './model.ts'
 import { openDialog, pairBrowser, setMenu, useRunControls } from './store.ts'
+import { GithubControlsGroup, GithubDialogHost } from '../github/GithubControls.tsx'
 import type { ControlScope } from './types.ts'
 
 function PairForm({ scope }: { scope: ControlScope }) {
@@ -121,10 +122,12 @@ export function ControlsMenu({ scope }: { scope: ControlScope }) {
           <div className="ctl-scrim" aria-hidden="true" />
           <div id="ctl-panel" ref={panel} className="ctl-panel" role="dialog" aria-label={state.paired ? 'Run controls' : 'Pair this browser'} data-testid="controls-panel">
             <button type="button" className="button button-small ctl-close" data-testid="controls-close" onClick={() => { setMenu(scope, false); root.current?.querySelector<HTMLElement>('[data-testid="controls-button"]')?.focus() }}>Close</button>
-            {state.paired ? <ControlList scope={scope} /> : <PairForm scope={scope} />}
+            {state.paired ? <><ControlList scope={scope} /><GithubControlsGroup scope={scope} /></> : <PairForm scope={scope} />}
           </div>
         </>
       )}
+      {/* The GitHub actions' one dialog (docs/PRD_RUN_TEAMS.md 4.5), opened from the GitHub group above or the GitHub view. */}
+      <GithubDialogHost scope={scope} />
     </div>
   )
 }
