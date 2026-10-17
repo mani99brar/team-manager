@@ -7,7 +7,7 @@ import { formatSpan } from '../time.ts'
 import { useTeam } from './context.ts'
 import {
   agentKey, agentMatches, agentName, agentPhase, agentRanText, agentState, BAR_WIDTH, durationFraction, FILTERS_FROM, filesCount, filterActive, idPart, longestDuration,
-  moreAgentsLine, outsideFiles, quietMinutes, roleChoices, ROW_LIMIT, rosterGroups, scopeLine, stateChoices, toolSummary, workflowName, type RosterFilter, type RosterGroup,
+  moreAgentsLine, moreStep, outsideFiles, quietMinutes, roleChoices, ROW_LIMIT, rosterGroups, scopeLine, stateChoices, toolSummary, workflowName, type RosterFilter, type RosterGroup,
 } from './model.ts'
 
 const NR = <span className="team-nr">not recorded</span>
@@ -31,9 +31,12 @@ type Props = {
  * in its label cell); a phone a list of cards, each a button, with the same accessible names.
  */
 export function Roster({ session, workflow, owned, filter, onFilter, onOpen, phone }: Props) {
-  const { clock, teams, idPrefix } = useTeam()
+  const { clock, frozenAt, teams, idPrefix, query } = useTeam()
   const [toggled, setToggled] = useState<Record<string, boolean>>({})
-  const [more, setMore] = useState<Record<string, boolean>>({})
+  // How many rows each open group shows: 20, then 20 more per "Show {m} more", or every row after "Show all {n}".
+  const [shownCount, setShownCount] = useState<Record<string, number>>({})
+  // The row whose drawer is open is marked, so the walk with Previous and Next stays visible in the roster.
+  const selected = query.agent !== null && query.session === session.key && query.workflow === workflow.run_id ? query.agent : null
   const active = filterActive(filter)
   const matching = active ? workflow.agents.filter(agent => agentMatches(agent, filter, owned)) : workflow.agents
   const groups = rosterGroups(workflow, matching)
@@ -42,7 +45,8 @@ export function Roster({ session, workflow, owned, filter, onFilter, onOpen, pho
   const base = `${idPrefix}-${idPart(session.key)}-${idPart(workflow.run_id)}`
   const groupKey = (group: RosterGroup) => String(group.index ?? 'none')
   const isOpen = (group: RosterGroup) => active || (toggled[groupKey(group)] ?? group.startsOpen)
-  const shownRows = (group: RosterGroup) => (more[groupKey(group)] ? group.agents : group.agents.slice(0, ROW_LIMIT))
+  const limitOf = (group: RosterGroup) => shownCount[groupKey(group)] ?? ROW_LIMIT
+  const shownRows = (group: RosterGroup) => group.agents.slice(0, limitOf(group))
   const name = workflowName(workflow)
   const roles = roleChoices(workflow.agents)
   // The Ran cell's inline bar (P2 item 14): duration over the workflow's longest, in the state's tone; absent when not recorded.
@@ -61,7 +65,8 @@ export function Roster({ session, workflow, owned, filter, onFilter, onOpen, pho
     const outside = outsideFiles(agent, owned).length
     const quiet = quietMinutes(agent, teams.read_at)
     const { tone, word } = agentState(agent.state)
-    const ran = agentRanText(agent, clock)
+    const ran = agentRanText(agent, clock, frozenAt)
+    const isSelected = selected === agent.index
     const label = agentName(agent, workflow.phases, clock, outside, teams.read_at)
     const key = agentKey(session.key, workflow.run_id, agent.index)
     const tool = toolSummary(agent)
@@ -69,7 +74,7 @@ export function Roster({ session, workflow, owned, filter, onFilter, onOpen, pho
     if (phone) {
       return (
         <li key={agent.index}>
-          <button type="button" className={`team-card ${toneClass(tone)}`} data-testid="team-agent-row" data-index={agent.index} data-state={agent.state} data-agent-key={key} data-team-select="" aria-label={label} onClick={() => onOpen(agent)}>
+          <button type="button" className={`team-card ${toneClass(tone)}`} data-selected={isSelected ? 'true' : undefined} data-testid="team-agent-row" data-index={agent.index} data-state={agent.state} data-agent-key={key} data-team-select="" aria-label={label} onClick={() => onOpen(agent)}>
             <span className="team-card-line">
               <Glyph tone={tone} className={`team-glyph${agent.state === 'running' ? ' breathe' : ''}`} />
               <span className="team-agent-label">{agent.label}</span> <span className="team-index">#{agent.index}</span>
@@ -88,7 +93,7 @@ export function Roster({ session, workflow, owned, filter, onFilter, onOpen, pho
       )
     }
     return (
-      <tr key={agent.index} className={`team-row ${toneClass(tone)}`} data-testid="team-agent-row" data-index={agent.index} data-state={agent.state} onClick={event => { if (!(event.target instanceof Element && event.target.closest('button'))) onOpen(agent) }}>
+      <tr key={agent.index} className={`team-row ${toneClass(tone)}`} data-selected={isSelected ? 'true' : undefined} data-testid="team-agent-row" data-index={agent.index} data-state={agent.state} onClick={event => { if (!(event.target instanceof Element && event.target.closest('button'))) onOpen(agent) }}>
         <td className="team-cell-state"><span className="team-state"><Glyph tone={tone} className={`team-glyph${agent.state === 'running' ? ' breathe' : ''}`} />{word}</span>{agent.cached && <span className="team-chip">replayed</span>}</td>
         <td className="team-cell-agent">
           <button type="button" className="team-agent-button" data-agent-key={key} data-team-select="" aria-label={label} onClick={() => onOpen(agent)}>
@@ -118,9 +123,18 @@ export function Roster({ session, workflow, owned, filter, onFilter, onOpen, pho
       </button>
     )
   }
-  const moreButton = (group: RosterGroup) => isOpen(group) && !more[groupKey(group)] && group.agents.length > ROW_LIMIT
-    ? <button type="button" className="team-more" onClick={() => setMore(previous => ({ ...previous, [groupKey(group)]: true }))}>Show {group.agents.length - ROW_LIMIT} more</button>
-    : null
+  const moreButton = (group: RosterGroup) => {
+    const shown = Math.min(limitOf(group), group.agents.length)
+    if (!isOpen(group) || shown >= group.agents.length) return null
+    const key = groupKey(group)
+    const step = moreStep(shown, group.agents.length)
+    return (
+      <span className="team-more-buttons">
+        <button type="button" className="team-more" onClick={() => setShownCount(previous => ({ ...previous, [key]: shown + step }))}>Show {step} more</button>
+        {group.agents.length - shown > step && <button type="button" className="team-more" onClick={() => setShownCount(previous => ({ ...previous, [key]: group.agents.length }))}>Show all {group.agents.length}</button>}
+      </span>
+    )
+  }
 
   return (
     <div className="team-roster-wrap">
@@ -154,7 +168,7 @@ export function Roster({ session, workflow, owned, filter, onFilter, onOpen, pho
           ))}
         </div>
       )}
-      {active && <p className="team-scope" data-testid="team-scope" role="status">{scopeLine(matching.length, workflow.agents.length)}</p>}
+      {active && <p className="team-scope" data-testid="team-scope" role="status">{scopeLine(matching.length, workflow.agents.length, workflow.agents_more > 0 ? workflow.agent_count : workflow.agents.length)}</p>}
       {groups.length === 0 && <p className="team-nr-p">{workflow.agents.length === 0 ? 'No agent is listed yet.' : 'No agent matches.'}</p>}
       {groups.length > 0 && (phone ? (
         <div className="team-cards-wrap">

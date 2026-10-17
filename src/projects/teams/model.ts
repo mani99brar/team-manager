@@ -143,20 +143,51 @@ export function spokenSpan(ms: number): string {
   return rest === 0 ? plural(hours, 'hour', 'hours') : `${plural(hours, 'hour', 'hours')} ${plural(rest, 'minute', 'minutes')}`
 }
 
-/** How long an agent ran: while running, from `started_at` to now; else its recorded `duration_ms`; null when not recorded. */
-export function agentRanMs(agent: Pick<TeamAgent, 'state' | 'started_at' | 'duration_ms'>, clock: number): number | null {
+/**
+ * The Team code's clock (docs/PRD_RUN_TEAMS.md 2 "Polling"): the page's clock, never earlier than the read it shows, so "read …
+ * ago" never runs backwards when the read is newer than the last tick.
+ */
+export function teamClockOf(teams: Pick<Teams, 'read_at'>, clock: number): number {
+  const read = instant(teams.read_at)
+  return read === null ? clock : Math.max(clock, read)
+}
+
+/**
+ * Where a running duration stops once the run finished (`live` false): the read the records come from. The records may still say
+ * running (a workflow is marked interrupted only after 15 quiet minutes), but the page does not count on past the read. Null
+ * while the run is live (durations follow the clock).
+ */
+export function frozenAtOf(teams: Pick<Teams, 'read_at'>, live: boolean): number | null {
+  return live ? null : instant(teams.read_at)
+}
+
+/** The end of a running span: the clock, or once the run finished the later of the record's last activity and the read. */
+function runningEnd(lastActivity: string | null | undefined, clock: number, frozenAt: number | null): number {
+  if (frozenAt === null) return clock
+  return Math.max(frozenAt, instant(lastActivity) ?? -Infinity)
+}
+
+/**
+ * How long an agent ran: while running, from `started_at` to now (or, once the run finished, to the read: `frozenAt`); else its
+ * recorded `duration_ms`; null when not recorded.
+ */
+export function agentRanMs(agent: Pick<TeamAgent, 'state' | 'started_at' | 'duration_ms'> & { last_activity_at?: string | null }, clock: number, frozenAt: number | null = null): number | null {
   if (agent.state === 'running') {
     const start = instant(agent.started_at)
-    if (start !== null) return Math.max(0, clock - start)
+    if (start !== null) return Math.max(0, runningEnd(agent.last_activity_at, clock, frozenAt) - start)
   }
   return agent.duration_ms
 }
 
-/** The roster's Ran cell (3.5): "for 4m10s" while running, else the span; null ("not recorded") when nothing is recorded. */
-export function agentRanText(agent: Pick<TeamAgent, 'state' | 'started_at' | 'duration_ms'>, clock: number): string | null {
-  const ms = agentRanMs(agent, clock)
+/** The suffix of a running span counted only up to the read (the run finished). */
+export const AT_LAST_READ = 'at last read'
+
+/** The roster's Ran cell (3.5): "for 4m10s" while running ("for 4m10s at last read" once the run finished), else the span; null ("not recorded") when nothing is recorded. */
+export function agentRanText(agent: Pick<TeamAgent, 'state' | 'started_at' | 'duration_ms'> & { last_activity_at?: string | null }, clock: number, frozenAt: number | null = null): string | null {
+  const ms = agentRanMs(agent, clock, frozenAt)
   if (ms === null) return null
-  return agent.state === 'running' ? `for ${formatSpan(ms)}` : formatSpan(ms)
+  if (agent.state !== 'running') return formatSpan(ms)
+  return frozenAt === null || agent.started_at === null ? `for ${formatSpan(ms)}` : `for ${formatSpan(ms)} ${AT_LAST_READ}`
 }
 
 /** The count line of a phase or a group: its non-zero counts ("1 running · 1 done"), "not started" when every count is zero. */
@@ -255,7 +286,7 @@ export function attentionRules(sessions: readonly TeamSession[], context: Attent
   if (workflows.length > 0 && workflows.every(workflow => workflow.status === 'completed')) {
     const agents = workflows.reduce((sum, workflow) => sum + workflow.agent_count, 0)
     const ran = workflowsRanMs(workflows)
-    rules.push({ text: `Done · ${plural(workflows.length, 'workflow', 'workflows')} · ${agents} agents · ran ${ran === null ? 'not recorded' : formatSpan(ran)}`, tone: 'ok' })
+    rules.push({ text: `Done · ${plural(workflows.length, 'workflow', 'workflows')} · ${plural(agents, 'agent', 'agents')} · ${ran === null ? 'workflow time not recorded' : `${formatSpan(ran)} of workflow time`}`, tone: 'ok' })
   }
   const found = sessions.some(session => session.records === 'found')
   if (!found && sessions.some(session => session.records === 'none')) {
@@ -289,7 +320,10 @@ export function latestActivity(workflows: readonly TeamWorkflow[]): string | nul
   return best
 }
 
-/** How long a set of ended workflows ran: the sum of their recorded durations; null when any is not recorded. */
+/**
+ * How long a set of ended workflows ran: the sum of their recorded durations (workflow time, not wall-clock: workflows of one lane
+ * may overlap or leave gaps, so the page says "of workflow time"); null when any is not recorded.
+ */
 function workflowsRanMs(workflows: readonly TeamWorkflow[]): number | null {
   let total = 0
   for (const workflow of workflows) {
@@ -325,17 +359,18 @@ export function recordSource(workflow: Pick<TeamWorkflow, 'record'>, readAt: str
 }
 
 /** The card's facts line (3.3) after the start time, each part a fact or "… not recorded". */
-export function workflowFacts(workflow: TeamWorkflow, clock: number): string[] {
+export function workflowFacts(workflow: TeamWorkflow, clock: number, frozenAt: number | null = null): string[] {
   let duration: string
   if (workflow.status === 'running') {
     const start = instant(workflow.started_at)
-    duration = start === null ? 'duration not recorded' : `for ${formatSpan(Math.max(0, clock - start))}`
+    const span = start === null ? null : formatSpan(Math.max(0, runningEnd(workflow.last_activity_at, clock, frozenAt) - start))
+    duration = span === null ? 'duration not recorded' : frozenAt === null ? `for ${span}` : `for ${span} ${AT_LAST_READ}`
   } else duration = workflow.duration_ms === null ? 'duration not recorded' : `ran ${formatSpan(workflow.duration_ms)}`
   const agents = workflow.agents_more > 0 ? `${workflow.agents.length} of ${workflow.agent_count} agents listed` : `${workflow.agent_count} agents`
   const tools = workflow.tool_calls === null ? 'tool calls not recorded' : `${workflow.tool_calls.toLocaleString('en-US')} tool calls`
   const context = workflow.context_tokens !== null
     ? `context ${workflow.context_tokens.toLocaleString('en-US')}`
-    : workflow.status === 'running' || workflow.record === 'live' ? 'context arrives with the final summary' : 'context not recorded'
+    : workflow.status === 'running' ? 'context arrives with the final summary' : 'context not recorded'
   const model = workflow.default_model === null ? 'default model not recorded' : `default model ${workflow.default_model}`
   return [duration, agents, tools, context, model]
 }
@@ -490,8 +525,15 @@ export function durationFraction(agent: Pick<TeamAgent, 'duration_ms'>, longest:
   return longest <= 0 ? 0 : Math.min(1, Math.max(0, agent.duration_ms / longest))
 }
 
-/** The scope line while a filter narrows the roster: "Showing 5 of 61 agents". */
-export const scopeLine = (shown: number, total: number): string => `Showing ${shown} of ${plural(total, 'agent', 'agents')}`
+/**
+ * The scope line while a filter narrows the roster: "Showing 5 of 61 agents", or, when the reader listed only part of the team
+ * (`ran` above `total`), "Showing 6 of 400 listed agents (512 ran)".
+ */
+export const scopeLine = (shown: number, total: number, ran: number = total): string =>
+  ran > total ? `Showing ${shown} of ${total} listed agents (${ran} ran)` : `Showing ${shown} of ${plural(total, 'agent', 'agents')}`
+
+/** The rows "Show {m} more" adds to an open group: the next 20, or what is left. */
+export const moreStep = (shown: number, total: number): number => Math.max(0, Math.min(ROW_LIMIT, total - shown))
 
 /** The last line when the reader listed only the first 400. */
 export const moreAgentsLine = (more: number): string => `${more} more agents are not listed; the reader lists the first 400.`
@@ -581,15 +623,39 @@ export function idleLine(teams: Teams, live: boolean, clock: number): string | n
 
 // ---- The view's head (3.1) ---------------------------------------------------------------------------------------------
 
-/** The head sentence: "3 lanes · 2 with teams · 4 workflows · 61 agents · 5 running now · read 8 s ago", or the no-teams sentence. */
+/** The agents the team ran (the sum of `agent_count`) and how many of them the reader listed (`agents.length`). */
+export function agentTotals(workflows: readonly Pick<TeamWorkflow, 'agent_count' | 'agents' | 'agents_more'>[]): { ran: number; listed: number; more: boolean } {
+  let ran = 0
+  let listed = 0
+  let more = false
+  for (const workflow of workflows) {
+    ran += workflow.agent_count
+    listed += workflow.agents.length
+    if (workflow.agents_more > 0) more = true
+  }
+  return { ran, listed, more }
+}
+
+/**
+ * The head sentence: "3 lanes · 2 with teams · 4 workflows · 61 agents · 5 running now · read 8 s ago" ("400 of 512 agents
+ * listed" when the reader listed only part of a workflow), or the no-teams sentence. Unreadable records are never told as single
+ * sessions: "Team records of 1 session could not be read", with the single-session claim kept for records `none` only.
+ */
 export function headSentence(teams: Teams, lanes: readonly LaneGroup[], clock: number): string {
-  if (teams.totals.sessions_with_teams === 0) return 'No session of this run has team records; every worker ran as a single session.'
+  if (teams.totals.sessions_with_teams === 0) {
+    const unreadable = teams.sessions.filter(session => session.records === 'unreadable').length
+    if (unreadable === 0) return 'No session of this run has team records; every worker ran as a single session.'
+    const none = teams.sessions.filter(session => session.records === 'none').length
+    const read = `Team records of ${plural(unreadable, 'session', 'sessions')} could not be read`
+    return none === 0 ? `${read}.` : `${read}; ${plural(none, 'other session', 'other sessions')} ran as a single session.`
+  }
   const withTeams = lanes.filter(lane => lane.sessions.some(session => session.records === 'found')).length
+  const totals = agentTotals(teams.sessions.flatMap(session => session.workflows))
   return [
     plural(lanes.length, 'lane', 'lanes'),
     `${withTeams} with ${withTeams === 1 ? 'a team' : 'teams'}`,
     plural(teams.totals.workflows, 'workflow', 'workflows'),
-    plural(teams.totals.agents, 'agent', 'agents'),
+    totals.more ? `${totals.listed} of ${plural(totals.ran, 'agent', 'agents')} listed` : plural(totals.ran, 'agent', 'agents'),
     `${teams.totals.running} running now`,
     `read ${formatAgo(teams.read_at, clock)}`,
   ].join(' · ')
@@ -615,13 +681,15 @@ export type StageTeam = {
   outside: number
   /** Row four while an agent runs: "{phase} · {label} · {last_tool}: {summary}" of the most recently active running agent. */
   agentLine: string | null
+  /** The finished-run caption (`workingCaption`) while the records still say an agent runs; null otherwise. */
+  caption: string | null
 }
 
 /** The sessions of a node (`session.node_id`), in payload order. */
 export const teamSessionsOf = (teams: Teams | null, nodeId: string): TeamSession[] => teams === null ? [] : teams.sessions.filter(session => session.node_id === nodeId)
 
 /** A step card's team facts (5), from the node's sessions with records `found`; null otherwise (the card renders as today). */
-export function stageTeam(teams: Teams | null, nodeId: string, workers: readonly LaneWorker[] | null): StageTeam | null {
+export function stageTeam(teams: Teams | null, nodeId: string, workers: readonly LaneWorker[] | null, live = true): StageTeam | null {
   const sessions = teamSessionsOf(teams, nodeId).filter(session => session.records === 'found')
   if (sessions.length === 0) return null
   const workflows = sessions.flatMap(session => session.workflows)
@@ -643,11 +711,20 @@ export function stageTeam(teams: Teams | null, nodeId: string, workers: readonly
     failed: agents.filter(entry => entry.agent.state === 'failed').length,
     outside: outside.size,
     agentLine,
+    caption: !live && running.length > 0 ? FINISHED_RUNNING_CAPTION : null,
   }
 }
 
-/** The card's accessible-name suffix: "team of 8 agents, 1 running, 1 failed". */
-export const stageTeamName = (team: StageTeam): string => `team of ${plural(team.agents, 'agent', 'agents')}, ${team.running} running, ${team.failed} failed`
+/** The card's accessible-name suffix: "team of 8 agents, 1 running, 1 failed" (and the finished-run caption when it applies). */
+export const stageTeamName = (team: StageTeam): string => `team of ${plural(team.agents, 'agent', 'agents')}, ${team.running} running, ${team.failed} failed${team.caption ? `. ${team.caption}` : ''}`
+
+/** What the page says when the run finished but the records still say agents run (PRD App. A: 15 quiet minutes). */
+export const FINISHED_RUNNING_CAPTION = 'The run has finished; these records still say running. The reader marks a workflow interrupted after 15 quiet minutes.'
+
+/** The caption under Working now, in the dock row and the sheet's Team section: the finished-run note while an agent still reads running; null otherwise. */
+export function workingCaption(teams: Pick<Teams, 'totals'> | null, live: boolean): string | null {
+  return teams !== null && !live && teams.totals.running > 0 ? FINISHED_RUNNING_CAPTION : null
+}
 
 /** The live dock's row (5): agents running, else an interrupted workflow while the run is live; null otherwise (the row is absent). */
 export type DockTeamLine = { kind: 'running'; text: string } | { kind: 'interrupted'; text: string }
@@ -683,10 +760,31 @@ export function sessionTeamFacts(teams: Teams | null, key: string): { kind: 'fou
 }
 
 /** The sheet's one line per workflow (5): "{a} agents · {k} running · for 12m". */
-export function sheetWorkflowLine(workflow: TeamWorkflow, clock: number): string {
+export function sheetWorkflowLine(workflow: TeamWorkflow, clock: number, frozenAt: number | null = null): string {
   const running = workflow.agents.filter(agent => agent.state === 'running').length
-  const duration = workflowFacts(workflow, clock)[0]
-  return [`${workflow.agent_count} agents`, running > 0 ? `${running} running` : null, duration].filter(Boolean).join(' · ')
+  const duration = workflowFacts(workflow, clock, frozenAt)[0]
+  return [plural(workflow.agent_count, 'agent', 'agents'), running > 0 ? `${running} running` : null, duration].filter(Boolean).join(' · ')
+}
+
+/** The step sheet lists at most this many workflow lines. */
+export const SHEET_WORKFLOWS = 3
+
+/**
+ * The workflow lines the step sheet lists (5): the running, failed and interrupted ones, then the latest, at most three, in
+ * payload order; the rest are counted in one line ("and 11 more completed · Team ›"). `word` is "completed" only when every one
+ * left out completed, else null ("and 2 more · Team ›").
+ */
+export function sheetWorkflowPick<T extends { workflow: Pick<TeamWorkflow, 'status'> }>(entries: readonly T[]): { shown: T[]; more: number; word: 'completed' | null } {
+  const urgent = entries.filter(entry => entry.workflow.status === 'running' || entry.workflow.status === 'failed' || entry.workflow.status === 'interrupted')
+  const picked = new Set<T>(urgent.slice(0, SHEET_WORKFLOWS))
+  const latest = entries.at(-1)
+  if (latest !== undefined && !picked.has(latest)) {
+    if (picked.size >= SHEET_WORKFLOWS) picked.delete([...picked].at(-1)!)
+    picked.add(latest)
+  }
+  const shown = entries.filter(entry => picked.has(entry))
+  const rest = entries.filter(entry => !picked.has(entry))
+  return { shown, more: rest.length, word: rest.every(entry => entry.workflow.status === 'completed') ? 'completed' : null }
 }
 
 /** Whether a node's sheet shows the Team section (5): a worker with any team session; another node only for records found or unreadable. */
@@ -701,12 +799,167 @@ export function sheetShowsTeam(sessions: readonly TeamSession[], worker: boolean
  * The node page's index entry for the Team section (6): with the agents' count for a node whose sessions have records, without a
  * count for a records-`none` worker, and none when the node has no team session (or the teams were not read).
  */
+/**
+ * The node page's Team entry for any state of the teams read (6): a worker keeps its section (without a count) while the teams
+ * load or after a failed read, so the section can say "Reading team records…" or offer Read again; once read it is
+ * `teamSectionEntry`; a server that does not serve teams (ready with null) shows none.
+ */
+export function teamSectionEntryFor(status: 'idle' | 'loading' | 'ready' | 'error', teams: Teams | null, nodeId: string, worker: boolean): { count: number | null } | null {
+  if (status !== 'ready') return worker ? { count: null } : null
+  if (teams === null) return null
+  return teamSectionEntry(teamSessionsOf(teams, nodeId), worker)
+}
+
 export function teamSectionEntry(sessions: readonly TeamSession[], worker: boolean): { count: number | null } | null {
   if (sessions.length === 0) return null
   const found = sessions.filter(session => session.records === 'found')
   if (found.length > 0) return { count: found.reduce((sum, session) => sum + session.workflows.reduce((total, workflow) => total + workflow.agent_count, 0), 0) }
   if (sessions.some(session => session.records === 'unreadable')) return { count: null }
   return worker ? { count: null } : null
+}
+
+// ---- Lane bodies, folded history and the drawer's walk (3.2, 3.3, 3.8) --------------------------------------------------
+
+/**
+ * The sentence of a lane panel without a team session (3.2). Pending: the lane has not started. Running or ended: the lane's
+ * session has no Claude team records (it ran on pi or OpenRouter, or recorded no session id), not "not started"; when the
+ * sessions payload has the lane's row the sentence points to it.
+ */
+export function laneNoSessionSentence(status: string, sessionRow: unknown): string {
+  if (status === 'pending') return 'No Claude session of this lane has started yet.'
+  const base = "This lane's session has no Claude team records (it ran on another transport or recorded no session id)"
+  return sessionRow === null || sessionRow === undefined ? `${base}.` : `${base}; its row is in the Sessions table.`
+}
+
+/** A session holding more workflows than this tucks its older ended ones under "Show {n} earlier workflows". */
+export const EARLIER_FROM = 4
+
+/**
+ * The workflows a session tucks under "Show {n} earlier workflows" (3.3): with more than four workflows, every completed or
+ * killed one that is not the latest, in payload order. The latest and every running, failed or interrupted workflow stay out.
+ */
+export function earlierWorkflows<T extends Pick<TeamWorkflow, 'status' | 'run_id'>>(workflows: readonly T[]): T[] {
+  if (workflows.length <= EARLIER_FROM) return []
+  return workflows.slice(0, -1).filter(workflow => workflow.status === 'completed' || workflow.status === 'killed')
+}
+
+/** "Show 10 earlier workflows". */
+export const earlierLine = (count: number): string => `Show ${count} earlier ${count === 1 ? 'workflow' : 'workflows'}`
+
+/** A folded card's one-line facts (3.3): "6 agents · ran 41m27s". */
+export function foldedFacts(workflow: TeamWorkflow, clock: number, frozenAt: number | null = null): string {
+  return `${plural(workflow.agent_count, 'agent', 'agents')} · ${workflowFacts(workflow, clock, frozenAt)[0]}`
+}
+
+/** The script log disclosure's label (3.3): "Script log and result (12 lines · result)". */
+export function logSummary(workflow: Pick<TeamWorkflow, 'logs' | 'result_preview'>): string {
+  const parts = [workflow.logs.length > 0 ? plural(workflow.logs.length, 'line', 'lines') : null, workflow.result_preview !== null ? 'result' : null].filter(Boolean)
+  return parts.length === 0 ? 'Script log and result' : `Script log and result (${parts.join(' · ')})`
+}
+
+/** The roster filters a card keeps outside the URL (the outside-paths toggle, the role chip), shared with the drawer's walk. */
+export type RosterExtras = { outside: boolean; role: string | null }
+export const NO_EXTRAS: RosterExtras = { outside: false, role: null }
+/** The key of a card's extras: its session and workflow. */
+export const extrasKey = (sessionKey: string, runId: string): string => `${sessionKey}|${runId}`
+
+/**
+ * The query an open lands on (3.8): the target's session, workflow and agent; the state, phase and search carry over only when
+ * the query already named that workflow or named none (a view-wide search), else they reset so the opened agent is in the roster.
+ */
+export function openQuery<Q extends { session: string | null; workflow: string | null; agent: number | null; state: AgentState | null; phase: number | null; q: string }>(query: Q, sessionKey: string, runId: string, index: number): Q {
+  const same = query.workflow === null || (query.workflow === runId && query.session === sessionKey)
+  return { ...query, session: sessionKey, workflow: runId, agent: index, ...(same ? {} : { state: null, phase: null, q: '' }) }
+}
+
+/**
+ * The query a card's filter change writes (3.5): the card's session and workflow with the new state, phase and search; an open
+ * drawer of another workflow closes rather than jumping to the same index here.
+ */
+export function cardFilterQuery<Q extends { session: string | null; workflow: string | null; agent: number | null; state: AgentState | null; phase: number | null; q: string }>(query: Q, sessionKey: string, runId: string, filter: Pick<RosterFilter, 'state' | 'phase' | 'q'>): Q {
+  const other = query.session !== sessionKey || query.workflow !== runId
+  return { ...query, session: sessionKey, workflow: runId, state: filter.state, phase: filter.phase, q: filter.q, ...(other ? { agent: null } : {}) }
+}
+
+// ---- The view-wide search (3.5) ----------------------------------------------------------------------------------------
+
+/** Whether a workflow lists an agent matching a view-wide search. */
+export function workflowMatches(workflow: Pick<TeamWorkflow, 'agents'>, q: string): boolean {
+  if (q.trim() === '') return false
+  const filter = { ...NO_FILTER, q }
+  return workflow.agents.some(agent => agentMatches(agent, filter, null))
+}
+
+/**
+ * The view-wide search's scope line: "Showing 3 of 61 agents in 2 workflows", or "Showing 3 of 400 listed agents (512 ran) in 1
+ * workflow" when the reader listed only part of a team.
+ */
+export function viewScopeLine(teams: Teams, q: string): string {
+  const filter = { ...NO_FILTER, q }
+  const workflows = teams.sessions.flatMap(session => session.workflows)
+  let shown = 0
+  let holding = 0
+  for (const workflow of workflows) {
+    const matches = workflow.agents.filter(agent => agentMatches(agent, filter, null)).length
+    shown += matches
+    if (matches > 0) holding += 1
+  }
+  const totals = agentTotals(workflows)
+  const where = `in ${plural(holding, 'workflow', 'workflows')}`
+  return totals.more
+    ? `Showing ${shown} of ${totals.listed} listed agents (${totals.ran} ran) ${where}`
+    : `Showing ${shown} of ${plural(totals.listed, 'agent', 'agents')} ${where}`
+}
+
+// ---- Needs a look (3.1) ------------------------------------------------------------------------------------------------
+
+export type LookRow = {
+  key: string
+  kind: 'failed' | 'interrupted' | 'outside' | 'quiet' | 'unreadable'
+  tone: Tone | null
+  text: string
+  session: TeamSession
+  workflow: TeamWorkflow | null
+  agent: TeamAgent | null
+}
+
+/**
+ * The run-wide "Needs a look" rows, in this order: failed agents, interrupted workflows, agents that edited files outside their
+ * lane's paths, quiet agents (words only, no tone) and sessions whose team records could not be read. Sessions are read in the
+ * order given (the lanes, then the other sessions); empty when nothing needs a look (the panel is absent).
+ */
+export function needsALook(sessions: readonly TeamSession[], context: Pick<AttentionContext, 'owned' | 'readAt'>): LookRow[] {
+  const failed: LookRow[] = []
+  const interrupted: LookRow[] = []
+  const outside: LookRow[] = []
+  const quiet: LookRow[] = []
+  const unreadable: LookRow[] = []
+  for (const session of sessions) {
+    const where = session.lane ?? session.label
+    if (session.records === 'unreadable') {
+      unreadable.push({ key: `unreadable|${session.key}`, kind: 'unreadable', tone: 'idle', text: `Team records of ${session.label} could not be read: ${session.reason ?? 'no reason recorded'}.`, session, workflow: null, agent: null })
+    }
+    const owned = context.owned(session)
+    for (const workflow of session.workflows) {
+      const name = workflowName(workflow)
+      if (workflow.status === 'interrupted') {
+        const phase = lastActivePhase(workflow)
+        interrupted.push({ key: `interrupted|${session.key}|${workflow.run_id}`, kind: 'interrupted', tone: 'pause', text: `${name} was interrupted${phase ? ` in ${phase}` : ''}; no summary was written · ${where}`, session, workflow, agent: null })
+      }
+      for (const agent of workflow.agents) {
+        const id = `${session.key}|${workflow.run_id}|${agent.index}`
+        if (agent.state === 'failed') {
+          const phase = phaseTitleOf(agent, workflow.phases)
+          failed.push({ key: `failed|${id}`, kind: 'failed', tone: 'fail', text: `${agent.label} #${agent.index} failed${phase ? ` in ${phase}` : ''} · ${name} · ${where}`, session, workflow, agent })
+        }
+        const files = outsideFiles(agent, owned).length
+        if (files > 0) outside.push({ key: `outside|${id}`, kind: 'outside', tone: 'fail', text: `${agent.label} #${agent.index} edited ${plural(files, 'file', 'files')} outside lane ${where}'s paths · ${name}`, session, workflow, agent })
+        const minutes = quietMinutes(agent, context.readAt)
+        if (minutes !== null) quiet.push({ key: `quiet|${id}`, kind: 'quiet', tone: null, text: `${agent.label} #${agent.index} quiet ${minutes}m · ${name} · ${where}`, session, workflow, agent })
+      }
+    }
+  }
+  return [...failed, ...interrupted, ...outside, ...quiet, ...unreadable]
 }
 
 // ---- The announcer (10) ------------------------------------------------------------------------------------------------

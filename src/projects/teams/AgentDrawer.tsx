@@ -1,18 +1,34 @@
-import { useEffect, useRef, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, type ReactNode } from 'react'
+import { attemptResultUris } from '../../../contracts/projects/triage.ts'
 import type { TeamAgent, TeamSession, TeamWorkflow } from '../../../contracts/projects/teams.ts'
 import { AppLink } from '../panels.tsx'
 import { Glyph } from '../signal/Glyph.tsx'
 import { Time } from '../Time.tsx'
 import { formatSpan } from '../time.ts'
 import { toneClass } from '../tone.ts'
+import { useRunResults } from '../useRunData.ts'
 import { CopyButton } from './CopyButton.tsx'
 import { useTeam } from './context.ts'
-import { agentPhase, agentRanMs, agentState, isOutside, noResultText, outsideCopy, quietMinutes } from './model.ts'
+import { agentPhase, agentRanMs, agentState, AT_LAST_READ, isComparablePath, isOutside, noResultText, outsideCopy, quietMinutes } from './model.ts'
 
 const NR = <span className="team-nr">not recorded</span>
 
 function Tile({ label, children }: { label: string; children: ReactNode }) {
   return <div className="team-tile"><dt>{label}</dt><dd>{children}</dd></div>
+}
+
+/**
+ * The files a lane's worker handed over (its verification's first attempt, the snapshot frozen at handoff), read through the run
+ * results' cache; null while not read, for a session that is not a worker's, or where the page cannot open a file.
+ */
+function useWorkerFiles(session: TeamSession, enabled: boolean): ReadonlySet<string> | null {
+  const { scope, detail, resultStamp } = useTeam()
+  const verifyId = enabled && session.lane !== null && detail.definition.nodes.some(node => node.node_id === `verify_${session.lane}`) ? `verify_${session.lane}` : null
+  const uri = verifyId === null ? null : attemptResultUris(detail, verifyId).find(item => item.attempt === 1)?.uri ?? null
+  const uris = useMemo(() => (uri === null ? [] : [uri]), [uri])
+  const { results } = useRunResults(scope, uris, resultStamp ?? '')
+  const result = uri === null ? null : results.get(uri) ?? null
+  return useMemo(() => (result === null ? null : new Set(result.changed_files)), [result])
 }
 
 type Props = {
@@ -36,7 +52,7 @@ type Props = {
  * returns the focus to the row that opened it; Previous and Next walk the filtered roster.
  */
 export function AgentDrawer({ session, workflow, agent, owned, previous, next, onWalk, onClose }: Props) {
-  const { clock, teams, nodeHref, onNavigate, teamViewHref, idPrefix } = useTeam()
+  const { clock, frozenAt, teams, detail, nodeHref, onNavigate, teamViewHref, idPrefix, currentNodeId, onOpenFile } = useTeam()
   const close = useRef<HTMLButtonElement>(null)
   const body = useRef<HTMLDivElement>(null)
   const key = `${session.key}|${workflow.run_id}|${agent.index}`
@@ -45,7 +61,12 @@ export function AgentDrawer({ session, workflow, agent, owned, previous, next, o
     if (body.current) body.current.scrollTop = 0
   }, [key])
   const { tone, word } = agentState(agent.state)
-  const ran = agentRanMs(agent, clock)
+  const ran = agentRanMs(agent, clock, frozenAt)
+  // An edited path links to the worker page's file (the run page's openFile) when the agent worked in the lead's worktree of a
+  // worker and the worker handed that path over; redacted paths and an isolated agent's own worktree stay plain text.
+  const workerNode = session.node_id === null ? null : detail.definition.nodes.find(node => node.node_id === session.node_id && node.kind === 'worker') ?? null
+  const linkable = onOpenFile !== undefined && workerNode !== null && !agent.isolated
+  const handedOver = useWorkerFiles(session, linkable)
   const quiet = quietMinutes(agent, teams.read_at)
   const phase = agentPhase(agent, workflow.phases)
   const titleId = `${idPrefix}-agent-title`
@@ -84,7 +105,7 @@ export function AgentDrawer({ session, workflow, agent, owned, previous, next, o
         <dl className="team-tiles">
           <Tile label="Started">{agent.started_at ? <Time iso={agent.started_at} seconds /> : NR}</Tile>
           <Tile label="Last activity">{agent.last_activity_at ? <><Time iso={agent.last_activity_at} seconds />{quiet !== null && <span className="team-quiet" data-testid="team-quiet"> · quiet {quiet}m</span>}</> : NR}</Tile>
-          <Tile label="Ran">{ran === null ? NR : `${agent.state === 'running' ? 'for ' : ''}${formatSpan(ran)}`}</Tile>
+          <Tile label="Ran">{ran === null ? NR : agent.state === 'running' ? `for ${formatSpan(ran)}${frozenAt !== null && agent.started_at !== null ? ` ${AT_LAST_READ}` : ''}` : formatSpan(ran)}</Tile>
           <Tile label="Tool calls">{agent.tool_calls ?? NR}</Tile>
           <Tile label="Context">{agent.context_tokens === null ? NR : `${agent.context_tokens.toLocaleString('en-US')} tokens · last context size, not spend`}</Tile>
           <Tile label="Worktree">{agent.isolated ? 'own worktree' : "the lead's worktree"}</Tile>
@@ -108,7 +129,9 @@ export function AgentDrawer({ session, workflow, agent, owned, previous, next, o
           {files.length === 0 ? <p className="team-nr-p">No Edit or Write call is recorded.</p> : (
             <ul className="team-files" data-testid="team-agent-files">
               {files.map(path => (
-                <li key={path}><code className="team-mono">{path}</code>{outside.includes(path) && <span className="team-outside-chip" data-testid="team-outside-chip"><Glyph tone="fail" className="team-glyph" />outside</span>}</li>
+                <li key={path}>{linkable && workerNode !== null && handedOver !== null && isComparablePath(path) && handedOver.has(path)
+                  ? <button type="button" className="team-link-button team-file-link" data-testid="team-agent-file-link" aria-label={`Open ${path} on the worker page`} onClick={() => onOpenFile!(workerNode.node_id, path)}><code className="team-mono">{path}</code></button>
+                  : <code className="team-mono">{path}</code>}{outside.includes(path) && <span className="team-outside-chip" data-testid="team-outside-chip"><Glyph tone="fail" className="team-glyph" />outside</span>}</li>
               ))}
               {agent.files_edited_more > 0 && <li className="team-dim">and {agent.files_edited_more} more not listed</li>}
             </ul>
@@ -130,7 +153,7 @@ export function AgentDrawer({ session, workflow, agent, owned, previous, next, o
         <button type="button" className="team-button" disabled={previous === null} onClick={() => previous && onWalk(previous)}>Previous agent</button>
         <button type="button" className="team-button" disabled={next === null} onClick={() => next && onWalk(next)}>Next agent</button>
         {teamViewHref && <AppLink href={teamViewHref({ session: session.key, workflow: workflow.run_id, agent: agent.index })} onNavigate={onNavigate} className="team-link" data-testid="team-open-in-view">Open in Team view ›</AppLink>}
-        {session.node_id !== null && <AppLink href={nodeHref(session.node_id)} onNavigate={onNavigate} className="team-link">Open worker page ›</AppLink>}
+        {session.node_id !== null && session.node_id !== currentNodeId && <AppLink href={nodeHref(session.node_id)} onNavigate={onNavigate} className="team-link">Open worker page ›</AppLink>}
       </div>
     </aside>
   )

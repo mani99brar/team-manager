@@ -6,10 +6,10 @@ import { EMPTY_TEAM_QUERY, type TeamQuery } from '../routes.ts'
 import { Glyph } from '../signal/Glyph.tsx'
 import { toneClass, workflowTone } from '../tone.ts'
 import type { Resource } from '../useResource.ts'
-import { leadRunning, TeamContext, type TeamContextValue } from './context.ts'
+import { leadRunning, TeamContext, useRosterExtras, type TeamContextValue } from './context.ts'
 import { DrawerHost } from './DrawerHost.tsx'
 import { AttentionLine, LaneBody, LeadCommands, NoteButton } from './LanePanel.tsx'
-import { agentPhase, attentionLine, laneWorkers, ownedPathsOf, phaseSegments, sessionSentence, sheetWorkflowLine, toolSummary, workflowName } from './model.ts'
+import { agentPhase, attentionLine, frozenAtOf, laneWorkers, ownedPathsOf, phaseSegments, sessionSentence, sheetWorkflowLine, sheetWorkflowPick, teamClockOf, toolSummary, workflowName, workingCaption } from './model.ts'
 import './teams.css'
 
 type Shared = {
@@ -23,6 +23,10 @@ type Shared = {
   onNavigate: (pathname: string) => void
   /** The Team view's link with a selection. */
   teamHref: (query: Partial<TeamQuery>) => string
+  /** Opens a worker page on one of its changed files (the drawer's edited files link there). */
+  onOpenFile?: (nodeId: string, path: string) => void
+  /** The run results' cache stamp, for the drawer's read of a worker's frozen file list. */
+  resultStamp?: string
 }
 
 const SHEET_AGENTS = 3
@@ -31,14 +35,19 @@ const SHEET_AGENTS = 3
  * The step sheet's Team section (docs/PRD_RUN_TEAMS.md 5), before Events: the lane's attention line, one line per workflow
  * (name, pill, "{a} agents · {k} running · for 12m"), the latest workflow's phases as wrapping chips, up to three running agents
  * (label · phase · last tool), Open in Team view › and, when offered and paired, Send a note to the lead, then the Lead commands
- * disclosure (7: each lead's resume command with Copy and Show command). A records-`none`
- * worker shows the rule 9 or 10 sentence, an unreadable session its reason.
+ * disclosure (7: each lead's resume command with Copy and Show command). The workflow lines are capped at the running, failed
+ * and interrupted ones plus the latest (three at most), then one "and {n} more completed · Team ›" line, so the phases, agents
+ * and links stay in view. A records-`none` worker shows the rule 9 or 10 sentence, an unreadable session its reason.
  */
 export function SheetTeamSection({ teams, sessionsOfNode, shared }: { teams: Teams; sessionsOfNode: readonly TeamSession[]; shared: Shared }) {
   const workers = laneWorkers(shared.inputs)
   const context = { sessions: shared.sessions, detail: shared.detail }
-  const line = attentionLine(sessionsOfNode, { owned: session => ownedPathsOf(session, workers), running: session => leadRunning(context, session), readAt: teams.read_at, clock: shared.clock })
+  const clock = teamClockOf(teams, shared.clock)
+  const frozenAt = frozenAtOf(teams, shared.live)
+  const line = attentionLine(sessionsOfNode, { owned: session => ownedPathsOf(session, workers), running: session => leadRunning(context, session), readAt: teams.read_at, clock })
   const workflows = sessionsOfNode.flatMap(session => session.workflows.map(workflow => ({ session, workflow })))
+  const picked = sheetWorkflowPick(workflows)
+  const caption = workingCaption(teams, shared.live)
   const latest = workflows.at(-1)?.workflow ?? null
   const running = workflows.flatMap(({ workflow }) => workflow.agents.filter(agent => agent.state === 'running').map(agent => ({ agent, workflow }))).slice(0, SHEET_AGENTS)
   const first = sessionsOfNode[0]
@@ -49,18 +58,24 @@ export function SheetTeamSection({ teams, sessionsOfNode, shared }: { teams: Tea
       <h4 id="run-team-title">Team</h4>
       {found && line && <AttentionLine line={line} />}
       {!found && sessionsOfNode.map(session => <p key={session.key} className="team-session-empty" data-testid="team-session-empty">{sessionSentence(session, leadRunning(context, session))}</p>)}
+      {caption !== null && running.length > 0 && <p className="team-caption" data-testid="team-finished-caption">{caption}</p>}
       {workflows.length > 0 && (
         <ul className="team-sheet-workflows">
-          {workflows.map(({ session, workflow }) => {
+          {picked.shown.map(({ session, workflow }) => {
             const { tone, word } = workflowTone(workflow.status)
             return (
               <li key={`${session.key}|${workflow.run_id}`} data-workflow={workflow.run_id}>
                 <b className={workflow.name === null ? 'team-mono' : undefined}>{workflowName(workflow)}</b>
                 <span className={`team-pill ${toneClass(tone)}`}><Glyph tone={tone} className="team-glyph" />{word}</span>
-                <span className="team-dim">{sheetWorkflowLine(workflow, shared.clock)}</span>
+                <span className="team-dim team-sheet-facts">{sheetWorkflowLine(workflow, clock, frozenAt)}</span>
               </li>
             )
           })}
+          {picked.more > 0 && first && (
+            <li className="team-sheet-more" data-testid="sheet-team-more">
+              <AppLink href={shared.teamHref({ session: first.key })} onNavigate={shared.onNavigate} className="team-link">and {picked.more} more{picked.word ? ` ${picked.word}` : ''} · Team ›</AppLink>
+            </li>
+          )}
         </ul>
       )}
       {latest !== null && latest.phases.length > 0 && (
@@ -85,8 +100,9 @@ export function SheetTeamSection({ teams, sessionsOfNode, shared }: { teams: Tea
 }
 
 /**
- * The node page's Team section body (docs/PRD_RUN_TEAMS.md 6): the lane panel body scoped to this node's sessions (the attention
- * line, the workflow cards, the phase strips, the roster with its filters and folding) and the Lead commands; the agent drawer
+ * The node page's Team section body (docs/PRD_RUN_TEAMS.md 6): the lane panel body scoped to this node's sessions: the attention
+ * line, then the actions (Open in Team view ›, Send a note to the lead, Lead commands), then the workflow cards, the phase strips
+ * and the roster with its filters and folding; the agent drawer
  * opens as on the Team view, its selection local to the page, and its Open in Team view › carries the selection to `/team`.
  * The teams are the run page's resource; this section fetches nothing.
  */
@@ -94,6 +110,7 @@ export function NodeTeamSection({ teams, onRetry, nodeId, shared }: { teams: Res
   const [query, setQuery] = useState<TeamQuery>(EMPTY_TEAM_QUERY)
   const opener = useRef<Element | null>(null)
   const workers = useMemo(() => laneWorkers(shared.inputs), [shared.inputs])
+  const { extras, onExtras } = useRosterExtras()
   if (teams.status === 'idle' || teams.status === 'loading') return <LoadingPanel>Reading team records…</LoadingPanel>
   if (teams.status === 'error') {
     return (
@@ -107,22 +124,26 @@ export function NodeTeamSection({ teams, onRetry, nodeId, shared }: { teams: Res
   if (data === null) return null
   const sessions = data.sessions.filter(session => session.node_id === nodeId)
   const context: TeamContextValue = {
-    scope: shared.scope, detail: shared.detail, teams: data, workers, sessions: shared.sessions, clock: shared.clock, live: shared.live,
-    query, onQuery: next => setQuery(next), nodeHref: shared.nodeHref, onNavigate: shared.onNavigate, teamViewHref: shared.teamHref, idPrefix: `node-${nodeId}`,
+    scope: shared.scope, detail: shared.detail, teams: data, workers, sessions: shared.sessions, clock: teamClockOf(data, shared.clock), live: shared.live,
+    frozenAt: frozenAtOf(data, shared.live), query, onQuery: next => setQuery(next), nodeHref: shared.nodeHref, onNavigate: shared.onNavigate,
+    teamViewHref: shared.teamHref, idPrefix: `node-${nodeId}`, currentNodeId: nodeId, extras, onExtras, onOpenFile: shared.onOpenFile, resultStamp: shared.resultStamp,
   }
   const open = (session: TeamSession, workflow: string, agent: TeamAgent) => {
     opener.current = document.activeElement
     setQuery(previous => ({ ...previous, session: session.key, workflow, agent: agent.index }))
   }
+  // The section's actions come right after the attention line, before the workflow cards, so they never sit under a long roster.
+  const actions = (
+    <div className="team-sheet-links team-node-actions" data-testid="team-node-actions">
+      {sessions[0] && <AppLink href={shared.teamHref({ session: sessions[0].key })} onNavigate={shared.onNavigate} className="team-link" data-testid="node-team-link">Open in Team view ›</AppLink>}
+      {sessions[0]?.role === 'worker' && sessions[0].lane !== null && <NoteButton scope={shared.scope} lane={sessions[0].lane} />}
+      <LeadCommands sessions={sessions} rows={shared.sessions} />
+    </div>
+  )
   return (
     <TeamContext.Provider value={context}>
-      <div className="team-node team-tones" data-testid="team-node-body">
-        <LaneBody sessions={sessions} attention onOpen={open} />
-        <div className="team-sheet-links">
-          {sessions[0]?.role === 'worker' && sessions[0].lane !== null && <NoteButton scope={shared.scope} lane={sessions[0].lane} />}
-          <LeadCommands sessions={sessions} rows={shared.sessions} />
-        </div>
-        {sessions[0] && <AppLink href={shared.teamHref({ session: sessions[0].key })} onNavigate={shared.onNavigate} className="team-link" data-testid="node-team-link">Open in Team view ›</AppLink>}
+      <div className={`team-node team-tones${query.agent !== null ? ' team-drawer-open' : ''}`} data-testid="team-node-body">
+        <LaneBody sessions={sessions} attention onOpen={open} actions={actions} />
         <DrawerHost opener={opener} />
       </div>
     </TeamContext.Provider>

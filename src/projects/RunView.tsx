@@ -91,7 +91,10 @@ function emptyTimeline(detail: RunDetail): Timeline {
 export function RunView({ scope, detail, current, selectedNodeId, selectedAttempt = null, tab, teamQuery, onTeamQuery = NO_TEAM_QUERY, refreshToken, pollToken = 0, freshness, onNavigate, onAnnounce }: Props) {
   const { summary, definition, snapshot } = detail
   const live = summary.status !== 'succeeded' && summary.status !== 'cancelled'
-  const clock = useNow(live)
+  // Whether a team workflow still runs (the teams poll goes on after the run finished while one does): the clock ticks with it,
+  // so the Team code's "read … ago" and durations never freeze on a finished run that still has a running workflow.
+  const [teamsWorkflowRunning, setTeamsWorkflowRunning] = useState(false)
+  const clock = useNow(live || teamsWorkflowRunning)
   const [zone] = useTimeZone()
   const runStart = useTimeReference()
   const snapshotById = new Map(snapshot.nodes.map(node => [node.node_id, node]))
@@ -129,7 +132,6 @@ export function RunView({ scope, detail, current, selectedNodeId, selectedAttemp
   // the Team view, a worker's page or a worker's step sheet is open, every 15 s otherwise, and no more once the run finished and no team workflow
   // runs. A 404 NOT_FOUND (a server that predates teams) loads as null, "not served".
   const loadTeams = useCallback((signal: AbortSignal) => orNotRecorded(fetchTeams(scope, signal), NOT_RECORDED.teams), [scope])
-  const [teamsWorkflowRunning, setTeamsWorkflowRunning] = useState(false)
   // The step whose sheet the Run view has open (SignalRun tells it): a worker's sheet shows its Team section, so it polls fast too.
   const [sheetNode, setSheetNode] = useState<string | null>(null)
   const sheetWorker = tab === 'run' && selectedNodeId === null && sheetNode !== null && definition.nodes.some(node => node.node_id === sheetNode && node.kind === 'worker')
@@ -319,6 +321,8 @@ export function RunView({ scope, detail, current, selectedNodeId, selectedAttemp
 
   return (
     <div className="run-view" data-testid="run-view" data-run-id={summary.run_id} data-run-status={summary.status}>
+      {/* The state glyphs' symbols, once for every view and node page (each Glyph is a <use> of them). */}
+      <GlyphDefs />
       {selectedNodeId === null && tab === 'run' && (
         <div className="sb-run">
           {identity}
@@ -358,7 +362,6 @@ export function RunView({ scope, detail, current, selectedNodeId, selectedAttemp
       {selectedNodeId === null && tab === 'team' && (
         <>
           {identity}
-          <GlyphDefs />
           <div className="run-views">
             {viewTitle('Team')}
             <TeamView
@@ -377,6 +380,8 @@ export function RunView({ scope, detail, current, selectedNodeId, selectedAttemp
               nodeHref={nodeHref}
               onNavigate={onNavigate}
               onAnnounce={onAnnounce}
+              onOpenFile={openFile}
+              resultStamp={String(refreshToken)}
             />
           </div>
         </>
@@ -385,7 +390,6 @@ export function RunView({ scope, detail, current, selectedNodeId, selectedAttemp
       {selectedNodeId === null && tab === 'github' && (
         <>
           {identity}
-          <GlyphDefs />
           <div className="run-views">
             {viewTitle('GitHub')}
             <GithubView
@@ -411,7 +415,6 @@ export function RunView({ scope, detail, current, selectedNodeId, selectedAttemp
       {selectedNodeId === null && tab === 'assignment' && (
         <>
           {identity}
-          <GlyphDefs />
           <div className="run-views">
             {viewTitle('Assignment')}
             <AssignmentPanel scope={scope} inputs={inputs} review={reviewData} onRetry={reloadInputs} onNavigate={onNavigate} panelId="run-panel-assignment" labelledBy="run-view-title" />

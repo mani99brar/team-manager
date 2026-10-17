@@ -2,7 +2,7 @@ import { useState } from 'react'
 import type { TeamAgent, TeamSession } from '../../../contracts/projects/teams.ts'
 import { Glyph } from '../signal/Glyph.tsx'
 import { useTeam, usePhone } from './context.ts'
-import { agentKey, agentName, agentPhase, agentRanText, idleLine, outsideFiles, ownedPathsOf, quietMinutes, toolSummary, workingFoldLine, workingRows, workingTitle } from './model.ts'
+import { agentKey, agentName, agentPhase, agentRanText, idleLine, outsideFiles, ownedPathsOf, quietMinutes, toolSummary, workingCaption, workingFoldLine, workingRows, workingTitle } from './model.ts'
 
 const DESK_ROWS = 6
 const PHONE_ROWS = 3
@@ -11,10 +11,11 @@ const PHONE_ROWS = 3
  * Working now (docs/PRD_RUN_TEAMS.md 3.6): every running agent across every lane, by `started_at` then `index` so the order
  * holds between polls; six rows on a desk, three on a phone, then "Show all {n} running"; each row opens the agent drawer. On a
  * phone a panel with more than three rows folds to its head line. With nothing running it is one line (the run live, or
- * finished), and it is absent when no session has team records.
+ * finished), and it is absent when no session has team records. On a finished run whose records still say an agent runs, the
+ * rows stay (5 keeps them while any agent reads running) and a caption under the title says the records lag the run.
  */
 export function WorkingNow({ onOpen }: { onOpen: (session: TeamSession, workflow: string, agent: TeamAgent) => void }) {
-  const { teams, clock, live, workers, idPrefix } = useTeam()
+  const { teams, clock, frozenAt, live, workers, idPrefix } = useTeam()
   const phone = usePhone()
   const [all, setAll] = useState(false)
   const [unfolded, setUnfolded] = useState(false)
@@ -28,9 +29,12 @@ export function WorkingNow({ onOpen }: { onOpen: (session: TeamSession, workflow
   const folded = phone && rows.length > PHONE_ROWS && !unfolded
   const shown = all ? rows : rows.slice(0, limit)
   const titleId = `${idPrefix}-working-title`
+  // A finished run whose records still say an agent runs says so under the title (the reader marks it interrupted later).
+  const caption = workingCaption(teams, live)
   return (
     <section className="team-working" data-testid="team-working-now" data-state="running" aria-labelledby={titleId}>
       <h3 id={titleId} className="team-working-title"><Glyph tone="run" className="team-glyph breathe" />{workingTitle(rows)}</h3>
+      {caption !== null && <p className="team-caption" data-testid="team-finished-caption">{caption}</p>}
       {folded ? (
         <button type="button" className="team-button team-fold" aria-expanded={false} onClick={() => setUnfolded(true)}>{workingFoldLine(teams)}</button>
       ) : (
@@ -39,7 +43,7 @@ export function WorkingNow({ onOpen }: { onOpen: (session: TeamSession, workflow
             {shown.map(({ session, workflow, agent }) => {
               const quiet = quietMinutes(agent, teams.read_at)
               const tool = toolSummary(agent)
-              const ran = agentRanText(agent, clock)
+              const ran = agentRanText(agent, clock, frozenAt)
               const outside = outsideFiles(agent, ownedPathsOf(session, workers)).length
               return (
                 <li key={agentKey(session.key, workflow.run_id, agent.index)}>

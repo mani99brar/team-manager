@@ -304,23 +304,24 @@ button.lv-row:focus-visible { outline: 2px solid var(--focus); outline-offset: -
 .ctl-question p { margin: 0; font-size: 14px; line-height: 1.45; overflow-wrap: anywhere; }
 
 /* ---- Agent teams on the stage (docs/PRD_RUN_TEAMS.md 5, 8) ----
-   A step whose session ran a team keeps its solid outline and gains a stacked "deck": a copy of the card's edge offset 4 px
-   right and 4 px down behind it, in Sheet with the 1.5 px Rule edge. The card clips its own overflow (its lines clamp), so a
+   A step whose session ran a team keeps its solid outline and gains a stacked "deck": a copy of the card's edge offset 6 px
+   right and 6 px down behind it, in Sheet with a 2 px Rule edge (raised from 4 px / 1.5 px, which read as nothing at 100 %). The card clips its own overflow (its lines clamp), so a
    `::before` copy would be clipped with it: the deck is drawn as two offset box-shadows instead, below the float shadow so hover
    still lifts. No colour joins the outline; a single-session worker keeps the plain card. */
-.sb-stage .node.is-team { box-shadow: 4px 4px 0 -1.5px var(--surface), 4px 4px 0 0 var(--border-strong); }
-.sb-stage .node.is-team:hover { box-shadow: 4px 4px 0 -1.5px var(--surface), 4px 4px 0 0 var(--border-strong), var(--shadow-float); }
-.sb-stage .node.is-team[aria-current="true"] { box-shadow: 0 0 0 3px var(--accent), 4px 4px 0 -1.5px var(--surface), 4px 4px 0 0 var(--border-strong), var(--shadow-float); }
+.sb-stage .node.is-team { box-shadow: 6px 6px 0 -2px var(--surface), 6px 6px 0 0 var(--border-strong); }
+.sb-stage .node.is-team:hover { box-shadow: 6px 6px 0 -2px var(--surface), 6px 6px 0 0 var(--border-strong), var(--shadow-float); }
+.sb-stage .node.is-team[aria-current="true"] { box-shadow: 0 0 0 3px var(--accent), 6px 6px 0 -2px var(--surface), 6px 6px 0 0 var(--border-strong), var(--shadow-float); }
 .n-team { white-space: nowrap; }
 .n-team-run b { color: var(--run); }
 .n-team-fail { color: var(--fail); white-space: nowrap; }
 .n-team-fail b { color: var(--fail); }
 .n-team-g { width: 12px; height: 12px; vertical-align: -1px; margin-right: 2px; }
-.sb-legend .sw-team { box-shadow: 3px 3px 0 -1.5px var(--surface), 3px 3px 0 0 var(--border-strong); }
+.sb-legend .sw-team { box-shadow: 4px 4px 0 -2px var(--surface), 4px 4px 0 0 var(--border-strong); }
 .lv-sec-team { padding: 4px 12px; grid-template-columns: minmax(0, 1fr); }
 .lv-team { min-width: 0; display: flex; align-items: center; gap: 8px; min-height: 44px; margin: 0 -8px; padding: 0 8px; border-radius: 8px; color: var(--fg); font-size: var(--type-floor); font-weight: 600; text-decoration: none; overflow-wrap: anywhere; }
 .lv-team:hover { background: var(--surface-2); }
 .lv-team:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+.lv-team-caption { margin: 0 0 4px; color: var(--muted); font-size: var(--type-floor); }
 @media (max-width: 720px) {
   .lv-team-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 }

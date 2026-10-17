@@ -43,7 +43,7 @@ type Props = {
   /** What the run's sessions cost, from the Sessions totals (run-sessions); null when none is recorded or not yet read. */
   spent?: string | null
   /** The Working now row (docs/PRD_RUN_TEAMS.md 5) and the Team view link it opens; null (no team running or interrupted) leaves the dock as before. */
-  team?: { line: DockTeamLine; href: string } | null
+  team?: { line: DockTeamLine; href: string; caption?: string | null } | null
   /** Spent's tooltip addition while the run has team records; null otherwise. */
   spentNote?: string | null
 }
@@ -133,6 +133,7 @@ export function LiveDock({ detail, now, clock, nodes, nowId, latest, timeline, i
               <Glyph tone={team.line.kind === 'running' ? 'run' : 'pause'} size={14} />
               <span className="lv-team-text">{team.line.text}</span>
             </AppLink>
+            {team.caption && <p className="lv-team-caption" data-testid="live-dock-team-caption">{team.caption}</p>}
           </div>
         )}
         <div className="lv-sec">
