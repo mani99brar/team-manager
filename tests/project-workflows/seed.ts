@@ -26,7 +26,7 @@
  * writers below handed over as a `SeedContext`.
  */
 import { mkdirSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import {
   ADAPTER_SESSION,
   BASE_COMMIT,
@@ -111,6 +111,7 @@ import {
 } from './fixtures.ts'
 import { seedUxFixtures } from './fixtures/index.ts'
 import { seedDispatchCandidate } from './fixtures/dispatch.ts'
+import { seedRunGithubCandidate } from './fixtures/ux-run-github.ts'
 import type { WorkerResult } from '../../contracts/workflow/v1.ts'
 
 export type InternalEvent = { sequence: number; time: string; node: string; status: string; message: string }
@@ -290,6 +291,11 @@ export type SeedContext = {
   leakFor: typeof leakFor
   /** The night-shift folder the candidate server reads (`MD_MANAGER_NIGHT_SHIFT_DIR`); the sessions module seeds records here. */
   nightShiftDir: string
+  /**
+   * The Claude home the candidate server reads (`MD_MANAGER_CLAUDE_HOME`, `<test root>/claude-home` beside the seed root, as
+   * `playwright.config.ts` and the `*-app.ts` harnesses set it); the teams module writes Claude Code's records here.
+   */
+  claudeHome: string
 }
 
 /**
@@ -644,7 +650,7 @@ export function seedCandidate(root: string, options: { dispatch?: boolean } = {}
 
   // ---- viewer UX slices: each module seeds its own workflow, appended after every workflow above ----
 
-  const ux = seedUxFixtures({
+  const context: SeedContext = {
     repository,
     runsRoot: workflowId => {
       const directory = join(root, 'runs', workflowId)
@@ -653,7 +659,9 @@ export function seedCandidate(root: string, options: { dispatch?: boolean } = {}
     },
     writeRun, writePacket, receipt, internalEvent, leakFor,
     nightShiftDir: join(root, 'night-shift'),
-  })
+    claudeHome: join(dirname(root), 'claude-home'),
+  }
+  const ux = seedUxFixtures(context)
 
   const registry = {
     version: 1,
@@ -683,7 +691,14 @@ export function seedCandidate(root: string, options: { dispatch?: boolean } = {}
   if (options.dispatch) {
     const seed = seedDispatchCandidate(root)
     registry.projects.push(...(seed.projects as unknown as typeof registry.projects))
-    writeJson(join(root, 'github-fixture.json'), seed.githubFixture)
+    // run-teams: the GitHub view's project, a real repository whose run branches the fixture reads (docs/PRD_RUN_TEAMS.md "GitHub read").
+    const publish = seedRunGithubCandidate(root, context)
+    registry.projects.push(publish.project as unknown as (typeof registry.projects)[number])
+    writeJson(join(root, 'github-fixture.json'), {
+      ...seed.githubFixture,
+      repos: { ...seed.githubFixture.repos, ...publish.repos },
+      branches: { ...seed.githubFixture.branches, ...publish.branches },
+    })
   }
   const configPath = join(root, 'projects.json')
   writeJson(configPath, registry)

@@ -146,7 +146,8 @@ export default defineConfig({
       {
         command: 'npm run start:api',
         url: `http://127.0.0.1:${controlsPorts.apiPort}/api/entries`,
-        env: { ...apiEnv, ...controlsEnv, MD_MANAGER_API_PORT: String(controlsPorts.apiPort), MD_MANAGER_WEB_PORT: String(controlsPorts.webPort) },
+        // run-teams: the GitHub actions are on for this pair only (the fake controller answers `github`; GitHub is the fixture).
+        env: { ...apiEnv, ...controlsEnv, MD_MANAGER_GITHUB_ACTIONS: 'on', MD_MANAGER_API_PORT: String(controlsPorts.apiPort), MD_MANAGER_WEB_PORT: String(controlsPorts.webPort) },
         reuseExistingServer: false,
         timeout: 30_000,
       },

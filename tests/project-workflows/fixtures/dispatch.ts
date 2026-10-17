@@ -530,19 +530,19 @@ const GIT_SEED_ENV = {
   GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_TERMINAL_PROMPT: '0',
   GIT_AUTHOR_NAME: 'Seed', GIT_AUTHOR_EMAIL: 'seed@example.com', GIT_COMMITTER_NAME: 'Seed', GIT_COMMITTER_EMAIL: 'seed@example.com',
 }
-function git(cwd: string, args: string[]): void {
+export function git(cwd: string, args: string[]): void {
   execFileSync('git', ['-C', cwd, ...args], { env: { ...process.env, ...GIT_SEED_ENV }, stdio: 'ignore' })
 }
 /** A git command whose trimmed stdout is returned (for a commit sha); the same isolated config and identity as `git`. */
-function gitOut(cwd: string, args: string[]): string {
+export function gitOut(cwd: string, args: string[]): string {
   return execFileSync('git', ['-C', cwd, ...args], { env: { ...process.env, ...GIT_SEED_ENV }, encoding: 'utf8' }).trim()
 }
-const commit = (repo: string, message: string) => {
+export const commit = (repo: string, message: string) => {
   writeFileSync(join(repo, `${Date.now()}-${Math.random().toString(36).slice(2)}.txt`), `${message}\n`)
   git(repo, ['add', '-A'])
   git(repo, ['-c', 'commit.gpgsign=false', '-c', 'core.hooksPath=/dev/null', 'commit', '-m', message])
 }
-const initRepo = (dir: string, bare = false) => { mkdirSync(dir, { recursive: true }); git(dir, bare ? ['init', '--bare', '--initial-branch=main'] : ['init', '--initial-branch=main']) }
+export const initRepo = (dir: string, bare = false) => { mkdirSync(dir, { recursive: true }); git(dir, bare ? ['init', '--bare', '--initial-branch=main'] : ['init', '--initial-branch=main']) }
 
 // ---- Run directories in the documented storage format, so the real server (candidate phase) projects the same runs -----
 // `mock.ts` serves in worker mode, so these are untested in the viewer worktree; the server and the controller read them.

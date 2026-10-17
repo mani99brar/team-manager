@@ -4,15 +4,19 @@
  * the controller's refusals. The worker phase mocks `/api/run-controls/**` from Appendix A (`mock.ts`); the candidate phase
  * runs against the real backend with the fake controller (`fixtures/controls.ts`, `fake-controller.py`).
  */
+import { readFileSync } from 'node:fs'
 import { test, expect, type Locator, type Page } from '@playwright/test'
 import { COMMAND_CAPTION } from '../../contracts/projects/triage.ts'
+import type { RunGithub } from '../../contracts/projects/github.ts'
 import { TOKEN_KEY } from '../../src/projects/controls/types.ts'
+import { githubPathname } from '../../src/projects/routes.ts'
+import { PUBLISH_BRANCHES, PUBLISH_PR, PUBLISH_PROJECT, PUBLISH_REPO, PUBLISH_RUNS, PUBLISH_WORKFLOW_ID, PUSH_FIRST } from './fixtures/ux-run-github.ts'
 import {
   CONTROLS_TOKEN, CONTROLS_WORKFLOW_ID, RUN_APPROVAL, RUN_FINISHED, RUN_QUESTION, RUN_REFUSE, RUN_REPAIR, RUN_RUNNING, RUN_STOPPED, WAITING_QUESTION,
   OLDER_CONTROLLER_REASONS, RELAUNCH_ALLOWED, RELAUNCH_REFUSED, RUN_RELAUNCH, RUN_RELAUNCH_REFUSE, RUN_RETRY_ALL,
 } from './fixtures/controls.ts'
 import { installControlMocks, installProjectMocks } from './mock.ts'
-import { attach, installHooks, phase, runUrl } from './support.ts'
+import { attach, fetchFromPage, installHooks, phase, runUrl } from './support.ts'
 
 installHooks()
 
@@ -436,4 +440,71 @@ test(`An older controller without retry --all-failed and relaunch: both controls
     await expect(dialog(page)).toHaveCount(0)
     await page.keyboard.press('Escape')
   }
+})
+
+// ---- run-teams: the GitHub actions on this pair's real server (docs/PRD_RUN_TEAMS.md "GitHub actions") -----------------------
+
+test(`[scenario:github-real-actions] Paired on a server with the GitHub actions on, the GitHub view reads the real offers: a push of the unpushed branch behind a typed repository, Mark ready on the pushed branch's draft, each command naming the confirmed repository, branch and full head; Mark ready runs the controller's github command (${phase})`, async ({ page }, testInfo) => {
+  test.skip(phase !== 'candidate', 'the publish project, its git repository and this pair\'s GitHub actions exist in the candidate phase only')
+  await page.addInitScript(`window.localStorage.setItem(${JSON.stringify(TOKEN_KEY)}, ${JSON.stringify(CONTROLS_TOKEN)})`)
+  await page.setViewportSize({ width: 1440, height: 900 })
+  const readOf = async (runId: string) => {
+    const response = await fetchFromPage(page, `/api/dispatch/projects/${PUBLISH_PROJECT.project_id}/workflows/${PUBLISH_WORKFLOW_ID}/runs/${runId}/github`)
+    expect(response.status).toBe(200)
+    return JSON.parse(response.text) as RunGithub
+  }
+  const panel = page.getByTestId('gh-actions')
+  const action = (id: string) => panel.locator(`[data-testid="gh-action"][data-action="${id}"]`)
+  const box = page.getByTestId('gh-dialog')
+  const openDialog = async (id: string) => {
+    await action(id).getByTestId('gh-action-button').click()
+    await expect(box).toHaveAttribute('data-action', id)
+    await expect(box.getByTestId('gh-dialog-facts')).not.toContainText('Reading the branch facts')
+  }
+
+  // The unpushed run: push is offered (a public repository: typed confirmation); a pull request waits for the push.
+  await page.goto(githubPathname(PUBLISH_PROJECT.project_id, PUBLISH_WORKFLOW_ID, PUBLISH_RUNS.unpushed))
+  await expect(panel).toHaveAttribute('data-state', 'offered')
+  const unpushed = await readOf(PUBLISH_RUNS.unpushed)
+  await expect(panel.getByTestId('gh-action')).toHaveCount(4)
+  await expect(action('push_branch').getByTestId('gh-action-button')).toHaveText('Push branch')
+  await expect(action('push_branch').getByTestId('gh-action-note')).toHaveText(`3 commits (with author names and emails) become public on ${PUBLISH_REPO}`)
+  await expect(action('open_pr').getByTestId('gh-action-note')).toHaveText(`Not offered: ${PUSH_FIRST}`)
+  await openDialog('push_branch')
+  await expect(box.getByTestId('gh-dialog-command')).toContainText(`--repo-name ${PUBLISH_REPO} --branch ${PUBLISH_BRANCHES.unpushed} --head ${unpushed.branch.local_sha}`)
+  await expect(box.getByTestId('gh-commit-preview').getByTestId('gh-commit-author')).toHaveCount(3)
+  await expect(box.getByTestId('gh-dialog-confirm')).toBeDisabled()
+  await box.getByTestId('gh-typed-input').fill(PUBLISH_REPO)
+  await expect(box.getByTestId('gh-dialog-confirm')).toBeEnabled()
+  // Nothing is pushed here: the dialog is closed unconfirmed.
+  await box.getByTestId('gh-dialog-cancel').click()
+  await expect(box).toHaveCount(0)
+
+  // The pushed run with its draft: push and a new pull request are not offered, Mark ready is; it runs the controller's command.
+  await page.goto(githubPathname(PUBLISH_PROJECT.project_id, PUBLISH_WORKFLOW_ID, PUBLISH_RUNS.pushed))
+  await expect(panel).toHaveAttribute('data-state', 'offered')
+  const pushed = await readOf(PUBLISH_RUNS.pushed)
+  await expect(action('push_branch').getByTestId('gh-action-note')).toHaveText('Not offered: The branch is already on GitHub at the same commit')
+  await expect(action('open_pr').getByTestId('gh-action-note')).toHaveText(`Not offered: Pull request #${PUBLISH_PR} is already open for this branch`)
+  await expect(page.getByTestId('gh-banner-action')).toHaveText('Mark ready for review')
+  await openDialog('mark_ready')
+  await expect(box.getByTestId('gh-dialog-facts')).toHaveText('GitHub notifies the requested reviewers: acme/maintainers, octocat.')
+  await expect(box.getByTestId('gh-dialog-command')).toContainText(`ready "$RUN" --repo `)
+  await expect(box.getByTestId('gh-dialog-command')).toContainText(`--repo-name ${PUBLISH_REPO} --branch ${PUBLISH_BRANCHES.pushed} --head ${pushed.branch.local_sha} --pr ${PUBLISH_PR} --by operator`)
+  await attach(page, testInfo, 'github-real-actions')
+  await box.getByTestId('gh-dialog-confirm').click()
+  await expect(box.getByTestId('gh-dialog-outcome')).toHaveAttribute('data-state', 'succeeded', { timeout: 15_000 })
+  await box.getByTestId('gh-dialog-cancel').click()
+  await expect(page.getByTestId('gh-action-record').first()).toContainText('Mark ready for review')
+  // The fake controller received exactly the argv the real controller parses: the confirmed identities, never a short sha.
+  const calls = readFileSync(process.env.MD_MANAGER_FAKE_CONTROLLER_LOG!, 'utf8').trim().split('\n').map(line => JSON.parse(line) as string[])
+  const ready = calls.filter(argv => argv[2] === 'github' && argv[3] === 'ready')
+  expect(ready).toHaveLength(1)
+  const argv = ready[0]!
+  for (const [flag, value] of [['--repo-name', PUBLISH_REPO], ['--branch', PUBLISH_BRANCHES.pushed], ['--head', pushed.branch.local_sha!], ['--pr', String(PUBLISH_PR)], ['--by', 'operator']] as const) {
+    expect(argv[argv.indexOf(flag) + 1], flag).toBe(value)
+  }
+  expect(argv[4]!.endsWith(`/${PUBLISH_RUNS.pushed}`)).toBe(true)
+  await page.setViewportSize({ width: 390, height: 844 })
+  expect(await noSideways(page)).toBe(true)
 })

@@ -5,15 +5,28 @@
  * draft pull request, mark ready, request reviewers, and records (succeeded, failed, refused). They are served on the
  * finished run of the controls workflow (`controls-finished`), whose run controls the worker-phase mocks already answer; the
  * spec swaps the payload per test through `runGithubByRun` / `runGithubActionsByRun` (the mocks read them per request).
- * Worker-phase payloads only: the candidate phase serves whatever the real server reads, so `github.spec.ts` runs there only
- * the scenarios that hold on any read.
+ * Those are worker-phase payloads. The candidate phase serves what the real server reads, so `seedRunGithubCandidate` (called
+ * by `seedCandidate` with the dispatch option, never by `controls-app.ts` or `sessions-app.ts`) gives it something real to read:
+ * the project `publish` whose checkout is a real git repository under the seed root, cloned from a bare origin and then pointed
+ * at `https://github.com/acme/publish.git`, with two integrated runs of the workflow `publish`, each recording its branch
+ * (`inputs.source_branch`) and its integrated commit (the integrate event's "Fast-forwarded to <sha>"):
+ * - `publish-unpushed`: its branch has three commits that are on neither origin's branch nor origin/main;
+ * - `publish-pushed`: its branch was pushed (the remote-tracking ref is at its head), and the GitHub fixture
+ *   (`MD_MANAGER_GITHUB_FIXTURE`) holds a draft pull request #7 for it with one pending check and a team and a user requested.
+ * The fixture's `branches` entries are keyed `acme/publish#<branch>`; GitHub itself is never called.
  */
+import { mkdirSync } from 'node:fs'
+import { join } from 'node:path'
 import { runGithub as exampleRunGithub, runGithubActions as exampleActions } from '../../../contracts/projects/teamExamples.ts'
-import type { GithubAction, RunGithub, RunGithubActions } from '../../../contracts/projects/github.ts'
+import type { GithubAction, RunGithub, RunGithubActions, RunPr } from '../../../contracts/projects/github.ts'
 import type { SituationId } from '../../../src/projects/github/model.ts'
-import { PROJECT } from '../fixtures.ts'
+import type { GithubRepoRead } from '../../../src/projects/dispatch/types.ts'
+import { BASE_COMMIT, GRAPH_NODES, OUTPUT_COMMIT_ADAPTER, OUTPUT_COMMIT_UI, PROJECT, rawInputsSection, UI_SESSION, ADAPTER_SESSION } from '../fixtures.ts'
+import type { SeedContext } from '../seed.ts'
 import { CONTROLS_WORKFLOW_ID, RUN_FINISHED } from './controls.ts'
-import type { UxFixtureModule } from './index.ts'
+import { commit, git, gitOut, initRepo, type FixtureBranchRead } from './dispatch.ts'
+import type { RegistryWorkflow, UxFixtureModule } from './index.ts'
+import { finishedPackets } from './ux-teams.ts'
 
 export const GITHUB_RUN = RUN_FINISHED
 export const GITHUB_WORKFLOW_ID = CONTROLS_WORKFLOW_ID
@@ -110,22 +123,25 @@ export const GITHUB_MANY_CHECKS: RunGithub = withPr({
 
 // ---- Actions ---------------------------------------------------------------------------------------------------------
 
-const COMMAND = (verb: string, rest: string) => `python -m workflow github ${verb} ${RUN_FINISHED} --repo ${GITHUB_CHECKOUT} ${rest} --by operator`
+/** The command a GitHub action shows, as `server/githubActions.ts` `githubDisplay` words it: the confirmed repository, branch and full head. */
+const COMMAND = (verb: string, rest: string) => `$PY -m workflow github ${verb} "$RUN" --repo ${GITHUB_CHECKOUT} --repo-name ${GITHUB_REPO} --branch ${GITHUB_BRANCH} --head ${LOCAL_SHA}${rest ? ` ${rest}` : ''} --by operator`
 const exampleAction = (id: GithubAction['id']) => exampleActions.actions.find(action => action.id === id)!
-const OFF_REASON = 'GitHub actions are off: start the dashboard with MD_MANAGER_GITHUB_ACTIONS=on'
-const NO_PR = 'There is no pull request for this branch yet'
+/** The server's reasons (`server/githubActions.ts`), word for word. */
+const OFF_REASON = 'GitHub actions are off on this dashboard: start it with MD_MANAGER_GITHUB_ACTIONS=on'
+const NO_PR = 'No pull request is open for this branch'
+export const PUSH_FIRST = 'Push the branch first: GitHub does not have the run branch at its head'
 
 const push = (available: boolean, visibility: RunGithubActions['visibility']): GithubAction => ({
   ...exampleAction('push_branch'),
   available, reason: available ? null : 'The branch is already on GitHub at the same commit',
-  command: COMMAND('push', `--sha ${LOCAL_SHA.slice(0, 12)}`),
+  command: COMMAND('push', ''),
   confirm: visibility === 'PRIVATE' || visibility === 'INTERNAL' ? 'plain' : 'typed_repo',
   params: visibility === 'PRIVATE' || visibility === 'INTERNAL' ? [] : [{ name: 'confirm_repo', kind: 'typed', required: true }],
   publishes: visibility === 'PRIVATE' ? '3 commits become visible to everyone with access to kleros/vea' : '3 commits become public on kleros/vea',
 })
 const openPrAction = (available: boolean, reason: string | null): GithubAction => ({
   ...exampleAction('open_pr'), available, reason: available ? null : reason,
-  command: COMMAND('pr', '--base dev --title <title> --body-file <body>'),
+  command: COMMAND('pr', '--base dev --title=<title> --body-file <body>'),
   defaults: available ? { title: `${'Run controls on the run page'}: ${RUN_FINISHED}`, body: `### Run controls on the run page: ${RUN_FINISHED}\n\n- **Status:** succeeded\n- **Branch:** \`${GITHUB_BRANCH}\`\n\n_Generated by md-manager from the run's records._\n` } : {},
   publishes: 'The title and body become public on kleros/vea',
 })
@@ -137,15 +153,15 @@ const at = (minute: number) => `2026-10-16T09:${String(minute).padStart(2, '0')}
 
 export const GITHUB_ACTIONS = {
   off: offers([push(false, 'PUBLIC'), openPrAction(false, OFF_REASON), ready(false), reviewers(false)].map(action => ({ ...action, available: false, reason: OFF_REASON })), { enabled: false }),
-  pushPublic: offers([push(true, 'PUBLIC'), openPrAction(false, 'The branch is not on GitHub yet'), ready(false), reviewers(false)]),
-  pushPrivate: offers([push(true, 'PRIVATE'), openPrAction(false, 'The branch is not on GitHub yet'), ready(false), reviewers(false)], { visibility: 'PRIVATE' }),
+  pushPublic: offers([push(true, 'PUBLIC'), openPrAction(false, PUSH_FIRST), ready(false), reviewers(false)]),
+  pushPrivate: offers([push(true, 'PRIVATE'), openPrAction(false, PUSH_FIRST), ready(false), reviewers(false)], { visibility: 'PRIVATE' }),
   openPr: offers([push(false, 'PUBLIC'), openPrAction(true, null), ready(false), reviewers(false)]),
   markReady: offers([push(false, 'PUBLIC'), openPrAction(false, 'Pull request #531 is already open for this branch'), ready(true), reviewers(true)]),
   requestReviewers: offers([push(false, 'PUBLIC'), openPrAction(false, 'Pull request #531 is already open for this branch'), ready(false), reviewers(true)].map(action => (action.id === 'mark_ready' ? { ...action, reason: 'Pull request #531 is already ready for review' } : action))),
   records: offers([push(false, 'PUBLIC'), openPrAction(false, 'Pull request #531 is already open for this branch'), ready(true), reviewers(true)], {
     records: [
       { record_id: 'g-00000000000c', request_id: '3c4e28ba-2fa1-4d3b-8b2c-6a1f0e9d8c7b', action: 'request_reviewers', params: { reviewers: ['nobody-here'] }, command: COMMAND('reviewers', '--pr 531 --add nobody-here'), status: 'failed', exit_code: 1, started_at: at(59), ended_at: at(59), output_tail: ['GraphQL: Could not resolve to a User with the login of \'nobody-here\'. (requestReviews)'], url: null },
-      { record_id: 'g-00000000000b', request_id: '2b4e28ba-2fa1-4d3b-8b2c-6a1f0e9d8c7b', action: 'push_branch', params: {}, command: COMMAND('push', `--sha ${LOCAL_SHA.slice(0, 12)}`), status: 'refused', exit_code: 2, started_at: at(58), ended_at: at(58), output_tail: ['Blocked: the run branch moved since the offer (6b6d894 is not 1a2b3c4)'], url: null },
+      { record_id: 'g-00000000000b', request_id: '2b4e28ba-2fa1-4d3b-8b2c-6a1f0e9d8c7b', action: 'push_branch', params: {}, command: COMMAND('push', ''), status: 'refused', exit_code: 2, started_at: at(58), ended_at: at(58), output_tail: ['Blocked: the run branch moved since the offer (6b6d894 is not 1a2b3c4)'], url: null },
       ...exampleActions.records,
     ],
   }),
@@ -157,4 +173,120 @@ export const uxRunGithub: UxFixtureModule = {
     runGithub: { [GITHUB_RUN]: GITHUB_SITUATIONS['checks-failing'] },
     runGithubActions: { [GITHUB_RUN]: GITHUB_ACTIONS.markReady },
   },
+}
+
+// ---- The candidate phase: a real repository and run branches for the real server to read ---------------------------------
+
+export const PUBLISH_PROJECT = { project_id: 'publish', name: 'Publish' } as const
+export const PUBLISH_WORKFLOW_ID = 'publish'
+export const PUBLISH_WORKFLOW_NAME = 'Publish the run branch'
+export const PUBLISH_REPO = 'acme/publish'
+export const PUBLISH_RUNS = { unpushed: 'publish-unpushed', pushed: 'publish-pushed' } as const
+export const PUBLISH_BRANCHES = { unpushed: `feature/${PUBLISH_WORKFLOW_ID}/${PUBLISH_RUNS.unpushed}`, pushed: `feature/${PUBLISH_WORKFLOW_ID}/${PUBLISH_RUNS.pushed}` } as const
+export const PUBLISH_PR = 7
+export const PUBLISH_PR_TITLE = 'Publish the run branch'
+/** The commit author every seeded commit carries (`fixtures/dispatch.ts` `GIT_SEED_ENV`). */
+export const PUBLISH_AUTHOR = 'Seed <seed@example.com>'
+const PUBLISH_READ_AT = '2026-10-16T10:00:00Z'
+/** A day before every clock the other specs pin, so these runs never fill another spec's Today or Recent. */
+const PUBLISH_DAY = '2024-03-05'
+
+/** A registry project as `seedCandidate` writes it. */
+export type RegistryProject = { project_id: string; name: string; repository: string; workflows: RegistryWorkflow[] }
+
+/** One integrated run of the `publish` workflow: the export records its branch and the commit it fast-forwarded to. */
+function writePublishRun(context: SeedContext, root: string, runId: string, branch: string, integrated: string) {
+  const { writeRun, receipt, internalEvent, leakFor, repository } = context
+  const runDir = join(root, runId)
+  const at = (clock: string) => `${PUBLISH_DAY}T${clock}Z`
+  const inputs = rawInputsSection(runId, leakFor(root, runId))!
+  writeRun(root, repository, runId, {
+    createdAt: at('08:00:00'), updatedAt: at('09:00:00'), definitionNodes: GRAPH_NODES, definitionName: PUBLISH_WORKFLOW_NAME,
+    values: {
+      ui: receipt('ui', runDir, UI_SESSION, at('08:00:10')), adapter: receipt('adapter', runDir, ADAPTER_SESSION, at('08:00:12')),
+      snapshots: { ui: OUTPUT_COMMIT_UI, adapter: OUTPUT_COMMIT_ADAPTER },
+      ui_packet: 'verification/worker/ui/1/packet.json', adapter_packet: 'verification/worker/adapter/1/packet.json',
+      bundle: { run_id: runId, base_commit: BASE_COMMIT, candidate_commit: integrated, policy_sha256: 'e'.repeat(64) },
+      review: { run_id: runId, verdict: 'approved', independent: true, reviewer: 'synthetic-reviewer', findings: [] },
+      approved_bundle: 'f'.repeat(64), integrated_commit: integrated,
+    },
+    next: [], tasks: [],
+    events: [
+      internalEvent(1, at('08:00:10'), 'ui', 'running', 'Launching or reconciling the exact native session'),
+      internalEvent(2, at('08:00:12'), 'adapter', 'running', 'Launching or reconciling the exact native session'),
+      internalEvent(3, at('08:30:00'), 'freeze', 'succeeded', 'Captured both worker snapshots'),
+      internalEvent(4, at('08:40:00'), 'verify_ui', 'succeeded', 'UI verification passed'),
+      internalEvent(5, at('08:40:00'), 'verify_adapter', 'succeeded', 'Adapter verification passed'),
+      internalEvent(6, at('08:50:00'), 'review', 'approved', 'Independent reviewer approved the candidate'),
+      internalEvent(7, at('09:00:00'), 'integrate', 'succeeded', `Fast-forwarded to ${integrated}`),
+    ],
+    packets: dir => finishedPackets(context, runId, dir),
+    review: null,
+    inputs: { ...inputs, feature: PUBLISH_WORKFLOW_NAME, source_branch: branch },
+  })
+}
+
+/**
+ * Writes the `publish` project under `<root>/run-github` (a bare origin, the checkout cloned from it, both run branches, then
+ * origin's URL pointed at GitHub) and its two runs; returns the registry project and the GitHub fixture's repository and branch
+ * reads to merge into `github-fixture.json`.
+ */
+export function seedRunGithubCandidate(root: string, context: SeedContext): { project: RegistryProject; repos: Record<string, GithubRepoRead>; branches: Record<string, FixtureBranchRead> } {
+  const base = join(root, 'run-github')
+  mkdirSync(base, { recursive: true })
+  const origin = join(base, 'origin.git')
+  initRepo(origin, true)
+  const checkout = join(base, 'checkout')
+  git(base, ['clone', origin, 'checkout'])
+  commit(checkout, 'Initial commit'); commit(checkout, 'Add the relayer')
+  git(checkout, ['push', 'origin', 'main'])
+  git(checkout, ['remote', 'set-head', 'origin', 'main'])
+  // The pushed run's branch: two commits, pushed (the push moves the remote-tracking ref to its head).
+  git(checkout, ['checkout', '-b', PUBLISH_BRANCHES.pushed, 'main'])
+  commit(checkout, `Workflow ${PUBLISH_RUNS.pushed}: relayer classifies revert shapes`); commit(checkout, `Workflow ${PUBLISH_RUNS.pushed}: integrate candidate`)
+  git(checkout, ['push', 'origin', PUBLISH_BRANCHES.pushed])
+  // The unpushed run's branch: three commits on neither origin's branch nor origin/main.
+  git(checkout, ['checkout', '-b', PUBLISH_BRANCHES.unpushed, 'main'])
+  commit(checkout, `Workflow ${PUBLISH_RUNS.unpushed}: tests for the revert shapes`); commit(checkout, `Workflow ${PUBLISH_RUNS.unpushed}: relayer classifies revert shapes`)
+  commit(checkout, `Workflow ${PUBLISH_RUNS.unpushed}: integrate candidate`)
+  git(checkout, ['checkout', 'main'])
+  git(checkout, ['remote', 'set-url', 'origin', `https://github.com/${PUBLISH_REPO}.git`])
+  const tip = (ref: string) => gitOut(checkout, ['rev-parse', `refs/heads/${ref}`])
+  const pushedTip = tip(PUBLISH_BRANCHES.pushed)
+
+  const runsRoot = join(base, 'runs', PUBLISH_WORKFLOW_ID)
+  mkdirSync(runsRoot, { recursive: true })
+  writePublishRun(context, runsRoot, PUBLISH_RUNS.unpushed, PUBLISH_BRANCHES.unpushed, tip(PUBLISH_BRANCHES.unpushed))
+  writePublishRun(context, runsRoot, PUBLISH_RUNS.pushed, PUBLISH_BRANCHES.pushed, pushedTip)
+
+  const pr: RunPr = {
+    number: PUBLISH_PR, title: PUBLISH_PR_TITLE, url: `https://github.com/${PUBLISH_REPO}/pull/${PUBLISH_PR}`, state: 'OPEN', draft: true, author: 'octocat',
+    head_ref: PUBLISH_BRANCHES.pushed, base_ref: 'main', head_sha: pushedTip, updated_at: '2026-10-16T09:50:00Z', merged_at: null,
+    review_decision: 'REVIEW_REQUIRED', mergeable: 'MERGEABLE', comments: 0, review_threads: 0, unresolved_threads: 0,
+    requested_reviewers: [{ kind: 'team', login: 'acme/maintainers' }, { kind: 'user', login: 'octocat' }], latest_reviews: [],
+    checks: { state: 'PENDING', passing: 2, failing: 0, pending: 1, skipped: 0, total: 3, items: [
+      { name: 'e2e', kind: 'check_run', status: 'IN_PROGRESS', conclusion: null, bucket: 'pending', url: null },
+      { name: 'build', kind: 'check_run', status: 'COMPLETED', conclusion: 'SUCCESS', bucket: 'pass', url: null },
+      { name: 'lint', kind: 'check_run', status: 'COMPLETED', conclusion: 'SUCCESS', bucket: 'pass', url: null },
+    ] },
+  }
+  const branchRead = (githubSha: string | null, branchPr: RunPr | null): FixtureBranchRead => ({
+    read_at: PUBLISH_READ_AT, visibility: 'PUBLIC', viewer_permission: 'WRITE', default_branch: 'main', github_sha: githubSha, pr: branchPr, earlier_prs: [],
+  })
+  return {
+    project: {
+      project_id: PUBLISH_PROJECT.project_id, name: PUBLISH_PROJECT.name, repository: checkout,
+      workflows: [{ workflow_id: PUBLISH_WORKFLOW_ID, runs_root: runsRoot, definition: { name: PUBLISH_WORKFLOW_NAME, nodes: GRAPH_NODES } }],
+    },
+    repos: {
+      [PUBLISH_REPO]: {
+        read_at: PUBLISH_READ_AT, visibility: 'PUBLIC', default_branch: 'main', pushed_at: '2026-10-16T09:45:00Z',
+        head: { sha: gitOut(checkout, ['rev-parse', 'refs/heads/main']), committed_at: '2026-10-16T09:00:00Z' }, open_prs: 0, open_issues: 0, prs: [], issues: [],
+      },
+    },
+    branches: {
+      [`${PUBLISH_REPO}#${PUBLISH_BRANCHES.unpushed}`]: branchRead(null, null),
+      [`${PUBLISH_REPO}#${PUBLISH_BRANCHES.pushed}`]: branchRead(pushedTip, pr),
+    },
+  }
 }

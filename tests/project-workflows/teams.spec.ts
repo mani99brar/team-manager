@@ -1,16 +1,37 @@
 /**
  * The Team view, its run-view integration and the node page's Team section (docs/PRD_RUN_TEAMS.md 3, 5, 6, and 11 P0 items
- * 2-6). Every run is a worker-phase fixture of `fixtures/ux-teams.ts` (the teams reader is the server lane's, so there is no
- * candidate-phase seed and these scenarios run in the worker phase only). The page's clock is fixed eight seconds after the
- * teams were read, so every age and duration is exact. Each scenario checks the desk (1440 × 900) and then the phone (390 ×
- * 844), where nothing may scroll sideways.
+ * 2-6). Every run is a fixture of `fixtures/ux-teams.ts`. Most scenarios read worker-phase payloads the real reader cannot
+ * produce (a malformed payload, a 404, 400 agents, exact ages against a clock fixed eight seconds after the teams were read),
+ * so they run in the worker phase only. The seeded runs (`teams-seeded`, `teams-seeded-live`) run in both phases: the worker
+ * phase serves their payload from the mock, the candidate phase from the real server reading the Claude Code records the seed
+ * wrote under the test root's Claude home (`fixtures/teamRecords.ts`), and each scenario also compares the served payload with
+ * the mock's. Their assertions hold on any clock: the candidate server reads at the real time. `run-legacy-unchanged` runs in
+ * both phases too (in the candidate phase both runs are served with records `none`). Each scenario checks the desk
+ * (1440 × 900) and then the phone (390 × 844), where nothing may scroll sideways.
  */
+import { join } from 'node:path'
 import { test, expect, type Locator, type Page } from '@playwright/test'
-import { TEAMS_NOW, TEAMS_RUNS, UX_TEAMS_WORKFLOW_ID } from './fixtures/ux-teams.ts'
-import { attach, expectNoExecutionControls, graphNode, installHooks, liveDock, nodeDetail, openStepSheet, phase, runUrl, runViewLink, stepSheet } from './support.ts'
+import type { Teams } from '../../contracts/projects/teams.ts'
+import { teamsByRun } from './fixtures/index.ts'
+import { comparableTeams, refreshRunningRecords, runningWorkflowIds } from './fixtures/teamRecords.ts'
+import { SEEDED_SESSIONS, TEAMS_NOW, TEAMS_RUNS, UX_TEAMS_WORKFLOW_ID } from './fixtures/ux-teams.ts'
+import { PROJECT } from './fixtures.ts'
+import { attach, expectNoExecutionControls, fetchFromPage, graphNode, installHooks, liveDock, nodeDetail, openStepSheet, phase, runUrl, runViewLink, stepSheet } from './support.ts'
 
 installHooks()
-test.skip(phase !== 'worker', 'the teams fixtures are worker-phase mocks; the teams reader is not in this tree')
+
+/** The scenarios that hold on the real server's read (the seeded runs and the legacy comparison); the rest read mock-only payloads. */
+const BOTH_PHASES = /\[scenario:(team-seeded-finished|team-seeded-live|run-legacy-unchanged)\]/
+
+test.beforeEach(({ page: _page }, testInfo) => {
+  void _page
+  test.skip(phase !== 'worker' && !BOTH_PHASES.test(testInfo.title), 'a worker-phase payload the real teams reader cannot produce (malformed, 404, 400 agents, a fixed clock)')
+  // The candidate server reads the seeded records at the real time: a running workflow's files must have changed in the last
+  // 15 minutes, however long ago the config seeded them, as a session still writing them would.
+  if (phase === 'candidate' && process.env.MD_MANAGER_PROJECTS_TEST_ROOT) {
+    refreshRunningRecords(join(process.env.MD_MANAGER_PROJECTS_TEST_ROOT, 'claude-home'), runningWorkflowIds(teamsByRun[TEAMS_RUNS.seededLive]!))
+  }
+})
 
 const runPage = (runId: string) => runUrl(runId, undefined, UX_TEAMS_WORKFLOW_ID)
 const teamPage = (runId: string, search = '') => `${runPage(runId)}/team${search}`
@@ -530,4 +551,111 @@ test(`[scenario:team-role-filter] A workflow whose agents carry three roles or m
   await expect(workflowCard(page, 'wf_55ee66ff-003').getByTestId('team-role-filter').getByRole('button')).toHaveText(['understand 60', 'plan 40', 'implement 120', 'review 100', 'fix 70', 'check 10'])
   await expectNoExecutionControls(page)
   await expectPhoneFits(page)
+})
+
+// ---- Both phases: the seeded runs, served by the mock (worker) or by the real reader from Claude Code's records (candidate) --
+
+/** Opens a page on a seeded run: the clock is fixed only in the worker phase (the candidate server reads at the real time). */
+async function openSeeded(page: Page, url: string) {
+  if (phase === 'worker') await page.clock.setFixedTime(new Date(TEAMS_NOW))
+  await page.setViewportSize(DESK)
+  await page.goto(url)
+}
+
+/** The run's served teams payload, through the page (the mock in the worker phase, the real server in the candidate phase). */
+async function servedTeams(page: Page, runId: string): Promise<Teams> {
+  const response = await fetchFromPage(page, `/api/projects/${PROJECT.project_id}/workflows/${UX_TEAMS_WORKFLOW_ID}/runs/${runId}/teams`)
+  expect(response.status, runId).toBe(200)
+  return JSON.parse(response.text) as Teams
+}
+
+test(`[scenario:team-seeded-finished] A lane that ran a finished and a killed workflow: the summary's facts, phases, roster and log, the killed line, the owned-paths flag, the card's team line and the Sessions row; the served payload equals the mock's (${phase})`, async ({ page }, testInfo) => {
+  await openSeeded(page, teamPage(TEAMS_RUNS.seeded))
+  const served = await servedTeams(page, TEAMS_RUNS.seeded)
+  expect(comparableTeams(served)).toEqual(comparableTeams(teamsByRun[TEAMS_RUNS.seeded]!))
+  // The candidate server read the seeded Claude home (the run's own session ids), never another one.
+  expect(served.sessions.map(session => session.session_id)).toEqual([SEEDED_SESSIONS[TEAMS_RUNS.seeded].ui, SEEDED_SESSIONS[TEAMS_RUNS.seeded].adapter])
+  await expect(page.getByTestId('team-lane')).toHaveCount(2)
+  await expect(page.getByTestId('team-lane').nth(0)).toHaveAttribute('data-lane', 'ui')
+  // The finished workflow is not the latest (the killed one started later): it folds to its head and opens to its facts.
+  const finished = workflowCard(page, 'wf_1a2b3c4d-5e6')
+  await expect(finished).toHaveAttribute('data-state', 'completed')
+  const toggle = finished.getByRole('button', { name: 'build-run-teams' })
+  await expect(toggle).toHaveAttribute('aria-expanded', 'false')
+  await toggle.click()
+  await expect(finished.getByTestId('team-workflow-facts')).toContainText('ran 41m27s')
+  await expect(finished.getByTestId('team-workflow-facts')).toContainText('6 agents')
+  await expect(finished.getByTestId('team-workflow-facts')).toContainText('299 tool calls')
+  await expect(finished.getByTestId('team-workflow-facts')).toContainText('context 519,890')
+  await expect(finished.getByTestId('team-workflow-line')).toHaveText("Workflow completed; the lane's verification is separate.")
+  await expect(finished).toContainText('from the final summary')
+  await expect(finished.getByTestId('team-phase')).toHaveCount(3)
+  await expect(finished.getByTestId('team-phase').nth(2)).toHaveAttribute('data-tone', 'fail')
+  await expect(finished.getByTestId('team-phase').nth(2)).toContainText('1 failed · 1 done')
+  await expect(agentRows(finished)).toHaveCount(6)
+  await finished.getByText('Script log and result').click()
+  await expect(finished.getByTestId('team-workflow-logs')).toHaveText('2 readers done\nreview: 1 issue')
+  // The agent that edited server files from lane ui: its files are outside the lane's paths.
+  await expect(finished.locator('[data-testid="team-agent-row"][data-index="4"]').getByTestId('team-outside-chip')).toHaveText('2 outside')
+  await expect(lanePanel(page, 'ui').getByTestId('team-attention')).toHaveText("1 agent failed in Review · 2 files edited outside this lane's paths")
+  // The killed workflow: the stopped line, its unfinished agent interrupted and the one never started queued.
+  const killed = workflowCard(page, 'wf_5eed0c1d-001')
+  await expect(killed).toHaveAttribute('data-state', 'killed')
+  await expect(killed.getByTestId('team-workflow-line')).toContainText('This workflow was stopped before it finished (the summary says killed).')
+  await expect(killed.locator('[data-testid="team-agent-row"][data-state="interrupted"]')).toHaveCount(1)
+  await expect(killed.locator('[data-testid="team-agent-row"][data-state="queued"]')).toHaveCount(1)
+  await expect(lanePanel(page, 'adapter').getByTestId('team-attention')).toHaveText('Single session, no team records.')
+  await expect(runViewLink(page, 'team').getByTestId('run-view-suffix')).toHaveText('1 failed')
+  await expect(page.getByTestId('team-working-now')).toContainText('Nobody is working.')
+  await expect(teamView(page)).not.toContainText('%')
+  await expectNoExecutionControls(page)
+  await attach(page, testInfo, 'team-seeded-finished')
+  await expectPhoneFits(page)
+  // The run page: the worker's card carries the team line and the deck; its Sessions row says the team.
+  await page.setViewportSize(DESK)
+  await page.goto(runPage(TEAMS_RUNS.seeded))
+  const card = graphNode(page, 'launch_ui')
+  await expect(card).toHaveClass(/is-team/)
+  await expect(card.getByTestId('stage-team-line')).toContainText('9 agents')
+  await expect(card.getByTestId('stage-team-line')).toContainText('1 failed')
+  await expect(card.getByTestId('stage-team-outside')).toHaveText('2 outside paths')
+  await expect(graphNode(page, 'launch_adapter')).not.toHaveClass(/is-team/)
+  const row = page.locator('[data-testid="session-row"][data-session-key="worker:ui"]')
+  await expect(row.getByTestId('session-team-facts')).toHaveText('· team · 2 workflows · 9 agents')
+  await expect(page.locator('[data-testid="session-row"][data-session-key="worker:adapter"]').getByTestId('session-team-facts')).toHaveCount(0)
+})
+
+test(`[scenario:team-seeded-live] A live run: lane ui's workflow runs (two running, one done, one failed), lane adapter's was interrupted; the suffix, Working now, the dock row and the card's line; the served payload equals the mock's (${phase})`, async ({ page }, testInfo) => {
+  await openSeeded(page, teamPage(TEAMS_RUNS.seededLive))
+  const served = await servedTeams(page, TEAMS_RUNS.seededLive)
+  expect(comparableTeams(served)).toEqual(comparableTeams(teamsByRun[TEAMS_RUNS.seededLive]!))
+  const ui = workflowCard(page, 'wf_5eed1a7e-001')
+  await expect(ui).toHaveAttribute('data-state', 'running')
+  await expect(ui.getByTestId('team-workflow-status')).toHaveText('running')
+  await expect(ui).toContainText('from the live records')
+  await expect(ui.locator('[data-testid="team-agent-row"][data-state="running"]')).toHaveCount(2)
+  await expect(ui.locator('[data-testid="team-agent-row"][data-state="done"]')).toHaveCount(1)
+  await expect(ui.locator('[data-testid="team-agent-row"][data-state="failed"]')).toHaveCount(1)
+  await expect(lanePanel(page, 'ui').getByTestId('team-attention')).toContainText('1 agent failed in Review')
+  const adapter = workflowCard(page, 'wf_5eed1a7e-002')
+  await expect(adapter).toHaveAttribute('data-state', 'interrupted')
+  await expect(adapter.getByTestId('team-workflow-line')).toContainText('No summary was written and its records have not changed for 15 minutes')
+  await expect(adapter.locator('[data-testid="team-agent-row"][data-state="interrupted"]')).toHaveCount(1)
+  await expect(lanePanel(page, 'adapter').getByTestId('team-attention')).toHaveText('build-teams-reader was interrupted in Write; no summary was written')
+  await expect(lanePanel(page, 'adapter').getByTestId('team-attention')).toHaveAttribute('data-tone', 'pause')
+  await expect(runViewLink(page, 'team').getByTestId('run-view-suffix')).toHaveText('2 running · 1 failed')
+  await expect(page.getByTestId('team-working-now').getByRole('heading')).toHaveText('Working now · 2 running in 1 lane')
+  await expectNoExecutionControls(page)
+  await attach(page, testInfo, 'team-seeded-live')
+  await expectPhoneFits(page)
+  // The run page: the dock's Working now row opens the Team view on the running agents; the card counts the team.
+  await page.setViewportSize(DESK)
+  await page.goto(runPage(TEAMS_RUNS.seededLive))
+  const dockRow = liveDock(page).getByTestId('live-dock-working-now')
+  await expect(dockRow).toHaveAttribute('data-kind', 'running')
+  await expect(dockRow).toContainText('Working now · 2 agents in 1 lane · Implement, Review')
+  await expect(graphNode(page, 'launch_ui').getByTestId('stage-team-line')).toContainText('4 agents · 2 running · 1 failed')
+  await dockRow.click()
+  await expect(page).toHaveURL(/\/team\?state=running$/)
+  await expect(teamView(page)).toBeVisible()
 })
