@@ -60,3 +60,34 @@ test('redaction stays linear on adversarial input (a bounded name pattern; the u
   }
   assert.equal(redactText('aws_secret_access_key = "AKIAabcdefghij"'), 'aws_secret_access_key = <redacted>')
 })
+
+test('assignment scanner: escaped, stray, unterminated and multi-line quotes, joined pairs, a value starting with a redacted token, long names and YAML next-line values leave nothing behind (review check-090500 F1.1-F1.5)', async () => {
+  const { redactText } = await import('../../contracts/projects/redact.ts')
+  const cases: [string, string][] = [
+    ['password=\\"hunter22pass\\"', 'password=<redacted>'],
+    ["password=abc'def12345", 'password=<redacted>'],
+    ['password="unterminated hunter22', 'password=<redacted>'],
+    ['{"password":"abc\\"privateSuffix"}', '{"password":<redacted>}'],
+    ['token=123456;password="hunter22"', 'token=<redacted>'],
+    ['PASSWORD=ghp_' + 'a'.repeat(36) + '!privateSuffix', 'PASSWORD=<redacted>'],
+    ['A'.repeat(65) + 'KEY=hunter22', 'A'.repeat(65) + 'KEY=<redacted>'],
+    ['password:\n  hunter22pass', 'password:\n  <redacted>'],
+    ['SECRET_KEY="abc\ndef"', 'SECRET_KEY=<redacted>'],
+    ['https://x.io/cb?access_token=abcdef123456&x=1', 'https://x.io/cb?access_token=<redacted>'],
+  ]
+  for (const [input, expected] of cases) assert.equal(redactText(input), expected, input)
+})
+
+test('assignment scanner: prose with a credential word before ":" stays (review check-090500 F1.6)', async () => {
+  const { redactText } = await import('../../contracts/projects/redact.ts')
+  for (const text of ['auth: refactored the session middleware', 'Token: rotated nightly', 'see the password: section below', 'key: value pairs', 'Read the passwords: chapter']) {
+    assert.equal(redactText(text), text)
+  }
+})
+
+test('run summary: a secret split across lines is redacted after the paragraph is flattened (review check-090500 F2.1)', async () => {
+  const { redactText } = await import('../../contracts/projects/redact.ts')
+  const { runSummaryMarkdown } = await import('../../contracts/projects/summary.ts')
+  const text = runSummaryMarkdown({ runId: 'r', workflowId: 'w', feature: null, status: 'succeeded', headline: null, branch: null, baseCommit: null, integratedCommit: null, review: null, costUsd: null, pr: null, lanes: [{ lane: 'ui', summary: 'Set db_password:\n  hunter22pass in env. Also SECRET_KEY="abc\ndef" set.', team: null }] }, redactText)
+  assert.ok(!text.includes('hunter22pass') && !text.includes('def"') && !/\babc\b/.test(text), text)
+})

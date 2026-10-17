@@ -24,13 +24,20 @@ export function redactPaths(text: string): string {
  *    assignment pass can cut its BEGIN line off and leave the key body behind;
  * 2. token-shaped strings become `<redacted>`: a GitHub token (`ghp_`, the `gho_`/`ghs_`/`ghu_`/`ghr_` OAuth, server and refresh
  *    tokens `gh auth token` prints, `github_pat_`), an OpenAI-style `sk-` key, a Slack `xox?-` token, a `Bearer` header (any case);
- * 3. an assignment of a credential-like name keeps its name and loses its value (`name=<redacted>`): the name (any case) ends in
- *    a credential word (`token`, `secret`, `password`, `passwd`, `pwd`, `auth`, `api_key`/`apikey`, `access_key`, `private_key`,
- *    `client_secret`), optionally after prefix segments joined by `_`, `-` or `.` (`access_token`, `refresh_token`, `db_password`,
- *    `aws_secret_access_key`, `TELEGRAM_BOT_TOKEN`), may be quoted (`"password": …`), and is followed by optional spaces, `=` or
- *    `:`, optional spaces and a quoted value (single or double, redacted whole) or a bare value up to whitespace of at least six
- *    characters not counting a trailing `;`, `,`, `.`, `)` or `]` (left in place); an upper-case environment name ending in `TOKEN`, `KEY`, `PASSWORD` or holding `SECRET` (`STRIPE_KEY=`,
- *    `SECRET_KEY_BASE=`) loses its `=` value of any length.
+ * 3. an assignment of a credential-like name keeps its name and separator and loses its value (`name=<redacted>`). A small
+ *    linear scanner (`redactAssignments`) finds each `=` or `:`, reads the identifier before it (`[A-Za-z0-9_.-]`, any length,
+ *    optionally quoted) and decides in code, so no regex can backtrack over a long name:
+ *    - a credential name ends (any case) in `token`, `secret`, `password`, `passwd`, `passphrase`, `apikey`/`api_key`,
+ *      `access_key`, `private_key`, `secret_key` or `client_secret`, or has `pwd`/`auth` as its last whole segment
+ *      (`access_token`, `db_password`, `aws_secret_access_key`, `client-secret`; never `TOKEN_COUNT`, `max_tokens` or `author`);
+ *      an upper-case environment name ending in `KEY` or holding `SECRET` counts too (`STRIPE_KEY`, `SECRET_KEY_BASE`);
+ *    - after `=` the value is redacted whatever its length, except a bare value under six characters (trailing `;,.)]` not
+ *      counted) after a single-word name (`Token=short;`, `KEY = value` stay); after `:` only for a quoted (`"password": …`) or compound
+ *      (`db_password:`) name, or a single word at the start of a line followed by one bare word of six characters or more
+ *      (YAML `password: hunter22`), so prose such as `auth: refactored the middleware` or `see the password: section` stays;
+ *    - the value is a quoted string up to its unescaped closing quote on the same line (to the line's end when unterminated),
+ *      else the bare run up to whitespace, whatever it holds (quotes, `;`, `,`, a value that begins with `<redacted>`), so
+ *      `token=123456;password="x"` or `password=\"x\"` leaves nothing behind.
  * Each pattern is anchored with a minimum tail, so ordinary words and prose such as `task-file`, a lone `sk-`, `MONKEY`,
  * `keyboard`, `TOKEN_COUNT=5`, `token count: 5`, `Password policy: strong`, `the secret is out` or `bearer of news` stay intact.
  */
@@ -42,26 +49,120 @@ const TOKEN_PATTERNS: readonly RegExp[] = [
   /\bxox[abprs]-[A-Za-z0-9-]{10,}/g,
   /\bBearer\s+[A-Za-z0-9._~+/-]{20,}=*/gi,
 ]
+const SECRET_WORDS = /(?:token|secret|password|passwd|passphrase|apikey|api[_.-]key|access[_.-]?key|private[_.-]?key|secret[_.-]?key|client[_.-]?secret)$/i
+const WHOLE_SEGMENT_WORDS = /(?:^|[_.-])(?:pwd|auth)$/i
+const IDENTIFIER = /[A-Za-z0-9_.-]/
+/** A name longer than this is judged by its last characters (the credential word is at its end). */
+const NAME_LOOKBACK = 512
+
+/** Whether only spaces, tabs or a YAML list dash stand between the line's start and `index` (exclusive). */
+function atLineStart(text: string, index: number): boolean {
+  for (let at = index - 1, seen = 0; at >= 0 && seen < 64; at -= 1, seen += 1) {
+    const char = text[at]
+    if (char === '\n' || char === '\r') return true
+    if (char !== ' ' && char !== '\t' && char !== '-') return false
+  }
+  return index - 1 < 64
+}
+
+function isCredentialName(name: string): boolean {
+  const tail = name.slice(-64)
+  if (SECRET_WORDS.test(tail) || WHOLE_SEGMENT_WORDS.test(tail)) return true
+  return /^[A-Z0-9_]+$/.test(name) && (/KEY$/.test(name) || name.includes('SECRET'))
+}
+
+/** How far a quoted value may run across lines looking for its closing quote. */
+const QUOTED_SPAN = 4096
+
 /**
- * A credential-like name and its value: group 1 is the name with its separator (kept), the rest is the value. The last name
- * segment must end in a credential word (so `TOKEN_COUNT` or `token count` is no credential name), `pwd` and `auth` only as a
- * whole segment (so `author:` stays). A bare value already `<redacted>` by an earlier pass is left as it is.
+ * Where a quoted value ends: after its unescaped closing quote, even on a later line (a multi-line secret is one value), within
+ * QUOTED_SPAN characters; without one, at the end of its first line (an unterminated quote still loses that line).
  */
-const CREDENTIAL_ASSIGNMENT = new RegExp(
-  '(?<![A-Za-z0-9])('
-  // Bounded (at most four prefix segments of at most 32 characters, a name part of at most 32): an unbounded `(?:x+[_.-])*x*`
-  // splits a long `access_access_…` run every way at every start, which took 8 s on 140 KB (learnings/redaction-regex-backtracking.md).
-  + '(?:[A-Za-z0-9]{1,32}[_.-]){0,4}'
-  + '(?:[A-Za-z0-9]{0,32}(?:token|secret|password|passwd)|pwd|auth|(?:api|access|private)[_.-]?key|client[_.-]?secret)'
-  + '["\']?[ \\t]*[=:][ \\t]*)'
-  + '(?:"[^"\\n]*"|\'[^\'\\n]*\'|(?!<redacted>)[^\\s"\']{5,}[^\\s"\';,.)\\]])',
-  'gi',
-)
-/** An upper-case environment assignment of a `…TOKEN`, `…KEY`, `…PASSWORD` or `…SECRET…` name: the name is kept, the (quoted or bare) value is not. */
-const SECRET_ASSIGNMENT = /\b((?:[A-Z][A-Z0-9_]{0,63})?(?:SECRET[A-Z0-9_]{0,63}|TOKEN|KEY|PASSWORD|PASSWD))=(?:"[^"\n]*"|'[^'\n]*'|(?!<redacted>)[^\s"']+)/g
+function quotedEnd(text: string, start: number): number {
+  const quote = text[start]
+  let lineEnd = -1
+  const limit = Math.min(text.length, start + QUOTED_SPAN)
+  for (let at = start + 1; at < limit; at += 1) {
+    const char = text[at]
+    if (char === '\\') { at += 1; continue }
+    if (char === quote) return at + 1
+    if (lineEnd < 0 && (char === '\n' || char === '\r')) lineEnd = at
+  }
+  if (lineEnd >= 0) return lineEnd
+  const newline = text.slice(start, start + QUOTED_SPAN * 4).search(/[\r\n]/)
+  return newline < 0 ? text.length : start + newline
+}
+
+/** Where a bare value ends: at whitespace, leaving sentence punctuation that closes the run (`;`, `,`, `.`, `)`, `]`) in place. */
+function bareEnd(text: string, start: number): number {
+  let at = start
+  while (at < text.length && !/\s/.test(text[at])) at += 1
+  while (at > start + 1 && /[;,.)\]]/.test(text[at - 1])) at -= 1
+  return at
+}
+
+/** Pass 3: each credential assignment keeps its name and separator; its value becomes `<redacted>` (see the docstring above). */
+export function redactAssignments(text: string): string {
+  const separators = /[=:]/g
+  let out = ''
+  let last = 0
+  for (let match = separators.exec(text); match !== null; match = separators.exec(text)) {
+    const at = match.index
+    if (at < last) continue
+    let end = at - 1
+    while (end >= last && (text[end] === ' ' || text[end] === '\t')) end -= 1
+    const closingQuote = end >= last && (text[end] === '"' || text[end] === "'") ? text[end] : null
+    if (closingQuote !== null) end -= 1
+    let start = end
+    const floor = Math.max(last, end - NAME_LOOKBACK + 1)
+    while (start >= floor && IDENTIFIER.test(text[start])) start -= 1
+    const name = text.slice(start + 1, end + 1)
+    if (name === '' || !isCredentialName(name)) continue
+    const quotedName = closingQuote !== null && text[start] === closingQuote
+    const nameStart = quotedName ? start : start + 1
+    let valueStart = at + 1
+    while (valueStart < text.length && (text[valueStart] === ' ' || text[valueStart] === '\t')) valueStart += 1
+    if (valueStart >= text.length) continue
+    if (text[valueStart] === '\n' || text[valueStart] === '\r') {
+      // YAML puts a value on the next, indented line (`password:` then `  hunter22`): that line's one bare word is the value.
+      if (match[0] !== ':' || !atLineStart(text, quotedName ? start : start + 1)) continue
+      let next = valueStart
+      while (next < text.length && /[\r\n]/.test(text[next])) next += 1
+      const indent = next
+      while (next < text.length && (text[next] === ' ' || text[next] === '\t')) next += 1
+      if (next === indent) continue
+      const wordEnd = bareEnd(text, next)
+      const after = text[wordEnd]
+      if (wordEnd - next < 6 || (after !== undefined && after !== '\n' && after !== '\r')) continue
+      out += text.slice(last, next) + '<redacted>'
+      last = wordEnd
+      separators.lastIndex = wordEnd
+      continue
+    }
+    const quotedValue = text[valueStart] === '"' || text[valueStart] === "'"
+    const valueEnd = quotedValue ? quotedEnd(text, valueStart) : bareEnd(text, valueStart)
+    const singleWord = !/[_.-]/.test(name)
+    if (singleWord && !quotedValue && valueEnd - valueStart < 6) {
+      // A single-word name (`Token`, `secret`, `KEY`) with a short bare value is prose more often than a secret: `Token=short;`.
+      continue
+    }
+    if (match[0] === ':' && !quotedName && singleWord) {
+      // A single bare word before `:` is prose unless it opens a line and one bare word of six characters or more ends it.
+      const rest = text.slice(valueEnd, valueEnd + 2)
+      const lineEnds = rest === '' || rest[0] === '\n' || rest[0] === '\r'
+      if (quotedValue || !atLineStart(text, nameStart) || !lineEnds || valueEnd - valueStart < 6) continue
+    }
+    if (text.slice(valueStart, valueEnd) === '<redacted>') continue
+    out += text.slice(last, valueStart) + '<redacted>'
+    last = valueEnd
+    separators.lastIndex = valueEnd
+  }
+  return out + text.slice(last)
+}
+
 export function redactCredentials(text: string): string {
   const tokensGone = TOKEN_PATTERNS.reduce((acc, pattern) => acc.replace(pattern, '<redacted>'), text.replace(PEM_BLOCK, '<redacted>'))
-  return tokensGone.replace(CREDENTIAL_ASSIGNMENT, '$1<redacted>').replace(SECRET_ASSIGNMENT, '$1=<redacted>')
+  return redactAssignments(tokensGone)
 }
 
 /** Every free text served under the sessions route: path-redacted, then credential-filtered (the resume command is exempt). */
