@@ -783,7 +783,7 @@ const noParams: Record<ControlId, ParamSpec[]> = {
   approve: [typedParam], repair_session: [{ name: 'lane', kind: 'choice', choices: [], required: true }, typedParam],
   abandon: [{ name: 'reason', kind: 'text', min_length: 1, max_length: 500, required: true }, typedParam], clean: [typedParam],
   retry_all: [], relaunch: [{ name: 'lane', kind: 'choice', choices: [], required: true }],
-  note: [{ name: 'lane', kind: 'choice', choices: [], required: true }, { name: 'text', kind: 'text', min_length: 1, max_length: 2000, required: true }],
+  note: [{ name: 'lane', kind: 'choice', choices: [], required: true }, { name: 'text', kind: 'text', min_length: 1, max_length: 4000, required: true }],
 }
 const DEFAULT_REASONS: Partial<Record<ControlId, string>> = { retry_all: RETRY_ALL_FEWER, relaunch: RELAUNCH_NONE, note: NOTE_NONE }
 
@@ -907,7 +907,7 @@ runControlsStates.recovery = controlsExample('rs-recovery', 'not_running', {
 }, [], { relaunch: '$PY -m workflow relaunch "$RUN" <lane> --by operator' })
 // 1.2.0: a supervised run whose ui lane is working (a pane, no question): the note to its lead is offered while the supervisor runs.
 runControlsStates.steering = controlsExample('rs-steering', 'running', {
-  pause: [], note: [choice('lane', ['ui']), { name: 'text', kind: 'text', min_length: 1, max_length: 2000, required: true }],
+  pause: [], note: [choice('lane', ['ui']), { name: 'text', kind: 'text', min_length: 1, max_length: 4000, required: true }],
 }, {
   restart: SUPERVISOR_RUNNING, retry: SUPERVISOR_RUNNING, reconcile: SUPERVISOR_RUNNING, resume: SUPERVISOR_RUNNING, accept_challenge: SUPERVISOR_RUNNING,
   release_hold: SUPERVISOR_RUNNING, answer: NO_QUESTION, approve: 'The run is not waiting for your approval', repair_session: SUPERVISOR_RUNNING, abandon: SUPERVISOR_RUNNING, clean: SUPERVISOR_RUNNING,

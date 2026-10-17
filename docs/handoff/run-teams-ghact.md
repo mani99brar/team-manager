@@ -23,7 +23,7 @@
    - `server/controlsRunner.ts` change: `redactLine` now also cuts `scheme://user:secret@` credentials, which applies to every control's output.
 3. **The note control** (steering) is the 15th control. `CONTROLS_VERSION` goes from 1.1.0 to 1.2.0 and `note` is appended last.
    - argv: `-m workflow note <run> <lane> --by operator -- <text>`. `--` keeps a text such as `--help` as data; `note`'s argparse takes the text positionally.
-   - The text is 1-2000 characters. The effect and not_effect texts are the ones the brief gives.
+   - The text is 1-4000 characters (raised from 2000 by the review fixes). The effect and not_effect texts are the ones the brief gives.
    - Offer: lanes with a receipt and no stop, handoff or completion file; not frozen (no `snapshots.json`, no closed `sidecar.ledger.json`); no waiting question; not abandoned or accepted; and a Herdr pane, as for Answer.
    - Reasons, in order: "The run was abandoned", "The run was accepted by the operator", "The workers are frozen: a note reaches a lead only before freeze", "No lane's worker is launched and still working", "Every working lane waits on a question; answer it instead", NOTE_PANE_REASON.
    - The control does not wait for the supervisor to stop.

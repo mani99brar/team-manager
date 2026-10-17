@@ -448,7 +448,7 @@ const paramsOf = (id: ControlId, fixture: Fixture): Control['params'] => {
   switch (id) {
     case 'retry': return [{ name: 'lane', kind: 'choice', choices: [...lanesOf(fixture)], required: true }, { name: 'phase', kind: 'choice', choices: fixture.kind === 'retryAll' ? ['worker'] : ['worker', 'candidate'], required: true }]
     case 'relaunch': return [{ name: 'lane', kind: 'choice', choices: fixture.kind === 'relaunch' ? ['ui'] : [], required: true }]
-    case 'note': return [{ name: 'lane', kind: 'choice', choices: [], required: true }, { name: 'text', kind: 'text', min_length: 1, max_length: 2000, required: true }]
+    case 'note': return [{ name: 'lane', kind: 'choice', choices: [], required: true }, { name: 'text', kind: 'text', min_length: 1, max_length: 4000, required: true }]
     case 'answer': return [{ name: 'lane', kind: 'choice', choices: ['ui'], required: true }, { name: 'text', kind: 'text', min_length: 1, max_length: 4000, required: true }]
     case 'accept_challenge': return [{ name: 'reason', kind: 'text', min_length: 10, max_length: 500, required: true }]
     case 'release_hold': return [{ name: 'drop', kind: 'multi', choices: [1, 2], required: false }]
