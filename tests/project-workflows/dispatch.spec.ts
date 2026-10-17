@@ -521,6 +521,17 @@ test(`[scenario:dispatch-git-truth] The worktree shares its clone; the primary c
   await attach(page, testInfo, 'dispatch-git-truth')
 })
 
+test(`[scenario:project-github-column-copy] The project's GitHub column says the workflow never pushes on its own and that pushing and pull requests are the operator's explicit, paired actions (docs/PRD_RUN_TEAMS.md 11 P1 item 13) (${phase})`, async ({ page }, testInfo) => {
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await gotoProjectOpen(page, projectUrl(DISPATCH_WIDGETS))
+  await expect(page.getByTestId('dispatch-ahead-naming')).toContainText('The workflow never pushes on its own; pushing is the operator\'s explicit, paired action.')
+  await expect(page.getByTestId('dispatch-gh-prs-note')).toContainText('the workflow never pushes or opens a pull request on its own; pushing and pull requests are the operator\'s explicit, paired actions.')
+  await expect(page.getByTestId('dispatch-project')).not.toContainText('Runs never push')
+  await expect(page.getByTestId('dispatch-project')).not.toContainText('never open a pull request')
+  await page.getByTestId('dispatch-gh-prs-note').scrollIntoViewIfNeeded()
+  await attach(page, testInfo, 'project-github-column-copy')
+})
+
 test(`[scenario:dispatch-phone] At 390 px the rail is a chip row, cards stack, the GitHub column stacks, the pane fills the screen, and every target is at least 44 px (${phase})`, async ({ page }, testInfo) => {
   test.slow() // the features are opened on every project page it reads
   await page.setViewportSize({ width: 390, height: 844 })

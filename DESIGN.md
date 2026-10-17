@@ -262,6 +262,10 @@ Cards and the open-page button are 10 px; the dock and the legend 12 px; the she
 
 **The Dash-For-Executor Rule.** A card's outline says who executes the step: solid for an agent session, dashed for the trusted verifier, dotted (2 px) for the controller. Colour says the state. Neither carries the other's meaning.
 
+**The team deck.** A worker that ran an agent team keeps the solid outline (its lead is an agent session) and adds a stacked deck behind the card: a copy of its shape offset 4 px right and 4 px down, Sheet fill, 1.5 px Rule border, the same 10 px radius, under the float shadow. No colour joins the outline, and the word `team` on the card's second row repeats it. A single-session worker keeps the plain card (`docs/PRD_RUN_TEAMS.md` 8).
+
+**The GitHub view.** A list page under the run's identity line: an answer banner on the Now-banner pattern (the situation's soft fill, glyph and one sentence, a freshness line, one next action), then Sheet cards with a 1 px rule and no shadow: Pull request, Branch (with every commit a push would publish, author in full), Connection (an untoned visibility chip: a fact, not a state), Publish on GitHub, Share with teammates and Commands to run by hand. GitHub's state is said once per page, in the switcher's suffix and the banner. A publishing dialog's visibility block is a Sheet with the 5 px warn band for a public or unknown repository and none for a private one (`docs/PRD_RUN_TEAMS.md` 4).
+
 **The Band Rule.** A container shows its state as the 5 px band on its top edge and the pill beside its title; only pills, the Now banner and finding lines fill with a soft tone.
 
 ## Components
@@ -314,4 +318,4 @@ The home, project, feature and node pages keep the Calm components (run rows wit
 - **Don't** add sections, tables or lists under the stage beyond the Sessions table; the stage is the page.
 - **Don't** tint the ground, a card or a panel for grouping or emphasis.
 - **Don't** add a web-font request, a third face or an icon font; glyphs are the drawn symbols of `Glyph.tsx`.
-- **Don't** put a control on any page that acts on a run.
+- **Don't** put a control on any page that acts on a run, outside the paired run controls. The workflow never pushes on its own; pushing and pull requests are the operator's explicit, paired actions, each behind a dialog that shows what becomes public.

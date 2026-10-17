@@ -31,7 +31,8 @@ The viewer renders only what the workflow's own records contain (`run-state.json
 
 ## Capabilities and Constraints
 
-- Read-only by design: no control on any page acts on a run; specs assert it (`expectNoExecutionControls`).
+- Read-only by design: no control on any page acts on a run; specs assert it (`expectNoExecutionControls`). The paired run controls (`docs/PRD_RUN_CONTROLS.md`) and the GitHub actions (`docs/PRD_RUN_TEAMS.md` 4.4) are the exceptions, and appear only to a paired browser.
+- The run page has four views: Run, Team (the agent teams a worker's Claude session runs with the Workflow tool: workflows, phases, agents, read from the records), GitHub (the run branch against GitHub, its pull request, checks and reviewers, Copy run summary and the commands to run by hand) and Assignment (`docs/PRD_RUN_TEAMS.md`).
 - Export contract versions are additive (1.0.0 to 1.9.0 today, 1.10.0 with viewer-refine); every older run must render unchanged. Missing evidence renders as "not recorded", never guessed.
 - Terminology, fixed by the controller: run, feature, lane (a worker's scope, with owned paths), attempt, candidate, verify, review, reviewer, sidecar, attack pass, panel, challenge, repair, round, delta, attention (question, pane, approval, paused, failed, interrupted), handoff, integrate.
 - Single column at 390 px with 16 px gutters and no horizontal page scroll; 44 px tap targets; tables scroll inside their container; light and dark themes (`prefers-color-scheme`) both required.
@@ -58,7 +59,7 @@ The viewer renders only what the workflow's own records contain (`run-state.json
 2. Only recorded truth: nothing is shown that the run's records do not contain; absence is said in words.
 3. Colour means state, and only state; structure comes from sections and weight, not from decoration.
 4. One mechanism everywhere: the same state palette, glyphs and words on the home, the graph, the steps, the nodes and the findings.
-5. Read-only, always: the viewer informs; the terminal acts.
+5. The viewer informs; the terminal acts. The workflow never pushes on its own; pushing and pull requests are the operator's explicit, paired actions, taken from the run page only when run controls are on, the browser is paired and the server opts in (`MD_MANAGER_GITHUB_ACTIONS=on`), each after a confirmation that shows what becomes public.
 
 ## Accessibility & Inclusion
 
