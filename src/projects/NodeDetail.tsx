@@ -20,6 +20,10 @@ import { sidecarSectionEntries } from './node/sidecar.ts'
 import { SidecarHeadline, SidecarSections } from './node/SidecarSections.tsx'
 import { CandidateLanes, VerifiedEvidence, WorkerReportLink, type LaneEntry } from './node/VerifySections.tsx'
 import { WorkerSections } from './node/WorkerSections.tsx'
+import type { Teams } from '../../contracts/projects/teams.ts'
+import type { TeamQuery } from './routes.ts'
+import { teamSectionEntry, teamSessionsOf } from './teams/model.ts'
+import { NodeTeamSection } from './teams/TeamSections.tsx'
 import { NodeHeader } from './NodeHeader.tsx'
 import { AppLink, ErrorPanel, LoadingPanel, StatusBadge } from './panels.tsx'
 import { ProviderPanelBody } from './providerPanel.tsx'
@@ -33,6 +37,9 @@ import { useRunResult, useRunResults } from './useRunData.ts'
 import './node.css'
 
 type DefinitionNode = RunDetail['definition']['nodes'][number]
+const IDLE_TEAMS: Resource<Teams | null> = { status: 'idle' }
+const NO_RETRY = () => undefined
+const NO_TEAM_HREF = () => ''
 type SnapshotNode = RunDetail['snapshot']['nodes'][number]
 
 type Props = {
@@ -58,6 +65,11 @@ type Props = {
   onRetryPanels: () => void
   /** The run's sessions payload (run-sessions), polled by the run page (null once loaded when not recorded). */
   sessions: Resource<Sessions | null>
+  /** The run's teams read, polled by the run page (null once loaded when not served); the Team section reads it, nothing new is fetched. */
+  teams?: Resource<Teams | null>
+  onRetryTeams?: () => void
+  /** The Team view's link with a selection (the section's "Open in Team view ›"). */
+  teamHref?: (query: Partial<TeamQuery>) => string
   /** The run's timeline, once its events loaded: the header's times, attempts and markers. */
   timeline: Timeline | null
   /** The run's situation, once derived: its next step is repeated on the focus node. */
@@ -100,7 +112,7 @@ function WorkerFigures({ worker, files }: { worker: RunInputs['workers'][number]
  * controller's own steps) and History, always last. Empty sections are absent; a result the launch and verify nodes share is said once.
  * An earlier attempt's page shows that attempt's own result under a banner that leads back to the latest.
  */
-export function NodeDetail({ scope, detail, definition, node, attempt, events, onRetryEvents, inputs, onRetryInputs, sidecar, onRetrySidecar, attack, onRetryAttack, panels, onRetryPanels, sessions, timeline, now, clock, refreshToken, onNavigate, highlight, onHighlightApplied, onOpenRequirement, fileFocus, onFileFocusApplied, onOpenFile }: Props) {
+export function NodeDetail({ scope, detail, definition, node, attempt, events, onRetryEvents, inputs, onRetryInputs, sidecar, onRetrySidecar, attack, onRetryAttack, panels, onRetryPanels, sessions, teams = IDLE_TEAMS, onRetryTeams = NO_RETRY, teamHref = NO_TEAM_HREF, timeline, now, clock, refreshToken, onNavigate, highlight, onHighlightApplied, onOpenRequirement, fileFocus, onFileFocusApplied, onOpenFile }: Props) {
   const definitionNodes = detail.definition.nodes
   const snapshotNodes = detail.snapshot.nodes
   // Run-sessions: a projected reviewer/panel/lane-review node, and the session block and night-shift block every node may carry.
@@ -264,9 +276,24 @@ export function NodeDetail({ scope, detail, definition, node, attempt, events, o
     </>
   )
 
+  // The node's agent team (docs/PRD_RUN_TEAMS.md 6): a worker with a team session (its entry carries the agents' count, none for
+  // records `none`); a repair or another step only when its session's records are found or unreadable. The teams are the run
+  // page's resource; a run whose teams were not read or not served shows no Team section.
+  const teamsData = teams.status === 'ready' ? teams.data : null
+  const teamEntry = teamSectionEntry(teamSessionsOf(teamsData, node.node_id), isWorker)
+  const teamBody = teamEntry === null ? null : (
+    <NodeTeamSection
+      teams={teams}
+      onRetry={onRetryTeams}
+      nodeId={node.node_id}
+      shared={{ scope, detail, inputs: inputs.status === 'ready' ? inputs.data : null, sessions: sessionsData, clock, live: detail.summary.status !== 'succeeded' && detail.summary.status !== 'cancelled', nodeHref: nodeId => runPathname(scope.projectId, scope.workflowId, scope.runId, nodeId), onNavigate, teamHref }}
+    />
+  )
+
   // The section index: what the kind lists, only when it lists something, then reuse (only with reuse events) and History.
   const sections: SectionEntry[] = [
-    ...(isWorker ? launchSectionEntries(worker, frozen, resultData) : []),
+    ...(isWorker ? launchSectionEntries(worker, frozen, resultData, teamEntry) : []),
+    ...(!isWorker && teamEntry !== null ? [teamEntry.count === null ? { key: 'team', label: 'Team' } : { key: 'team', label: 'Team', count: teamEntry.count }] : []),
     ...(isCandidate && lanes.length > 0 ? [{ key: 'lanes', label: 'Lanes', count: lanes.length }] : []),
     ...((isVerify || isCandidate) && resultData !== null ? verifiedSections(resultData, { requirements: verifiedWorker !== null }) : []),
     // A review or challenge that recorded nothing keeps only its honesty line, with no chip.
@@ -359,6 +386,7 @@ export function NodeDetail({ scope, detail, definition, node, attempt, events, o
             fileFocus={fileFocus}
             onFileFocusApplied={onFileFocusApplied}
             clock={clock}
+            team={teamBody}
           />
         ) : isChallenge ? (
           <>
@@ -456,6 +484,10 @@ export function NodeDetail({ scope, detail, definition, node, attempt, events, o
             ))}
           </>
         )
+      )}
+
+      {evidence && !isWorker && teamBody !== null && (
+        <NodeSection sectionKey="team" title="Team" testId="team-section">{teamBody}</NodeSection>
       )}
 
       {sessionsData && !isProjectedSession && sessionsForNode(sessionsData, node.node_id).length > 0 && (

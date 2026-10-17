@@ -40,6 +40,7 @@ import { uxCritique } from './ux-critique.ts'
 import { uxControls } from './controls.ts'
 import { uxSessions } from './sessions.ts'
 import { uxRunViews } from './run-views.ts'
+import { uxTeams } from './ux-teams.ts'
 
 /** A module's worker-phase payloads, keyed like the maps of `fixtures.ts`; run lists are derived from `runDetails`. */
 export type UxPayloads = {
@@ -110,7 +111,7 @@ export type UxFixtureModule = {
 }
 
 /** In slice order; the order the added workflows are listed in, in both phases. */
-export const UX_FIXTURE_MODULES: readonly UxFixtureModule[] = [uxTime, uxRun, uxNode, uxVerify, uxLaunch, uxReview, uxLists, uxSidecar, uxRevampLists, uxRevampPages, uxAttack, uxPanel, uxRefine, uxCritique, uxAccepted, uxControls, uxSessions, uxJudged, uxRunViews]
+export const UX_FIXTURE_MODULES: readonly UxFixtureModule[] = [uxTime, uxRun, uxNode, uxVerify, uxLaunch, uxReview, uxLists, uxSidecar, uxRevampLists, uxRevampPages, uxAttack, uxPanel, uxRefine, uxCritique, uxAccepted, uxControls, uxSessions, uxJudged, uxRunViews, uxTeams]
 
 function mergePayloads(modules: readonly UxFixtureModule[]) {
   for (const { payloads = {} } of modules) {

@@ -139,12 +139,14 @@ export function launchFilesCount(frozen: WorkerResult | null, latest: WorkerResu
 }
 
 /** The index entries of a launch node's sections, in page order; empty ones are absent. */
-export function launchSectionEntries(worker: RunInputWorker | null, frozen: WorkerResult | null, result: WorkerResult | null): SectionEntry[] {
+export function launchSectionEntries(worker: RunInputWorker | null, frozen: WorkerResult | null, result: WorkerResult | null, team: { count: number | null } | null = null): SectionEntry[] {
   const files = result === null ? 0 : launchFilesCount(frozen, result)
   return [
     ...(waitingQuestions(worker) > 0 ? [{ key: 'questions', label: 'Questions', count: worker!.questions.length }] : []),
     ...(worker !== null || result !== null ? [{ key: 'report', label: 'Report' }] : []),
     ...(files > 0 ? [{ key: 'files', label: 'Files', count: files }] : []),
+    // The worker's agent team (docs/PRD_RUN_TEAMS.md 6), after Files and before Task: its agents' count, none for a records-`none` worker.
+    ...(team !== null ? [team.count === null ? { key: 'team', label: 'Team' } : { key: 'team', label: 'Team', count: team.count }] : []),
     ...(worker !== null ? [{ key: 'task', label: 'Task' }, { key: 'session', label: 'Session' }] : []),
   ]
 }

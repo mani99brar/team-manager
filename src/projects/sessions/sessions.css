@@ -107,3 +107,7 @@
   .ss-facts { grid-template-columns: 1fr; gap: 0; }
   .ss-facts dt { margin-top: 6px; font-size: var(--type-floor); }
 }
+
+/* A session's agent team after its model (docs/PRD_RUN_TEAMS.md 5): Pencil words and a Team › link with a 44 px target. */
+.ss-team-link { display: inline-flex; align-items: center; min-height: 44px; padding: 0 4px; color: var(--accent); font-weight: 600; text-underline-offset: 3px; white-space: nowrap; }
+.ss-team-link:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }

@@ -7,7 +7,7 @@
  */
 import { test, expect, type Locator, type Page } from '@playwright/test'
 import { RUN_VIEWS_RUN } from './fixtures/run-views.ts'
-import { attach, expectNoExecutionControls, installHooks, nodeDetail, phase, runUrl, runViewLink } from './support.ts'
+import { attach, EXECUTION_WORDS, executionControlCount, installHooks, nodeDetail, phase, runUrl, runViewLink } from './support.ts'
 
 installHooks()
 
@@ -112,7 +112,12 @@ test(`[scenario:run-views-switcher] Four view links on the run, Team, GitHub and
   await expectLinks(header, 'team')
   await expect(page).toHaveURL(new RegExp(`${escape(runPage)}/team\\?session=worker%3Aui&agent=2$`))
   await expectNoDanglingReferences(page)
-  await expectNoExecutionControls(page)
+  // The Team view's phase segments say "not started" (docs/PRD_RUN_TEAMS.md 3.4) and its agent buttons carry agent data (a
+  // tool name such as Edit): buttons that only select an agent, a phase or a workflow (`data-team-select`) are left out of the
+  // wording check, as the stage's step cards are.
+  await expect.poll(() => executionControlCount(page.getByTestId('projects-workspace')
+    .locator('button:not([data-graph-node]):not([data-go]):not([data-testid="live-dock-bar"]):not([data-team-select]), input, select, textarea, [role="menuitem"]')
+    .filter({ hasText: EXECUTION_WORDS }))).toBe(0)
 
   // A node page's run bar carries the same four links, plain: no suffix, none the current page.
   await page.goto(runUrl(RUN_VIEWS_RUN, 'launch_ui'))

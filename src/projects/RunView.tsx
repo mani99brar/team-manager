@@ -11,13 +11,14 @@ import { isProjectedSessionNode, stageCardOf } from './sessions/model.ts'
 import { AttackPassBody } from './node/AttackSections.tsx'
 import { AppLink, ErrorPanel } from './panels.tsx'
 import { ProviderPanelBody } from './providerPanel.tsx'
-import { EMPTY_TEAM_QUERY, runPathname, type RunTab, type TeamQuery, type TeamQueryMode } from './routes.ts'
+import { EMPTY_TEAM_QUERY, runPathname, teamHref as teamViewHref, type RunTab, type TeamQuery, type TeamQueryMode } from './routes.ts'
 import { RunBar } from './RunHeader.tsx'
 import { RunViews } from './RunViews.tsx'
 import { GithubView } from './github/GithubView.tsx'
 import { githubSuffix } from './github/model.ts'
 import { GlyphDefs } from './signal/Glyph.tsx'
-import { teamSuffix } from './teams/model.ts'
+import { sheetShowsTeam, teamSessionsOf, teamSuffix } from './teams/model.ts'
+import { SheetTeamSection } from './teams/TeamSections.tsx'
 import { TeamView } from './teams/TeamView.tsx'
 import { IdentityLine } from './signal/IdentityLine.tsx'
 import { SignalRun } from './signal/SignalRun.tsx'
@@ -204,6 +205,8 @@ export function RunView({ scope, detail, current, selectedNodeId, selectedAttemp
 
   const runHref = runPathname(scope.projectId, scope.workflowId, scope.runId)
   const nodeHref = useCallback((nodeId: string) => runPathname(scope.projectId, scope.workflowId, scope.runId, nodeId), [scope])
+  // The Team view's link with a selection ("Open in Team view ›", the dock's Working now row, the Sessions table's Team ›).
+  const teamHref = useCallback((query: Partial<TeamQuery>) => teamViewHref(scope.projectId, scope.workflowId, scope.runId, query), [scope])
   const nodeLabel = useCallback((nodeId: string) => detail.definition.nodes.find(node => node.node_id === nodeId)?.label ?? nodeId, [detail.definition.nodes])
   const openRequirement = useCallback((nodeId: string, quote: string) => {
     setPendingHighlight({ nodeId, quote })
@@ -270,6 +273,16 @@ export function RunView({ scope, detail, current, selectedNodeId, selectedAttemp
   const sheetExtras = (nodeId: string): ReactNode => {
     const node = definition.nodes.find(candidate => candidate.node_id === nodeId)
     if (!node) return null
+    // The step's agent team (docs/PRD_RUN_TEAMS.md 5), before Events: a worker with a team session, another step only when its
+    // session's records are found or unreadable; nothing at all when the teams were not read.
+    const teamSessions = teamSessionsOf(teamsData, nodeId)
+    const team = teamsData !== null && sheetShowsTeam(teamSessions, node.kind === 'worker')
+      ? <SheetTeamSection teams={teamsData} sessionsOfNode={teamSessions} shared={{ scope, detail, inputs: inputsData, sessions: sessionsData, clock, live, nodeHref, onNavigate, teamHref }} />
+      : null
+    const extra = runRecordExtras(node, nodeId)
+    return team === null ? extra : <>{team}{extra}</>
+  }
+  const runRecordExtras = (node: (typeof definition.nodes)[number], nodeId: string): ReactNode => {
     if (hasAttack && isAttackNode(node)) {
       return (
         <section className="sb-sheet-record" data-testid="attack-section" aria-labelledby="run-attack-title">
@@ -319,11 +332,13 @@ export function RunView({ scope, detail, current, selectedNodeId, selectedAttemp
             nodeHref={nodeHref}
             onNavigate={onNavigate}
             sheetExtras={sheetExtras}
+            teams={teamsData}
+            teamHref={teamHref}
           />
           {sessionsData && (
             <>
               <NightShiftCount sessions={sessionsData} nodeHref={nodeHref} nodeLabel={nodeLabel} onNavigate={onNavigate} />
-              <SessionsSection sessions={sessionsData} nodeHref={nodeHref} onNavigate={onNavigate} />
+              <SessionsSection sessions={sessionsData} nodeHref={nodeHref} onNavigate={onNavigate} teams={teamsData} teamHref={teamHref} />
             </>
           )}
         </div>
@@ -428,6 +443,9 @@ export function RunView({ scope, detail, current, selectedNodeId, selectedAttemp
                     panels={panels}
                     onRetryPanels={reloadPanels}
                     sessions={sessions}
+                    teams={teams}
+                    onRetryTeams={reloadTeams}
+                    teamHref={teamHref}
                     refreshToken={refreshToken}
                     onNavigate={onNavigate}
                     highlight={highlight}

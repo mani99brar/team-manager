@@ -116,7 +116,10 @@ export function NodeTeamSection({ teams, onRetry, nodeId, shared }: { teams: Res
     <TeamContext.Provider value={context}>
       <div className="team-node team-tones" data-testid="team-node-body">
         <LaneBody sessions={sessions} attention onOpen={open} />
-        <LeadCommands sessions={sessions} />
+        <div className="team-sheet-links">
+          {sessions[0]?.role === 'worker' && sessions[0].lane !== null && <NoteButton scope={shared.scope} lane={sessions[0].lane} />}
+          <LeadCommands sessions={sessions} />
+        </div>
         {sessions[0] && <AppLink href={shared.teamHref({ session: sessions[0].key })} onNavigate={shared.onNavigate} className="team-link" data-testid="node-team-link">Open in Team view ›</AppLink>}
         <DrawerHost opener={opener} />
       </div>

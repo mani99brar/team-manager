@@ -21,6 +21,9 @@ import { injectSessionNodes } from '../project-workflows/sessionProjection.ts'
 import { dockReserve, DOCK_COLUMN_FRAME, DOCK_RESERVE, elbow, fitView, GAP_ALONG, layoutStage, NODE_HEIGHT, NODE_WIDTH, orderColumns, stepFrom, type StageInput, type View } from '../../src/projects/signal/layout.ts'
 import { dockWords, type DockWordsInput } from '../../src/projects/signal/dockWords.ts'
 import { factsOf, laneOf, latestEvents, nowNodeId, stageNodes, wordOf, type StageNode } from '../../src/projects/signal/model.ts'
+import { stageExecutor } from '../../src/projects/signal/executor.ts'
+import type { Teams } from '../../contracts/projects/teams.ts'
+import { teamAgent, teamSession, teamsPayload, teamWorkflow } from '../project-workflows/fixtures/ux-teams.ts'
 
 function loadRun(name: string): RunData {
   const raw = JSON.parse(readFileSync(new URL(`fixtures/runs/${name}.json`, import.meta.url), 'utf8')) as {
@@ -454,5 +457,40 @@ describe('the projected reviewer cards of a judged review (features/review-panel
     const general = nodesOf(false).find(node => node.id === 'reviewer-general')!
     assert.deepEqual([general.tone, general.word, general.openFindings], ['fail', 'blocked', 2])
     assert.match(general.did ?? '', /^Round 2: blocked, 2 open P0\/P1\.$/)
+  })
+})
+
+describe('agent teams on the stage (docs/PRD_RUN_TEAMS.md 5)', () => {
+  const withTeams = (run: RunData, teams: Teams | null) => {
+    const timeline = buildTimeline(run)
+    const attention = deriveAttention(run)
+    const rows = stepRows(run.detail, timeline, { now: NOW, attention })
+    return stageNodes({ detail: run.detail, rows, timeline, events: run.events, inputs: run.inputs ?? null, review: run.review ?? null, attention, reviewRound: null, teams }, formatSpan)
+  }
+  const run = loadRun('skeleton-001')
+  const sessionOf = (nodeId: string, records: 'none' | 'found') => {
+    const node = run.detail.snapshot.nodes.find(entry => entry.node_id === nodeId)!
+    const lane = nodeId.replace(/^launch_/, '')
+    const workflows = records === 'found' ? [teamWorkflow({ run_id: 'wf_s1', status: 'running', phaseTitles: ['Build'], agents: [teamAgent(1, { label: 'impl:a', state: 'running', phase: 'Build', phase_index: 1, last_tool: 'Bash', last_tool_summary: 'npm test', files_edited: ['outside/x.ts'] }), teamAgent(2, { label: 'impl:b', state: 'failed', phase: 'Build', phase_index: 1 })] })] : []
+    return teamSession({ key: `worker:${lane}`, role: 'worker', label: `Worker · ${lane}`, node_id: node.node_id, lane, session_id: 's-1', workflows })
+  }
+  const workers = run.detail.snapshot.nodes.filter(node => node.kind === 'worker' && node.node_id.startsWith('launch_'))
+
+  test('a run whose sessions all have records none renders exactly as one without teams (run 002\'s shape)', () => {
+    const none = teamsPayload(run.detail.summary.run_id, workers.map(node => sessionOf(node.node_id, 'none')))
+    assert.deepEqual(withTeams(run, none), withTeams(run, null))
+    assert.ok(withTeams(run, null).every(node => node.team === null))
+  })
+
+  test('a step with a team gains its facts and the team executor word; the others stay as they were', () => {
+    const [first, ...rest] = workers
+    const teams = teamsPayload(run.detail.summary.run_id, [sessionOf(first!.node_id, 'found'), ...rest.map(node => sessionOf(node.node_id, 'none'))])
+    const before = withTeams(run, null)
+    const after = withTeams(run, teams)
+    const card = after.find(node => node.id === first!.node_id)!
+    assert.deepEqual(card.team && { ...card.team }, { workflows: 1, agents: 2, running: 1, failed: 1, outside: card.team!.outside, agentLine: 'Build · impl:a · Bash: npm test' })
+    assert.equal(stageExecutor(card).word, 'team')
+    assert.equal(card.tone, before.find(node => node.id === first!.node_id)!.tone, 'the team never changes the step\'s tone')
+    assert.deepEqual(after.filter(node => node.id !== first!.node_id), before.filter(node => node.id !== first!.node_id))
   })
 })

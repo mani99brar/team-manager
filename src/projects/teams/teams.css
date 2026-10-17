@@ -14,7 +14,7 @@
 .team-tones .tone-idle, .team-tones.tone-idle { --t: var(--idle); --ts: var(--idle-soft); }
 
 /* ---- The view ---- */
-.team-view { box-sizing: border-box; max-width: 1180px; margin: 0 auto; padding: 16px; display: grid; gap: 16px; min-width: 0; font-size: var(--type-floor); }
+.team-view { box-sizing: border-box; max-width: 1180px; margin: 0 auto; padding: 16px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; min-width: 0; font-size: var(--type-floor); }
 .team-view > * { min-width: 0; }
 .team-head { display: grid; gap: 4px; }
 .team-head-line { margin: 0; font-size: 15px; font-weight: 600; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
@@ -57,11 +57,11 @@
 .team-tones button:focus-visible, .team-tones a:focus-visible, .team-tones summary:focus-visible, .team-tones input:focus-visible, .team-tones select:focus-visible, .team-row-link:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 
 /* ---- Working now (3.6) ---- */
-.team-working { padding: 12px 14px; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; display: grid; gap: 8px; min-width: 0; }
+.team-working { padding: 12px 14px; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; min-width: 0; }
 .team-working-title { margin: 0; display: flex; align-items: center; gap: 8px; font-size: 15.5px; }
 .team-working-title .team-glyph { color: var(--run); width: 16px; height: 16px; }
 .team-working-idle { margin: 0; padding: 12px 14px; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; color: var(--muted); }
-.team-working-rows { list-style: none; margin: 0; padding: 0; display: grid; }
+.team-working-rows { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: minmax(0, 1fr); min-width: 0; }
 .team-working-rows li + li { border-top: 1px solid var(--border); }
 .team-working-row { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; width: 100%; min-height: 44px; padding: 6px 4px; box-sizing: border-box; border: 0; background: none; font: inherit; font-size: var(--type-floor); color: var(--fg); text-align: left; cursor: pointer; }
 .team-working-row:hover { background: var(--surface-2); }
@@ -70,7 +70,7 @@
 .team-fold { justify-content: flex-start; width: 100%; }
 
 /* ---- Lane panels (3.2) ---- */
-.team-lane { position: relative; overflow: hidden; padding: 14px 16px 16px; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; display: grid; gap: 10px; min-width: 0; }
+.team-lane { position: relative; overflow: hidden; padding: 14px 16px 16px; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; min-width: 0; }
 .team-band { position: absolute; left: 0; right: 0; top: 0; height: 5px; background: var(--t, var(--idle)); }
 .team-lane-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px; margin-top: 2px; }
 .team-lane-title { margin: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; min-height: 44px; font-size: 15.5px; }
@@ -78,8 +78,8 @@
 .team-lane-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .team-attention { margin: 0; display: flex; align-items: flex-start; gap: 8px; font-size: var(--type-floor); color: var(--fg); max-width: 90ch; }
 .team-attention .team-glyph { margin-top: 2px; color: var(--t); }
-.team-lane-body { display: grid; gap: 12px; min-width: 0; }
-.team-session { display: grid; gap: 10px; min-width: 0; scroll-margin-top: 16px; }
+.team-lane-body { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; min-width: 0; }
+.team-session { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; min-width: 0; scroll-margin-top: 16px; }
 .team-session-title { margin: 6px 0 0; font-size: var(--type-floor); font-weight: 700; color: var(--muted); }
 .team-session-empty { margin: 0; color: var(--muted); max-width: 70ch; }
 
@@ -94,7 +94,7 @@
 .team-command { flex-basis: 100%; padding: 8px 10px; font-family: var(--font-mono); font-size: var(--type-floor); background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px; overflow-wrap: anywhere; user-select: all; }
 
 /* ---- Workflow cards (3.3) ---- */
-.team-workflow { position: relative; overflow: hidden; padding: 12px 14px 12px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; display: grid; gap: 8px; min-width: 0; }
+.team-workflow { position: relative; overflow: hidden; padding: 12px 14px 12px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; min-width: 0; }
 .team-wf-head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin-top: 2px; }
 .team-wf-title { margin: 0; font-size: 15.5px; min-width: 0; }
 .team-wf-toggle { display: inline-flex; align-items: center; gap: 6px; min-height: 44px; padding: 0; border: 0; background: none; font: inherit; font-weight: 700; color: var(--fg); cursor: pointer; text-align: left; overflow-wrap: anywhere; }
@@ -102,7 +102,7 @@
 .team-chev { width: 16px; height: 16px; flex: none; color: var(--muted); }
 .team-chev.open { transform: rotate(90deg); }
 .team-source { color: var(--muted); font-size: var(--type-floor); }
-.team-wf-body { display: grid; gap: 8px; min-width: 0; }
+.team-wf-body { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; min-width: 0; }
 .team-wf-body[hidden] { display: none; }
 .team-desc { margin: 0; max-width: 70ch; }
 .team-desc.clamped { display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
@@ -123,7 +123,7 @@
 .team-phase:hover { border-color: var(--accent); }
 
 /* ---- Roster (3.5) ---- */
-.team-roster-wrap { display: grid; gap: 8px; min-width: 0; }
+.team-roster-wrap { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; min-width: 0; }
 .team-filters { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
 .team-radios { display: flex; flex-wrap: wrap; gap: 6px; }
 .team-radio { min-height: 44px; padding: 0 12px; font: inherit; font-size: var(--type-floor); font-weight: 600; color: var(--fg); background: var(--surface); border: 1px solid var(--border-strong); border-radius: 999px; cursor: pointer; font-variant-numeric: tabular-nums; }
@@ -151,9 +151,9 @@
 .team-group-head .team-chev { margin-left: auto; }
 .team-show + .team-chev { margin-left: 0; }
 .team-more-row td { height: auto; border-bottom: 0; }
-.team-cards-wrap { display: grid; gap: 8px; }
+.team-cards-wrap { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; }
 .team-phase-group { min-width: 0; }
-.team-cards { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.team-cards { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; }
 .team-cards:empty { display: none; }
 .team-card { display: grid; gap: 4px; width: 100%; min-height: 44px; padding: 8px 10px; box-sizing: border-box; text-align: left; font: inherit; font-size: 14px; color: var(--fg); background: var(--surface); border: 1px solid var(--border); border-radius: 8px; cursor: pointer; }
 .team-card-line { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 8px; min-width: 0; }
@@ -168,18 +168,18 @@
 .team-drawer-sub { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; color: var(--muted); }
 .team-close { width: 44px; height: 44px; display: grid; place-items: center; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-2); color: var(--fg); cursor: pointer; }
 .team-close svg { width: 18px; height: 18px; }
-.team-drawer-body { flex: 1; overflow-y: auto; padding: 12px 16px; display: grid; align-content: start; gap: 14px; }
+.team-drawer-body { flex: 1; overflow-y: auto; padding: 12px 16px; display: grid; grid-template-columns: minmax(0, 1fr); align-content: start; gap: 14px; }
 .team-tiles { margin: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
 .team-tile { padding: 6px 8px; background: var(--surface-2); border-radius: 8px; min-width: 0; }
 .team-tile dt { color: var(--muted); font-size: 11px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; }
 .team-tile dd { margin: 2px 0 0; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
-.team-drawer-sec { display: grid; gap: 4px; min-width: 0; }
+.team-drawer-sec { display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; min-width: 0; }
 .team-drawer-sec h4 { margin: 0; font-size: var(--type-floor); font-weight: 700; }
 .team-files { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
 .team-drawer-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px 16px calc(10px + env(safe-area-inset-bottom, 0px)); border-top: 1px solid var(--border); }
 
 /* ---- The step sheet's Team section and the node page's (5, 6) ---- */
-.team-sheet { display: grid; gap: 8px; }
+.team-sheet { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; }
 .team-sheet-workflows { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
 .team-sheet-workflows li { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
 .team-sheet-phases { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; padding: 0; list-style: none; }
@@ -187,7 +187,7 @@
 .team-sheet-phases li .team-glyph { color: var(--t); }
 .team-sheet-agents { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; color: var(--muted); }
 .team-sheet-links { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
-.team-node { display: grid; gap: 12px; min-width: 0; }
+.team-node { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; min-width: 0; }
 
 /* ---- Phones (3.1): one column, lane heads stacked with full-width buttons, the strip a list, the drawer a bottom sheet ---- */
 @media (max-width: 720px) {

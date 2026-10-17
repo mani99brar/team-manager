@@ -19,6 +19,8 @@ import { Glyph } from './Glyph.tsx'
 import { rememberDockOpen } from './dock.ts'
 import { dockWords } from './dockWords.ts'
 import type { LatestEvent, StageNode } from './model.ts'
+import type { DockTeamLine } from '../teams/model.ts'
+import { AppLink } from '../panels.tsx'
 
 type Props = {
   detail: RunDetail
@@ -40,6 +42,10 @@ type Props = {
   onNavigate: (pathname: string) => void
   /** What the run's sessions cost, from the Sessions totals (run-sessions); null when none is recorded or not yet read. */
   spent?: string | null
+  /** The Working now row (docs/PRD_RUN_TEAMS.md 5) and the Team view link it opens; null (no team running or interrupted) leaves the dock as before. */
+  team?: { line: DockTeamLine; href: string } | null
+  /** Spent's tooltip addition while the run has team records; null otherwise. */
+  spentNote?: string | null
 }
 
 /**
@@ -48,7 +54,7 @@ type Props = {
  * command to type next, copied, never run), the latest five moments of the run, how long it ran and its deadlines, and where
  * the state came from. Everything in it links to the step on the stage. Collapsed, only the bar stays.
  */
-export function LiveDock({ detail, now, clock, nodes, nowId, latest, timeline, inputs, open, onOpenChange, onGo, nodeHref, onNavigate, spent = null }: Props) {
+export function LiveDock({ detail, now, clock, nodes, nowId, latest, timeline, inputs, open, onOpenChange, onGo, nodeHref, onNavigate, spent = null, team = null, spentNote = null }: Props) {
   const [, tick] = useState(0)
   // The ages in the dock move every half minute; the clock prop already ticks every second while the run can change.
   useEffect(() => {
@@ -121,6 +127,14 @@ export function LiveDock({ detail, now, clock, nodes, nowId, latest, timeline, i
           </StepControlsContext.Provider>
         </div>
         <ControlsRow scope={scope} clock={clock} />
+        {team && (
+          <div className="lv-sec lv-sec-team">
+            <AppLink href={team.href} onNavigate={onNavigate} className={`lv-team ${toneClass(team.line.kind === 'running' ? 'run' : 'pause')}`} data-testid="live-dock-working-now" data-kind={team.line.kind}>
+              <Glyph tone={team.line.kind === 'running' ? 'run' : 'pause'} size={14} />
+              <span className="lv-team-text">{team.line.text}</span>
+            </AppLink>
+          </div>
+        )}
         <div className="lv-sec">
           <p className="lv-h">Latest events</p>
           {latest.length === 0
@@ -150,7 +164,7 @@ export function LiveDock({ detail, now, clock, nodes, nowId, latest, timeline, i
         <div className="lv-sec">
           <dl className="lv-figs" data-testid="live-dock-figures">
             <div><dt>Ran</dt><dd data-testid="run-span">{ran === null ? <span className="nr">not recorded</span> : formatSpan(ran)}</dd></div>
-            <div><dt>Spent</dt><dd data-testid="run-spent">{spent === null ? <span className="nr" title="No session of this run recorded a cost.">not recorded</span> : <span title="The Sessions totals below: Claude's own figures apart from the subscription-covered estimates.">{spent}</span>}</dd></div>
+            <div><dt>Spent</dt><dd data-testid="run-spent">{spent === null ? <span className="nr" title="No session of this run recorded a cost.">not recorded</span> : <span title={`The Sessions totals below: Claude's own figures apart from the subscription-covered estimates.${spentNote ? ` The figure ${spentNote}.` : ''}`}>{spent}</span>}</dd></div>
             <div><dt>Deadlines</dt><dd>{inputs?.automatic ? deadlinesLabel(inputs.automatic) : <span className="nr">not recorded</span>}</dd></div>
           </dl>
         </div>

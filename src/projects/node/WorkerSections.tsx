@@ -107,6 +107,8 @@ type Props = {
   onFileFocusApplied: () => void
   /** The run page's one clock (`RunView`); a waiting question's age reads it. */
   clock: number
+  /** The worker's Team section body (docs/PRD_RUN_TEAMS.md 6), rendered after Files and before Task; null without team sessions. */
+  team?: ReactNode
 }
 
 /**
@@ -114,7 +116,7 @@ type Props = {
  * worker's report, said once; the files it froze at handoff as dense rows; the task, and the session behind closed
  * disclosures.
  */
-export function WorkerSections({ scope, renderResult, result, role, checksNode, frozen, frozenCommit, repairNote, repairLabel, answer, inputs, onRetryInputs, worker, reviewNode, refreshToken, onNavigate, highlight, onHighlightApplied, fileFocus, onFileFocusApplied, clock }: Props) {
+export function WorkerSections({ scope, renderResult, result, role, checksNode, frozen, frozenCommit, repairNote, repairLabel, answer, inputs, onRetryInputs, worker, reviewNode, refreshToken, onNavigate, highlight, onHighlightApplied, fileFocus, onFileFocusApplied, clock, team = null }: Props) {
   const recordedInputs = inputs.status === 'ready' ? inputs.data : null
   const files = result.status === 'ready' ? launchFilesCount(frozen, result.data) : 0
   const lane = worker?.node_id ?? null
@@ -160,6 +162,10 @@ export function WorkerSections({ scope, renderResult, result, role, checksNode, 
             onFocusApplied={onFileFocusApplied}
           />
         </NodeSection>
+      )}
+
+      {team !== null && (
+        <NodeSection sectionKey="team" title="Team" testId="team-section">{team}</NodeSection>
       )}
 
       {worker !== null && (

@@ -6,6 +6,9 @@
  */
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import type { LaneReview, NightShiftDecision, SessionRow, Sessions } from '../api.ts'
+import type { Teams } from '../../../contracts/projects/teams.ts'
+import type { TeamQuery } from '../routes.ts'
+import { sessionTeamFacts } from '../teams/model.ts'
 import { AppLink } from '../panels.tsx'
 import { Time } from '../Time.tsx'
 import {
@@ -228,7 +231,7 @@ export function NightShiftCount({ sessions, nodeHref, nodeLabel, onNavigate }: {
 }
 
 /** One session's line of the Sessions table: the facts in columns, and for a Claude Code session Copy and a toggle for the full command. */
-function SessionTableRow({ row, nodeHref, onNavigate }: { row: SessionRow; nodeHref: (nodeId: string) => string; onNavigate: (pathname: string) => void }) {
+function SessionTableRow({ row, nodeHref, onNavigate, teams, teamHref }: { row: SessionRow; nodeHref: (nodeId: string) => string; onNavigate: (pathname: string) => void; teams: Teams | null; teamHref?: (query: Partial<TeamQuery>) => string }) {
   const [shown, setShown] = useState(false)
   const [copied, setCopied] = useState<'copied' | 'failed' | null>(null)
   const timer = useRef<number | null>(null)
@@ -247,7 +250,17 @@ function SessionTableRow({ row, nodeHref, onNavigate }: { row: SessionRow; nodeH
     if (timer.current !== null) window.clearTimeout(timer.current)
     timer.current = window.setTimeout(() => setCopied(null), 2500)
   }
-  const model = row.model ? <>{row.model}{row.transport ? <span className="ss-dim"> via {row.transport}</span> : null}</> : row.transport ? <>model not recorded<span className="ss-dim"> via {row.transport}</span></> : 'model not recorded'
+  const plainModel = row.model ? <>{row.model}{row.transport ? <span className="ss-dim"> via {row.transport}</span> : null}</> : row.transport ? <>model not recorded<span className="ss-dim"> via {row.transport}</span></> : 'model not recorded'
+  // The session's agent team (docs/PRD_RUN_TEAMS.md 5), after the model in Pencil: "team · {w} workflows · {a} agents" and a
+  // Team › link, or "team records not read"; a session without team records keeps today's cell exactly.
+  const team = sessionTeamFacts(teams, row.key)
+  const model = team === null ? plainModel : (
+    <>
+      {plainModel}
+      <span className="ss-dim ss-team" data-testid="session-team-facts"> · {team.text}</span>
+      {team.kind === 'found' && teamHref && <> <AppLink href={teamHref({ session: row.key })} onNavigate={onNavigate} className="ss-team-link" data-testid="session-team-link" aria-label={`Team of ${row.label} in the Team view`}>Team ›</AppLink></>}
+    </>
+  )
   const cells: [string, string, ReactNode][] = [
     ['model', 'model', model],
     ['status', 'status', row.verdict ? `${row.status} · ${row.verdict}` : row.status],
@@ -286,7 +299,7 @@ function SessionTableRow({ row, nodeHref, onNavigate }: { row: SessionRow; nodeH
 }
 
 /** The run page's Sessions table (PRD 3.4): every session in start order grouped by role, one line each, both totals above it. */
-export function SessionsSection({ sessions, nodeHref, onNavigate }: { sessions: Sessions; nodeHref: (nodeId: string) => string; onNavigate: (pathname: string) => void }) {
+export function SessionsSection({ sessions, nodeHref, onNavigate, teams = null, teamHref }: { sessions: Sessions; nodeHref: (nodeId: string) => string; onNavigate: (pathname: string) => void; teams?: Teams | null; teamHref?: (query: Partial<TeamQuery>) => string }) {
   const groups = groupSessions(sessions)
   if (groups.length === 0) return null
   return (
@@ -300,7 +313,7 @@ export function SessionsSection({ sessions, nodeHref, onNavigate }: { sessions: 
             <li className="ss-head" role="row">
               {['Session', 'Model', 'Status', 'Started', 'Duration', 'Cost', 'Session id', ''].map((title, index) => <span key={index} role="columnheader">{title}</span>)}
             </li>
-            {group.rows.map(row => <SessionTableRow key={row.key} row={row} nodeHref={nodeHref} onNavigate={onNavigate} />)}
+            {group.rows.map(row => <SessionTableRow key={row.key} row={row} nodeHref={nodeHref} onNavigate={onNavigate} teams={teams} teamHref={teamHref} />)}
           </ul>
         </div>
       ))}
