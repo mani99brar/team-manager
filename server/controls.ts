@@ -22,7 +22,7 @@ import {
 } from './controlsRunner.ts'
 import { DIRECTORY_FLAGS, at } from './files.ts'
 import {
-  GITHUB_ACTION_TIMEOUT_MS, GITHUB_EXIT_UNKNOWN, GITHUB_READ_FAILED, GITHUB_READ_MISSING, GITHUB_UNKNOWN_NOTE, GithubRecordStore, githubActionsOf, githubArgv, githubDisplay, githubStateToken, newGithubRecordId, reviewerSuggestions, shownPath,
+  GITHUB_ACTION_TIMEOUT_MS, GITHUB_EXIT_UNKNOWN, GITHUB_READ_FAILED, GITHUB_READ_MISSING, GITHUB_UNKNOWN_NOTE, GithubRecordStore, githubActionsOf, githubArgv, githubDisplay, githubStateToken, hasOpenPr, newGithubRecordId, reviewerSuggestions, shownPath,
   summaryDefaults, urlOf, validateGithubParams, type GithubSource, type StoredGithubRecord,
 } from './githubActions.ts'
 import { ProjectApiError, type LoadedRun, type RunStore } from './projects.ts'
@@ -827,12 +827,11 @@ export async function controlRoutes(scope: FastifyInstance, options: ControlsRou
     if (githubSource?.recentAuthors) {
       try { recent = await githubSource.recentAuthors(key.project) } catch { recent = [] }
     }
-    // The draft PR body says when a lane worked as a team; the team read is only worth its cost while a PR can still be opened.
     // The draft PR body says when a lane worked as a team and states the sessions' metered spend, as Copy run summary does;
-    // both reads are only worth their cost while a PR can still be opened.
+    // both reads are only worth their cost while a PR can still be opened: no OPEN pull request (none, or a CLOSED or MERGED one).
     let teams: Teams | null = null
     let meteredUsd: number | null = null
-    if (githubEnabled && read !== null && read.pr === null) {
+    if (githubEnabled && read !== null && !hasOpenPr(read)) {
       const scope = store.scope(key.project, key.workflow)
       try { teams = await store.teams(scope, key.run) } catch { teams = null }
       try { meteredUsd = (await store.sessions(scope, key.run)).totals.metered_usd } catch { meteredUsd = null }

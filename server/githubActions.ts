@@ -161,6 +161,14 @@ function paramsOf(id: GithubActionId, read: RunGithub | null, suggestions: strin
   }
 }
 
+/**
+ * Whether the run branch has an OPEN pull request. With none (no pull request, or only a CLOSED or MERGED earlier one)
+ * `open_pr` can be offered, so the routes read what its draft body states (teams, metered spend) exactly then.
+ */
+export function hasOpenPr(read: RunGithub | null): boolean {
+  return read?.pr != null && read.pr.state === 'OPEN'
+}
+
 /** Why `id` is unavailable, or null; the order is the one the reasons are told in (off, read, repository, the action's own rule). */
 export function unavailableReason(id: GithubActionId, input: Pick<OfferInput, 'enabled' | 'read' | 'readReason' | 'runStatus'>): string | null {
   if (!input.enabled) return GITHUB_ACTIONS_OFF
@@ -207,7 +215,7 @@ export function unavailableReason(id: GithubActionId, input: Pick<OfferInput, 'e
       return null
     }
     case 'open_pr': {
-      if (pr !== null && pr.state === 'OPEN') return `Pull request #${pr.number} is already open for this branch`
+      if (hasOpenPr(read)) return `Pull request #${pr!.number} is already open for this branch`
       if (branch.github_sha === null) return 'Push the branch first: GitHub does not have the run branch at its head'
       if (branch.github_sha !== local) return `GitHub has the run branch at ${branch.github_sha.slice(0, 12)}, not at its local head ${local.slice(0, 12)}`
       if (branch.push_state !== 'up_to_date') return 'Push the branch first: GitHub does not have the run branch at its head'

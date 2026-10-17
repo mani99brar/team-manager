@@ -479,8 +479,8 @@ export function parseScriptMeta(source: string): ScriptMeta | null {
 // ---- Transcript facts ---------------------------------------------------------------------------------------------
 
 /**
- * What one agent transcript says without its text. `files` are the raw paths, deduplicated, the first `RAW_FILES_KEPT`;
- * `fileCwds[k]` is the absolute `cwd` of the line that first edited `files[k]` (null when the line has none).
+ * What one agent transcript says without its text. `files` are the raw paths, deduplicated, the first `RAW_FILES_KEPT`.
+ * A line's `cwd` is never kept: it is whatever directory the session stood in, not a base files may be made relative to.
  */
 export type TranscriptFacts = {
   first: string | null
@@ -490,7 +490,6 @@ export type TranscriptFacts = {
   lastTool: string | null
   context: number | null
   files: string[]
-  fileCwds: (string | null)[]
   filesTotal: number
   providers: string[]
 }
@@ -531,7 +530,7 @@ type FactsState = {
 
 function newFactsState(): FactsState {
   return {
-    facts: { first: null, last: null, model: null, toolCalls: 0, lastTool: null, context: null, files: [], fileCwds: [], filesTotal: 0, providers: [] },
+    facts: { first: null, last: null, model: null, toolCalls: 0, lastTool: null, context: null, files: [], filesTotal: 0, providers: [] },
     seenFiles: new Set(), seenProviders: new Set(), lastLines: [], usageLines: [],
   }
 }
@@ -548,8 +547,6 @@ function addFactsLine(state: FactsState, line: string) {
   const parsed = record(parseLine(line))
   const message = record(parsed?.message)
   if (parsed?.type !== 'assistant' || !Array.isArray(message?.content)) return
-  // Claude Code records the session's working directory on every line: the last base a file is made relative to.
-  const cwd = typeof parsed.cwd === 'string' && isAbsolute(parsed.cwd) ? parsed.cwd : null
   for (const block of message.content) {
     const tool = record(block)
     const name = tool?.type === 'tool_use' ? text(tool.name) : null
@@ -562,7 +559,7 @@ function addFactsLine(state: FactsState, line: string) {
       if (file !== null && !state.seenFiles.has(file)) {
         state.seenFiles.add(file)
         facts.filesTotal += 1
-        if (facts.files.length < RAW_FILES_KEPT) { facts.files.push(file); facts.fileCwds.push(cwd) }
+        if (facts.files.length < RAW_FILES_KEPT) facts.files.push(file)
       }
     }
     if (name === 'Bash' && typeof input?.command === 'string') {
@@ -575,7 +572,7 @@ function addFactsLine(state: FactsState, line: string) {
 
 /** The facts the state holds so far: the last time from the last line that parses, the context and model from the last usage line. */
 function factsOf(state: FactsState): TranscriptFacts {
-  const facts: TranscriptFacts = { ...state.facts, files: [...state.facts.files], fileCwds: [...state.facts.fileCwds], providers: [...state.facts.providers], last: null, context: null, model: null }
+  const facts: TranscriptFacts = { ...state.facts, files: [...state.facts.files], providers: [...state.facts.providers], last: null, context: null, model: null }
   // The last complete line: a torn (or spliced) last line fails to parse, so the one before it is used.
   for (let k = state.lastLines.length - 1; k >= 0 && facts.last === null; k -= 1) facts.last = timestampOf(state.lastLines[k]!)
   for (let k = state.usageLines.length - 1; k >= 0; k -= 1) {
@@ -726,9 +723,10 @@ export async function readSessionWorktrees(directory: FileHandle, rows: readonly
 }
 
 /**
- * A file an agent edited, relative to the first base that holds it. A path outside every base is never served absolute
- * (PRD "Team reader"): it becomes `<path>/<basename>`, which keeps the `<path>` marker so it is never compared with the
- * owned paths and still tells two outside files apart.
+ * A file an agent edited, relative to the first base that holds it; the bases are only recorded worktrees (the agent's own
+ * `worktreePath`, then the lane's). A path outside every base, and a relative path (its base is unknown), is never served
+ * as a plain path (PRD "Team reader"): it becomes `<path>/<basename>`, which keeps the `<path>` marker so it is never
+ * compared with the owned paths and still tells two outside files apart.
  */
 export function servedFile(path: string, bases: readonly string[]): string {
   if (isAbsolute(path)) {
@@ -738,8 +736,7 @@ export function servedFile(path: string, bases: readonly string[]): string {
     }
     return `<path>/${redactText(basename(path))}`
   }
-  if (path.startsWith('~')) return `<path>/${redactText(basename(path))}`
-  return redactText(path)
+  return `<path>/${redactText(basename(path))}`
 }
 
 // ---- The reader ---------------------------------------------------------------------------------------------------
@@ -993,11 +990,9 @@ export class TeamReader {
   /** Files and providers from an agent's transcript, with the agent's own worktree (isolated) before the session's. */
   private agentFiles(facts: TranscriptFacts | null, bases: readonly string[]): Pick<TeamAgent, 'files_edited' | 'files_edited_more' | 'providers'> {
     if (facts === null) return { files_edited: [], files_edited_more: 0, providers: [] }
-    // The raw paths are already distinct; the line's cwd is the last base, after the agent's and the session's worktree.
-    const served = [...new Set(facts.files.map((file, k) => {
-      const cwd = facts.fileCwds[k] ?? null
-      return servedFile(file, cwd !== null && !bases.includes(cwd) ? [...bases, cwd] : bases)
-    }).filter(file => file.length > 0))]
+    // The raw paths are already distinct. Only the recorded worktrees are bases: a transcript line's cwd never is, so a
+    // file outside them (a scratch copy, the source checkout) keeps its `<path>` marker and is never compared with the owned paths.
+    const served = [...new Set(facts.files.map(file => servedFile(file, bases)).filter(file => file.length > 0))]
     const listed = served.slice(0, MAX_FILES)
     return {
       files_edited: listed,
